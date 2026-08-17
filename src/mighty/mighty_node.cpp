@@ -787,6 +787,8 @@ void MIGHTY_NODE::declareParameters() {
   this->declare_parameter("exploration.manager.preempt_enabled", false);
   this->declare_parameter("exploration.manager.preempt_margin", 2.0);
   this->declare_parameter("exploration.manager.preempt_min_commit_sec", 2.0);
+  this->declare_parameter("exploration.manager.stuck_timeout_sec", 5.0);
+  this->declare_parameter("exploration.manager.stuck_move_thresh_m", 0.15);
   this->declare_parameter("exploration.visited_map.center_x", 0.0);
   this->declare_parameter("exploration.visited_map.center_y", 0.0);
   this->declare_parameter("exploration.visited_map.width_m", 100.0);
@@ -1161,6 +1163,10 @@ void MIGHTY_NODE::setParameters() {
       this->get_parameter("exploration.manager.preempt_margin").as_double();
   par_.expl_preempt_min_commit_sec =
       this->get_parameter("exploration.manager.preempt_min_commit_sec").as_double();
+  par_.expl_stuck_timeout_sec =
+      this->get_parameter("exploration.manager.stuck_timeout_sec").as_double();
+  par_.expl_stuck_move_thresh_m =
+      this->get_parameter("exploration.manager.stuck_move_thresh_m").as_double();
   par_.expl_visited_map_center_x   = this->get_parameter("exploration.visited_map.center_x").as_double();
   par_.expl_visited_map_center_y   = this->get_parameter("exploration.visited_map.center_y").as_double();
   par_.expl_visited_map_width_m    = this->get_parameter("exploration.visited_map.width_m").as_double();
@@ -3450,6 +3456,41 @@ void MIGHTY_NODE::exploreSelectCallback() {
     auto* r = frontier_manager_->find(current_explore_id_);
     if (r && (r->state == FrontierState::ACTIVE ||
               r->state == FrontierState::DORMANT)) {
+      // --- Static stuck watchdog (runs regardless of preemption) -----------
+      // Once the robot has actually moved toward this frontier and then stops
+      // making progress (< stuck_move_thresh_m displacement) for
+      // stuck_timeout_sec, abandon it. This catches the A* partial-path case:
+      // the robot drives to the last reachable waypoint (e.g. the stand-off in
+      // front of a walled-off frontier), parks, and would otherwise sit there
+      // until the much longer pursuit timeout. explore_has_moved_ gates the
+      // clock so pre-motion yaw/plan latency right after commit can't trip it.
+      if (par_.expl_stuck_timeout_sec > 0.0) {
+        const double t_stuck = this->now().seconds();
+        state cur_s;
+        mighty_ptr_->getState(cur_s);
+        const Eigen::Vector2d xy(cur_s.pos.x(), cur_s.pos.y());
+        if ((xy - explore_last_progress_xy_).norm() > par_.expl_stuck_move_thresh_m) {
+          explore_last_progress_xy_ = xy;       // progressed -> reset the clock
+          explore_last_progress_t_  = t_stuck;
+          explore_has_moved_        = true;
+        } else if (explore_has_moved_ &&
+                   t_stuck - explore_last_progress_t_ >= par_.expl_stuck_timeout_sec) {
+          RCLCPP_WARN(this->get_logger(),
+                      "Exploration: frontier %lu stuck (no motion > %.2f m for %.1f s) "
+                      "-> invalidating, re-selecting",
+                      static_cast<unsigned long>(current_explore_id_),
+                      par_.expl_stuck_move_thresh_m, par_.expl_stuck_timeout_sec);
+          frontier_manager_->markInvalidated(current_explore_id_, t_stuck);
+          exploration_active_      = false;
+          explore_last_progress_t_ = -1.0;
+          explore_has_moved_       = false;
+          // fall through to the normal selection path below (picks a new goal now)
+        }
+      }
+
+      // Preemption / hold-goal logic only applies if the watchdog above didn't
+      // just release the pursuit.
+      if (exploration_active_) {
       if (!par_.expl_preempt_enabled) return;
 
       const double t_now = this->now().seconds();
@@ -3497,6 +3538,7 @@ void MIGHTY_NODE::exploreSelectCallback() {
       exploration_active_ = false;
       // Fall through to the normal selection path, which re-picks `best`
       // (same selector, same inputs), publishes it, and arms its timeout.
+      }  // end if (exploration_active_) — preemption/hold guard
     }
     // Otherwise (record gone or already terminal) fall through and pick a new one.
   }
@@ -3632,6 +3674,10 @@ void MIGHTY_NODE::exploreSelectCallback() {
   exploration_active_       = true;
   explore_committed_at_t_   = this->now().seconds();
   unreachable_consec_count_ = 0;
+  // Arm the stuck watchdog fresh for this pursuit.
+  explore_last_progress_xy_ = Eigen::Vector2d(robot_pose.x(), robot_pose.y());
+  explore_last_progress_t_  = this->now().seconds();
+  explore_has_moved_        = false;
   frontier_manager_->markSelected(
       next->id, Eigen::Vector2d(robot_pose.x(), robot_pose.y()),
       this->now().seconds());

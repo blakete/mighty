@@ -302,6 +302,14 @@ class MIGHTY_NODE : public rclcpp::Node {
   uint64_t current_explore_id_     = 0;
   int      unreachable_consec_count_ = 0;
   double   explore_committed_at_t_ = -1.0;  // when current_explore_id_ was issued (preempt min-commit)
+  // Stuck watchdog for the current pursuit: once the robot has actually moved
+  // toward the goal and then stops making progress (e.g. parked at the last A*
+  // waypoint against a walled-off frontier), abandon it after a static timeout.
+  // Reset on every commit. explore_has_moved_ gates the timer so pre-motion
+  // yaw/plan latency at commit can't trip it.
+  Eigen::Vector2d explore_last_progress_xy_ = Eigen::Vector2d::Zero();
+  double   explore_last_progress_t_ = -1.0;
+  bool     explore_has_moved_       = false;
   Eigen::Vector3d exploration_start_pos_{0.0, 0.0, 0.0};
   bool exploration_start_captured_ = false;  // sticky for the whole exploration session
   rclcpp::TimerBase::SharedPtr timer_explore_select_;

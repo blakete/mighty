@@ -376,6 +376,12 @@ struct parameters {
   bool   expl_preempt_enabled{false};
   double expl_preempt_margin{2.0};
   double expl_preempt_min_commit_sec{2.0};
+  // Static stuck timeout: after the robot has moved and then stops making
+  // progress (< stuck_move_thresh_m displacement) for stuck_timeout_sec while
+  // pursuing a frontier, that frontier is INVALIDATED and the selector re-picks.
+  // stuck_timeout_sec <= 0 disables (default keeps the feature on at 5 s).
+  double expl_stuck_timeout_sec{5.0};
+  double expl_stuck_move_thresh_m{0.15};
   // Persistent visited bitmap (suppresses re-detection of revisited frontiers)
   double expl_visited_map_center_x{0.0};
   double expl_visited_map_center_y{0.0};

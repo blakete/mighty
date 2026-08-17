@@ -361,6 +361,8 @@ mighty_node:
         exploration.manager.verify_radius_cells: 2               # [cells] unknown-neighbor radius for VISITED check
         exploration.manager.max_frontiers: 1000                  # [-]   DB cap; oldest VISITED evicted first
         exploration.manager.unreachable_consec_thresh: 5         # [-]   HGP failures -> INVALIDATED
+        exploration.manager.stuck_timeout_sec: 5.0               # [s]   after moving then no progress for this long (e.g. parked at last A* waypoint), INVALIDATE frontier and re-select. 0 disables
+        exploration.manager.stuck_move_thresh_m: 0.15            # [m]   displacement below this counts as "no progress" for the stuck timeout
         # Pursuit timeout: auto-INVALIDATE a frontier that we've been chasing
         # longer than max(min_sec, dist/v_ref*factor). Set factor <= 0 to disable.
         exploration.manager.pursuit_timeout_factor: 3.0         # [-]   slack multiplier on straight-line travel time
