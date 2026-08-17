@@ -314,11 +314,20 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
     RCLCPP_INFO(this->get_logger(), "ESDF: Subscribed to esdf_2d_topic (d_safe=%.1f m, weight=%.0f)",
                 par_.esdf_d_safe, par_.esdf_weight);
 
-    // Also subscribe to binary 2D occupancy for A* planning
+    // RAW binary 2D occupancy for frontier detection / visited-map (NOT the planner).
     sub_occ_2d_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
         "occ_2d_topic", map_qos,
         std::bind(&MIGHTY_NODE::occ2DCallback, this, std::placeholders::_1), options_map);
-    RCLCPP_INFO(this->get_logger(), "Occ2D: Subscribed to occ_2d_topic for ground robot A* planning");
+    RCLCPP_INFO(this->get_logger(), "Occ2D raw: subscribed to occ_2d_topic for frontier detection");
+
+    // Planning occupancy (large-UNKNOWN-as-OCCUPIED) for HGP/A* ONLY. Same map QoS and
+    // same mutually-exclusive map callback group as occ_2d. Relative topic -> resolves to
+    // <ns>/planning_occ_2d_topic (no namespace hard-coded).
+    sub_planning_occ_2d_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
+        "planning_occ_2d_topic", map_qos,
+        std::bind(&MIGHTY_NODE::planningOcc2DCallback, this, std::placeholders::_1), options_map);
+    RCLCPP_INFO(this->get_logger(),
+                "Occ2D planning: subscribed to planning_occ_2d_topic for HGP/A*");
 
     // Frontier-based exploration. The detector + persistent manager run inside
     // occ2DCallback; the explore-select timer issues exploration goals through
@@ -3211,6 +3220,19 @@ void MIGHTY_NODE::esdfCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg
   esdf_grid_ = EsdfGrid2D::fromOccupancyGrid(*msg, par_.esdf_truncation_distance);
 }
 
+void MIGHTY_NODE::planningOcc2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
+  // Planning-only occupancy: same current occupancy update as occ_2d, but the mapper has
+  // already converted large connected UNKNOWN components to OCCUPIED for HGP/A*. Feed
+  // ONLY the planner here. Do NOT run FrontierDetector, touch the VisitedMap, or set
+  // current_detect_grid_ — those stay on the RAW occ_2d in occ2DCallback. The mapper
+  // refreshes this map every cycle, so MIGHTY adds no persistence/clearing logic.
+  planning_occ_grid_2d_ = OccGrid2D::fromOccupancyGrid(*msg);
+  mighty_ptr_->setOccGrid2D(planning_occ_grid_2d_);
+  if (par_.use_hardware && par_.use_2d_planning && par_.vehicle_type == "ground_robot") {
+    mighty_ptr_->updateMap2DOnly();
+  }
+}
+
 void MIGHTY_NODE::occ2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
   // Remember the global mapper's ground-plane z so publishVisitedMap() can
   // render at the same height as the live occ_2d layer in RViz.
@@ -3248,16 +3270,11 @@ void MIGHTY_NODE::occ2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr ms
   }
 
   occ_grid_2d_ = OccGrid2D::fromOccupancyGrid(*msg);
-  mighty_ptr_->setOccGrid2D(occ_grid_2d_);
-
-  // Decoupled 2D pipeline: with global_mapper retired, this callback is the
-  // ONLY map trigger on hardware — occupancy_grid (PointCloud2) has no
-  // publisher, so the occupancyMapCallback path never fires. Rebuild the
-  // planner's 2D map here, at grid rate (~2.5 Hz). Gated on use_hardware so
-  // sim (where global_mapper still publishes the 3D cloud) is unchanged.
-  if (par_.use_hardware && par_.use_2d_planning && par_.vehicle_type == "ground_robot") {
-    mighty_ptr_->updateMap2DOnly();
-  }
+  // NOTE: the RAW occ_2d map now feeds ONLY the visited-map fusion (above) and the
+  // FrontierDetector/Manager pipeline (below). The HGP/A* planner map is updated from
+  // planning_occ_2d_topic in planningOcc2DCallback() — so the mapper's large-UNKNOWN->
+  // OCCUPIED planning cells never leak into frontier detection or the visited map.
+  // (The previous setOccGrid2D(occ_grid_2d_) + updateMap2DOnly() moved there.)
 
   // Frontier-based exploration: detect frontiers in the new grid, update the
   // persistent global database, then immediately try to issue an exploration
