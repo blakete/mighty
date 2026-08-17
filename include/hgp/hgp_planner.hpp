@@ -67,6 +67,12 @@ class HGPPlanner {
    */
   vec_Vecf<3> getRawPath();
 
+  /** @brief Whether the last plan() reached the exact goal (true) or returned a
+   *  partial path to the closest-to-goal best_node (false). Lets callers apply a
+   *  safety stand-off only on fallback paths.
+   */
+  bool reachedGoal() const { return last_reached_goal_; }
+
   /** @brief Set the planning timeout duration.
    *  @param timeout_duration_ms Timeout in milliseconds.
    */
@@ -193,6 +199,8 @@ class HGPPlanner {
   vec_Vecf<3> path_;
   // Flag indicating the success of planning
   int status_ = 0;
+  // True if the last plan() reached the exact goal; false on best_node fallback.
+  bool last_reached_goal_ = false;
   // Enabled for printing info
   bool planner_verbose_;
 

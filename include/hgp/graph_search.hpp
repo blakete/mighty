@@ -205,6 +205,13 @@ class GraphSearch {
    */
   std::vector<StatePtr> getPath() const;
 
+  /** @brief Whether the last plan() reached the exact goal node (true) or fell
+   *  back to the closest-to-goal best_node (false, i.e. a partial path due to
+   *  timeout / empty open set / max_expand). Meaningful for static_jps_plan;
+   *  defaults to false for any other search path.
+   */
+  bool reachedGoal() const { return reached_goal_; }
+
   /** @brief Get all states currently in the open set.
    *  @return Vector of states that have been opened but not yet closed.
    */
@@ -319,6 +326,9 @@ class GraphSearch {
   int xGoal_, yGoal_, zGoal_;
   bool use_jps_ = false;
   bool use_heat_ = false;  // only true when global_planner_=="astar_heat"
+  // Set true only when the exact goal node is popped; false on any best_node
+  // fallback (timeout / empty open set / max_expand). Read via reachedGoal().
+  bool reached_goal_ = false;
 
   priorityQueue pq_;
   std::vector<StatePtr> hm_;

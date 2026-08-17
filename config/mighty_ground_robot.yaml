@@ -90,6 +90,7 @@ mighty_node:
         inflation_hgp: 0.15                              # [m] Static obstacle inflation for global A* planning
         hgp_timeout_duration_ms: 10000                  # [ms] Global planner timeout
         max_expand: 1000000                               # [-] Max A* node expansions
+        hgp_stop_distance_m: 0.3                          # [m] Safety stand-off on A* FALLBACK (best_node) paths: back off the path tail so the last WAYPOINT (robot center target) keeps this clearance from the nearest occupied cell (cell-center to cell-center, quantized up by ceil(dist/res)). Excludes footprint -> body clearance ~= this - robot_radius. 0 = disabled.
 
         # --- Local Planning ---
         horizon: 20.0                                   # [m] Planning horizon
@@ -360,6 +361,8 @@ mighty_node:
         exploration.manager.verify_radius_cells: 2               # [cells] unknown-neighbor radius for VISITED check
         exploration.manager.max_frontiers: 1000                  # [-]   DB cap; oldest VISITED evicted first
         exploration.manager.unreachable_consec_thresh: 5         # [-]   HGP failures -> INVALIDATED
+        exploration.manager.stuck_timeout_sec: 5.0               # [s]   after moving then no progress for this long (e.g. parked at last A* waypoint), INVALIDATE frontier and re-select. 0 disables
+        exploration.manager.stuck_move_thresh_m: 0.15            # [m]   displacement below this counts as "no progress" for the stuck timeout
         # Pursuit timeout: auto-INVALIDATE a frontier that we've been chasing
         # longer than max(min_sec, dist/v_ref*factor). Set factor <= 0 to disable.
         exploration.manager.pursuit_timeout_factor: 3.0         # [-]   slack multiplier on straight-line travel time

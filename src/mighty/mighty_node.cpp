@@ -314,11 +314,20 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
     RCLCPP_INFO(this->get_logger(), "ESDF: Subscribed to esdf_2d_topic (d_safe=%.1f m, weight=%.0f)",
                 par_.esdf_d_safe, par_.esdf_weight);
 
-    // Also subscribe to binary 2D occupancy for A* planning
+    // RAW binary 2D occupancy for frontier detection / visited-map (NOT the planner).
     sub_occ_2d_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
         "occ_2d_topic", map_qos,
         std::bind(&MIGHTY_NODE::occ2DCallback, this, std::placeholders::_1), options_map);
-    RCLCPP_INFO(this->get_logger(), "Occ2D: Subscribed to occ_2d_topic for ground robot A* planning");
+    RCLCPP_INFO(this->get_logger(), "Occ2D raw: subscribed to occ_2d_topic for frontier detection");
+
+    // Planning occupancy (large-UNKNOWN-as-OCCUPIED) for HGP/A* ONLY. Same map QoS and
+    // same mutually-exclusive map callback group as occ_2d. Relative topic -> resolves to
+    // <ns>/planning_occ_2d_topic (no namespace hard-coded).
+    sub_planning_occ_2d_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
+        "planning_occ_2d_topic", map_qos,
+        std::bind(&MIGHTY_NODE::planningOcc2DCallback, this, std::placeholders::_1), options_map);
+    RCLCPP_INFO(this->get_logger(),
+                "Occ2D planning: subscribed to planning_occ_2d_topic for HGP/A*");
 
     // Frontier-based exploration. The detector + persistent manager run inside
     // occ2DCallback; the explore-select timer issues exploration goals through
@@ -533,6 +542,7 @@ void MIGHTY_NODE::declareParameters() {
   this->declare_parameter("z_max", 5.0);
   this->declare_parameter("hgp_timeout_duration_ms", 1000);
   this->declare_parameter("max_expand", 10000);
+  this->declare_parameter("hgp_stop_distance_m", 0.0);
   this->declare_parameter("use_free_start", false);
   this->declare_parameter("free_start_factor", 1.0);
   this->declare_parameter("use_free_goal", false);
@@ -777,6 +787,8 @@ void MIGHTY_NODE::declareParameters() {
   this->declare_parameter("exploration.manager.preempt_enabled", false);
   this->declare_parameter("exploration.manager.preempt_margin", 2.0);
   this->declare_parameter("exploration.manager.preempt_min_commit_sec", 2.0);
+  this->declare_parameter("exploration.manager.stuck_timeout_sec", 5.0);
+  this->declare_parameter("exploration.manager.stuck_move_thresh_m", 0.15);
   this->declare_parameter("exploration.visited_map.center_x", 0.0);
   this->declare_parameter("exploration.visited_map.center_y", 0.0);
   this->declare_parameter("exploration.visited_map.width_m", 100.0);
@@ -876,6 +888,7 @@ void MIGHTY_NODE::setParameters() {
   par_.z_max = this->get_parameter("z_max").as_double();
   par_.hgp_timeout_duration_ms = this->get_parameter("hgp_timeout_duration_ms").as_int();
   par_.max_expand = this->get_parameter("max_expand").as_int();
+  par_.hgp_stop_distance_m = this->get_parameter("hgp_stop_distance_m").as_double();
   par_.max_num_expansion = par_.max_expand;
 
   par_.use_free_start = this->get_parameter("use_free_start").as_bool();
@@ -1150,6 +1163,10 @@ void MIGHTY_NODE::setParameters() {
       this->get_parameter("exploration.manager.preempt_margin").as_double();
   par_.expl_preempt_min_commit_sec =
       this->get_parameter("exploration.manager.preempt_min_commit_sec").as_double();
+  par_.expl_stuck_timeout_sec =
+      this->get_parameter("exploration.manager.stuck_timeout_sec").as_double();
+  par_.expl_stuck_move_thresh_m =
+      this->get_parameter("exploration.manager.stuck_move_thresh_m").as_double();
   par_.expl_visited_map_center_x   = this->get_parameter("exploration.visited_map.center_x").as_double();
   par_.expl_visited_map_center_y   = this->get_parameter("exploration.visited_map.center_y").as_double();
   par_.expl_visited_map_width_m    = this->get_parameter("exploration.visited_map.width_m").as_double();
@@ -3211,6 +3228,19 @@ void MIGHTY_NODE::esdfCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg
   esdf_grid_ = EsdfGrid2D::fromOccupancyGrid(*msg, par_.esdf_truncation_distance);
 }
 
+void MIGHTY_NODE::planningOcc2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
+  // Planning-only occupancy: same current occupancy update as occ_2d, but the mapper has
+  // already converted large connected UNKNOWN components to OCCUPIED for HGP/A*. Feed
+  // ONLY the planner here. Do NOT run FrontierDetector, touch the VisitedMap, or set
+  // current_detect_grid_ — those stay on the RAW occ_2d in occ2DCallback. The mapper
+  // refreshes this map every cycle, so MIGHTY adds no persistence/clearing logic.
+  planning_occ_grid_2d_ = OccGrid2D::fromOccupancyGrid(*msg);
+  mighty_ptr_->setOccGrid2D(planning_occ_grid_2d_);
+  if (par_.use_hardware && par_.use_2d_planning && par_.vehicle_type == "ground_robot") {
+    mighty_ptr_->updateMap2DOnly();
+  }
+}
+
 void MIGHTY_NODE::occ2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
   // Remember the global mapper's ground-plane z so publishVisitedMap() can
   // render at the same height as the live occ_2d layer in RViz.
@@ -3248,16 +3278,11 @@ void MIGHTY_NODE::occ2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr ms
   }
 
   occ_grid_2d_ = OccGrid2D::fromOccupancyGrid(*msg);
-  mighty_ptr_->setOccGrid2D(occ_grid_2d_);
-
-  // Decoupled 2D pipeline: with global_mapper retired, this callback is the
-  // ONLY map trigger on hardware — occupancy_grid (PointCloud2) has no
-  // publisher, so the occupancyMapCallback path never fires. Rebuild the
-  // planner's 2D map here, at grid rate (~2.5 Hz). Gated on use_hardware so
-  // sim (where global_mapper still publishes the 3D cloud) is unchanged.
-  if (par_.use_hardware && par_.use_2d_planning && par_.vehicle_type == "ground_robot") {
-    mighty_ptr_->updateMap2DOnly();
-  }
+  // NOTE: the RAW occ_2d map now feeds ONLY the visited-map fusion (above) and the
+  // FrontierDetector/Manager pipeline (below). The HGP/A* planner map is updated from
+  // planning_occ_2d_topic in planningOcc2DCallback() — so the mapper's large-UNKNOWN->
+  // OCCUPIED planning cells never leak into frontier detection or the visited map.
+  // (The previous setOccGrid2D(occ_grid_2d_) + updateMap2DOnly() moved there.)
 
   // Frontier-based exploration: detect frontiers in the new grid, update the
   // persistent global database, then immediately try to issue an exploration
@@ -3431,6 +3456,41 @@ void MIGHTY_NODE::exploreSelectCallback() {
     auto* r = frontier_manager_->find(current_explore_id_);
     if (r && (r->state == FrontierState::ACTIVE ||
               r->state == FrontierState::DORMANT)) {
+      // --- Static stuck watchdog (runs regardless of preemption) -----------
+      // Once the robot has actually moved toward this frontier and then stops
+      // making progress (< stuck_move_thresh_m displacement) for
+      // stuck_timeout_sec, abandon it. This catches the A* partial-path case:
+      // the robot drives to the last reachable waypoint (e.g. the stand-off in
+      // front of a walled-off frontier), parks, and would otherwise sit there
+      // until the much longer pursuit timeout. explore_has_moved_ gates the
+      // clock so pre-motion yaw/plan latency right after commit can't trip it.
+      if (par_.expl_stuck_timeout_sec > 0.0) {
+        const double t_stuck = this->now().seconds();
+        state cur_s;
+        mighty_ptr_->getState(cur_s);
+        const Eigen::Vector2d xy(cur_s.pos.x(), cur_s.pos.y());
+        if ((xy - explore_last_progress_xy_).norm() > par_.expl_stuck_move_thresh_m) {
+          explore_last_progress_xy_ = xy;       // progressed -> reset the clock
+          explore_last_progress_t_  = t_stuck;
+          explore_has_moved_        = true;
+        } else if (explore_has_moved_ &&
+                   t_stuck - explore_last_progress_t_ >= par_.expl_stuck_timeout_sec) {
+          RCLCPP_WARN(this->get_logger(),
+                      "Exploration: frontier %lu stuck (no motion > %.2f m for %.1f s) "
+                      "-> invalidating, re-selecting",
+                      static_cast<unsigned long>(current_explore_id_),
+                      par_.expl_stuck_move_thresh_m, par_.expl_stuck_timeout_sec);
+          frontier_manager_->markInvalidated(current_explore_id_, t_stuck);
+          exploration_active_      = false;
+          explore_last_progress_t_ = -1.0;
+          explore_has_moved_       = false;
+          // fall through to the normal selection path below (picks a new goal now)
+        }
+      }
+
+      // Preemption / hold-goal logic only applies if the watchdog above didn't
+      // just release the pursuit.
+      if (exploration_active_) {
       if (!par_.expl_preempt_enabled) return;
 
       const double t_now = this->now().seconds();
@@ -3478,6 +3538,7 @@ void MIGHTY_NODE::exploreSelectCallback() {
       exploration_active_ = false;
       // Fall through to the normal selection path, which re-picks `best`
       // (same selector, same inputs), publishes it, and arms its timeout.
+      }  // end if (exploration_active_) — preemption/hold guard
     }
     // Otherwise (record gone or already terminal) fall through and pick a new one.
   }
@@ -3613,6 +3674,10 @@ void MIGHTY_NODE::exploreSelectCallback() {
   exploration_active_       = true;
   explore_committed_at_t_   = this->now().seconds();
   unreachable_consec_count_ = 0;
+  // Arm the stuck watchdog fresh for this pursuit.
+  explore_last_progress_xy_ = Eigen::Vector2d(robot_pose.x(), robot_pose.y());
+  explore_last_progress_t_  = this->now().seconds();
+  explore_has_moved_        = false;
   frontier_manager_->markSelected(
       next->id, Eigen::Vector2d(robot_pose.x(), robot_pose.y()),
       this->now().seconds());

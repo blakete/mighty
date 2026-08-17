@@ -252,6 +252,13 @@ struct parameters {
   bool force_goal_z;
   double default_goal_z;
 
+  // Ground-robot safety stand-off [m]. When A* cannot reach the goal and returns
+  // a partial path to best_node (e.g. a frontier walled off by conservative
+  // UNKNOWN->OCCUPIED cells in the planning map), back off the path tail so the
+  // last committed waypoint keeps at least this clearance from any occupied cell.
+  // <= 0 disables (default) -> behavior identical to before.
+  double hgp_stop_distance_m{0.0};
+
   // Debug flags
   bool debug_verbose;
 
@@ -369,6 +376,12 @@ struct parameters {
   bool   expl_preempt_enabled{false};
   double expl_preempt_margin{2.0};
   double expl_preempt_min_commit_sec{2.0};
+  // Static stuck timeout: after the robot has moved and then stops making
+  // progress (< stuck_move_thresh_m displacement) for stuck_timeout_sec while
+  // pursuing a frontier, that frontier is INVALIDATED and the selector re-picks.
+  // stuck_timeout_sec <= 0 disables (default keeps the feature on at 5 s).
+  double expl_stuck_timeout_sec{5.0};
+  double expl_stuck_move_thresh_m{0.15};
   // Persistent visited bitmap (suppresses re-detection of revisited frontiers)
   double expl_visited_map_center_x{0.0};
   double expl_visited_map_center_y{0.0};

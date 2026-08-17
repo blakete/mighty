@@ -129,6 +129,10 @@ class MIGHTY_NODE : public rclcpp::Node {
   void unknownMapCallback(const sensor_msgs::msg::PointCloud2::ConstPtr& unk_msg);
   void esdfCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
   void occ2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
+  // Planning-only occupancy (large UNKNOWN components -> OCCUPIED by the mapper). Feeds
+  // ONLY the HGP/A* planner via setOccGrid2D + updateMap2DOnly; never the frontier /
+  // visited-map pipeline (which stays on the raw occ_2d_topic in occ2DCallback).
+  void planningOcc2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
   void goalReachedCheckCallback();
   void convertDynTrajMsg2DynTraj(const dynus_interfaces::msg::DynTraj& msg,
                                  std::shared_ptr<dynTraj>& traj, double current_time);
@@ -270,9 +274,13 @@ class MIGHTY_NODE : public rclcpp::Node {
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr sub_esdf_2d_;
   std::shared_ptr<const class EsdfGrid2D> esdf_grid_;
 
-  // Binary 2D occupancy subscription (ground robot only)
+  // Binary 2D occupancy subscription (ground robot only).
+  // RAW occ_2d_topic -> occ_grid_2d_ : frontier detection / visited-map only.
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr sub_occ_2d_;
   std::shared_ptr<const class OccGrid2D> occ_grid_2d_;
+  // planning_occ_2d_topic -> planning_occ_grid_2d_ : HGP/A* planner only.
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr sub_planning_occ_2d_;
+  std::shared_ptr<const class OccGrid2D> planning_occ_grid_2d_;
 
   // Frontier exploration (ground robot only). Detector + persistent global
   // frontier database. See plan: /home/kkondo/.claude/plans/snazzy-moseying-donut.md
@@ -294,6 +302,14 @@ class MIGHTY_NODE : public rclcpp::Node {
   uint64_t current_explore_id_     = 0;
   int      unreachable_consec_count_ = 0;
   double   explore_committed_at_t_ = -1.0;  // when current_explore_id_ was issued (preempt min-commit)
+  // Stuck watchdog for the current pursuit: once the robot has actually moved
+  // toward the goal and then stops making progress (e.g. parked at the last A*
+  // waypoint against a walled-off frontier), abandon it after a static timeout.
+  // Reset on every commit. explore_has_moved_ gates the timer so pre-motion
+  // yaw/plan latency at commit can't trip it.
+  Eigen::Vector2d explore_last_progress_xy_ = Eigen::Vector2d::Zero();
+  double   explore_last_progress_t_ = -1.0;
+  bool     explore_has_moved_       = false;
   Eigen::Vector3d exploration_start_pos_{0.0, 0.0, 0.0};
   bool exploration_start_captured_ = false;  // sticky for the whole exploration session
   rclcpp::TimerBase::SharedPtr timer_explore_select_;
