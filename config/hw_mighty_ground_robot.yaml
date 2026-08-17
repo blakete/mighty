@@ -90,7 +90,7 @@ mighty_node:
         inflation_hgp: 0.3                              # [m] Static obstacle inflation (0 when using ESDF/occ_2d)
         hgp_timeout_duration_ms: 10000                  # [ms] Global planner timeout
         max_expand: 1000000                               # [-] Max A* node expansions
-        hgp_stop_distance_m: 0.0                          # [m] Safety stand-off on A* FALLBACK (best_node) paths: back off the path tail so the last waypoint keeps this clearance from occupied cells. 0 = disabled. Set to ~robot radius + margin.
+        hgp_stop_distance_m: 0.3                          # [m] Safety stand-off on A* FALLBACK (best_node) paths: back off the path tail so the last WAYPOINT (robot center target) keeps this clearance from the nearest occupied cell (cell-center to cell-center, quantized up by ceil(dist/res)). Excludes footprint -> body clearance ~= this - robot_radius. 0 = disabled.
 
         # --- Local Planning ---
         horizon: 30.0                                   # [m] Planning horizon
