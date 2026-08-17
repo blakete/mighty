@@ -330,6 +330,7 @@ vec_Vecf<3> HGPPlanner::getAllSet() const {
 
 bool HGPPlanner::plan(const Vecf<3>& start, const Vecf<3>& start_vel, const Vecf<3>& goal,
                       double& final_g, double current_time, decimal_t eps) {
+  last_reached_goal_ = false;  // reset; set from graph_search_ once A* actually runs
   if (map_util_->map_.size() == 0) {
     std::cout << "map size: " << map_util_->map_.size() << std::endl;
     printf(ANSI_COLOR_RED "need to set the map!\n" ANSI_COLOR_RESET);
@@ -452,6 +453,10 @@ bool HGPPlanner::plan(const Vecf<3>& start, const Vecf<3>& start_vel, const Vecf
                       global_planning_time_, hgp_static_jps_time_, hgp_check_path_time_,
                       hgp_dynamic_astar_time_, hgp_recover_path_time_, current_time, start_vel,
                       max_expand, hgp_timeout_duration_ms_);
+
+  // Record whether A* reached the exact goal or fell back to best_node (partial
+  // path). Consumed by HGPManager to gate the safety stand-off.
+  last_reached_goal_ = graph_search_->reachedGoal();
 
   const auto path = graph_search_->getPath();
 

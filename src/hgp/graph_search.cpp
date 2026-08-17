@@ -171,6 +171,7 @@ bool GraphSearch::static_jps_plan(StatePtr& currNode_ptr, int max_expand, int st
   // Track the best (closest-to-goal) node for partial path recovery
   StatePtr best_node = currNode_ptr;
   double best_h = currNode_ptr->h;
+  reached_goal_ = false;  // set true only if the exact goal node is popped below
 
   if (verbose_) {
     std::cout << "[GraphSearch] planner=\"" << global_planner_
@@ -211,6 +212,7 @@ bool GraphSearch::static_jps_plan(StatePtr& currNode_ptr, int max_expand, int st
 
     if (currNode_ptr->id == goal_id) {
       if (verbose_) printf("Goal Reached!\n");
+      reached_goal_ = true;
       break;
     }
 

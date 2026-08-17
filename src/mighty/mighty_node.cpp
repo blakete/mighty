@@ -542,6 +542,7 @@ void MIGHTY_NODE::declareParameters() {
   this->declare_parameter("z_max", 5.0);
   this->declare_parameter("hgp_timeout_duration_ms", 1000);
   this->declare_parameter("max_expand", 10000);
+  this->declare_parameter("hgp_stop_distance_m", 0.0);
   this->declare_parameter("use_free_start", false);
   this->declare_parameter("free_start_factor", 1.0);
   this->declare_parameter("use_free_goal", false);
@@ -885,6 +886,7 @@ void MIGHTY_NODE::setParameters() {
   par_.z_max = this->get_parameter("z_max").as_double();
   par_.hgp_timeout_duration_ms = this->get_parameter("hgp_timeout_duration_ms").as_int();
   par_.max_expand = this->get_parameter("max_expand").as_int();
+  par_.hgp_stop_distance_m = this->get_parameter("hgp_stop_distance_m").as_double();
   par_.max_num_expansion = par_.max_expand;
 
   par_.use_free_start = this->get_parameter("use_free_start").as_bool();

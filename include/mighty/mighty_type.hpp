@@ -252,6 +252,13 @@ struct parameters {
   bool force_goal_z;
   double default_goal_z;
 
+  // Ground-robot safety stand-off [m]. When A* cannot reach the goal and returns
+  // a partial path to best_node (e.g. a frontier walled off by conservative
+  // UNKNOWN->OCCUPIED cells in the planning map), back off the path tail so the
+  // last committed waypoint keeps at least this clearance from any occupied cell.
+  // <= 0 disables (default) -> behavior identical to before.
+  double hgp_stop_distance_m{0.0};
+
   // Debug flags
   bool debug_verbose;
 
