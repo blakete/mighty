@@ -310,6 +310,14 @@ class MIGHTY_NODE : public rclcpp::Node {
   Eigen::Vector2d explore_last_progress_xy_ = Eigen::Vector2d::Zero();
   double   explore_last_progress_t_ = -1.0;
   bool     explore_has_moved_       = false;
+  // Same watchdog for a manually set goal (best-effort completion): if the robot
+  // moves and then stops progressing for the same stuck timeout while a manual
+  // goal is active (e.g. an unreachable goal behind a real wall / unresolved
+  // unknown), release manual_goal_active_ and announce arrival so exploration /
+  // new goals resume. Reset when a new user goal is set.
+  Eigen::Vector2d manual_last_progress_xy_ = Eigen::Vector2d::Zero();
+  double   manual_last_progress_t_ = -1.0;
+  bool     manual_has_moved_        = false;
   Eigen::Vector3d exploration_start_pos_{0.0, 0.0, 0.0};
   bool exploration_start_captured_ = false;  // sticky for the whole exploration session
   rclcpp::TimerBase::SharedPtr timer_explore_select_;
