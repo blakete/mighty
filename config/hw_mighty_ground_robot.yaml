@@ -96,6 +96,8 @@ mighty_node:
         horizon: 30.0                                   # [m] Planning horizon
         goal_radius: 0.5                                # [m] Goal reached threshold
         goal_seen_radius: 0.75                           # [m] Distance to stop replanning
+        relocate_occupied_goal: false                    # [-] Keep the clicked goal as-is (do NOT snap it to the nearest free edge). With the classified planning map (UNKNOWN->OCCUPIED), snapping would stop the robot at the free boundary instead of pushing into the unknown.
+        allow_occupied_goal: true                        # [-] Don't hard-reject a goal in occupied/UNKNOWN->OCCUPIED cells; A* plans best-effort toward it (closest reachable best_node) and the unknown resolves as the robot approaches. Real obstacles are still hard-avoided during search.
 
         # --- L-BFGS Optimization Weights ---
         dynamic_weight: 1e+2                         # [-] Dynamic obstacle avoidance weight

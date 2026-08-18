@@ -157,6 +157,11 @@ class HGPPlanner {
    */
   void setMaxExpand(int max_expand) { max_expand_ = max_expand; }
 
+  /** @brief If true, don't hard-reject a goal whose cell is occupied; plan
+   *  best-effort toward it (A* falls back to the closest reachable best_node).
+   */
+  void setAllowOccupiedGoal(bool enabled) { allow_occupied_goal_ = enabled; }
+
   /** @brief Shorten a path using line-of-sight checks with inflated capsule collision tests.
    *  @param in Input waypoint path.
    *  @param inflate_radius_cells Inflation radius in voxel cells.
@@ -201,6 +206,8 @@ class HGPPlanner {
   int status_ = 0;
   // True if the last plan() reached the exact goal; false on best_node fallback.
   bool last_reached_goal_ = false;
+  // If true, an occupied goal cell is not rejected; A* plans best-effort toward it.
+  bool allow_occupied_goal_ = false;
   // Enabled for printing info
   bool planner_verbose_;
 

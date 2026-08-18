@@ -548,6 +548,7 @@ void MIGHTY_NODE::declareParameters() {
   this->declare_parameter("use_free_goal", false);
   this->declare_parameter("free_goal_factor", 1.0);
   this->declare_parameter("relocate_occupied_goal", true);
+  this->declare_parameter("allow_occupied_goal", false);
   this->declare_parameter("max_dist_vertexes", 5.0);
   this->declare_parameter("w_unknown", 1.0);
   this->declare_parameter("w_align", 60.0);
@@ -896,6 +897,7 @@ void MIGHTY_NODE::setParameters() {
   par_.use_free_goal = this->get_parameter("use_free_goal").as_bool();
   par_.free_goal_factor = this->get_parameter("free_goal_factor").as_double();
   par_.relocate_occupied_goal = this->get_parameter("relocate_occupied_goal").as_bool();
+  par_.allow_occupied_goal = this->get_parameter("allow_occupied_goal").as_bool();
   par_.max_dist_vertexes = this->get_parameter("max_dist_vertexes").as_double();
   par_.w_unknown = this->get_parameter("w_unknown").as_double();
   par_.w_align = this->get_parameter("w_align").as_double();
