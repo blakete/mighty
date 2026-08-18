@@ -367,7 +367,7 @@ mighty_node:
         exploration.utility.goal_select_threshold: -1.0e9
         exploration.manager.merge_radius_m: 0.3
         exploration.manager.centroid_ema_alpha: 0.5
-        exploration.manager.visit_radius_m: 0.1
+        exploration.manager.visit_radius_m: 0.5
         exploration.manager.visit_dwell_sec: 3.0
         exploration.manager.verify_radius_cells: 2
         exploration.manager.max_frontiers: 1000
