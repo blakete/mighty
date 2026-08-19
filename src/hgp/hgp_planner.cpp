@@ -397,15 +397,22 @@ bool HGPPlanner::plan(const Vecf<3>& start, const Vecf<3>& start_vel, const Vecf
     for (int i = 0; i < 3; ++i) goal_int(i) = std::clamp(goal_int(i), 0, dim(i) - 1);
   }
 
-  // In non-soft-cost mode, reject if goal cell is occupied
+  // In non-soft-cost mode, reject if goal cell is occupied -- UNLESS allow_occupied_goal_
+  // is set, in which case we let A* plan best-effort toward it and fall back to the closest
+  // reachable free cell (best_node). This lets a goal placed in conservative
+  // UNKNOWN->OCCUPIED space still be pursued: the robot heads toward it and the unknown
+  // resolves as it approaches. A* still only traverses free cells, so real obstacles remain
+  // hard-avoided during the search.
   if (is_2d_mode_ && map_util_->has2DMap()) {
     const int gx = goal_int(0), gy = goal_int(1);
-    if (!map_util_->useSoftCostObstacles() && map_util_->get2DOccupancy(gx, gy) != 0) {
+    if (!allow_occupied_goal_ && !map_util_->useSoftCostObstacles() &&
+        map_util_->get2DOccupancy(gx, gy) != 0) {
       std::cout << bold << red << "Goal is occupied in 2D map" << reset << std::endl;
       status_ = 2;
       return false;
     }
-  } else if (!map_util_->useSoftCostObstacles() && map_util_->isOccupied(goal_int)) {
+  } else if (!allow_occupied_goal_ && !map_util_->useSoftCostObstacles() &&
+             map_util_->isOccupied(goal_int)) {
     std::cout << bold << red << "goal is occupied!"
               << " goal=" << goal.transpose() << " goal_int=" << goal_int.transpose() << reset
               << std::endl;

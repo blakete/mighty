@@ -548,6 +548,7 @@ void MIGHTY_NODE::declareParameters() {
   this->declare_parameter("use_free_goal", false);
   this->declare_parameter("free_goal_factor", 1.0);
   this->declare_parameter("relocate_occupied_goal", true);
+  this->declare_parameter("allow_occupied_goal", false);
   this->declare_parameter("max_dist_vertexes", 5.0);
   this->declare_parameter("w_unknown", 1.0);
   this->declare_parameter("w_align", 60.0);
@@ -896,6 +897,7 @@ void MIGHTY_NODE::setParameters() {
   par_.use_free_goal = this->get_parameter("use_free_goal").as_bool();
   par_.free_goal_factor = this->get_parameter("free_goal_factor").as_double();
   par_.relocate_occupied_goal = this->get_parameter("relocate_occupied_goal").as_bool();
+  par_.allow_occupied_goal = this->get_parameter("allow_occupied_goal").as_bool();
   par_.max_dist_vertexes = this->get_parameter("max_dist_vertexes").as_double();
   par_.w_unknown = this->get_parameter("w_unknown").as_double();
   par_.w_align = this->get_parameter("w_align").as_double();
@@ -1562,6 +1564,38 @@ void MIGHTY_NODE::replanCallback() {
   // Set computation times to zero
   setComputationTimesToZero();
 
+  // Manual-goal best-effort watchdog. Mirrors the exploration stuck timeout
+  // (same expl_stuck_timeout_sec / expl_stuck_move_thresh_m). Once the robot has
+  // moved toward a manually set goal and then stops making progress for the
+  // timeout — e.g. a goal behind a real wall or in an unknown region that never
+  // resolves — treat it as best-effort complete: release manual_goal_active_ and
+  // announce arrival so exploration / new goals resume instead of holding forever.
+  // manual_has_moved_ gates the clock so pre-motion latency can't trip it.
+  if (manual_goal_active_ && state_initialized_ && par_.expl_stuck_timeout_sec > 0.0) {
+    state cur_m;
+    mighty_ptr_->getState(cur_m);
+    const Eigen::Vector2d xy(cur_m.pos.x(), cur_m.pos.y());
+    if (manual_last_progress_t_ < 0.0) {
+      manual_last_progress_xy_ = xy;
+      manual_last_progress_t_  = current_time;
+      manual_has_moved_        = false;
+    } else if ((xy - manual_last_progress_xy_).norm() > par_.expl_stuck_move_thresh_m) {
+      manual_last_progress_xy_ = xy;      // progressed -> reset the clock
+      manual_last_progress_t_  = current_time;
+      manual_has_moved_        = true;
+    } else if (manual_has_moved_ &&
+               current_time - manual_last_progress_t_ >= par_.expl_stuck_timeout_sec) {
+      RCLCPP_WARN(this->get_logger(),
+                  "Manual goal best-effort: no motion > %.2f m for %.1f s -> releasing goal, "
+                  "resuming",
+                  par_.expl_stuck_move_thresh_m, par_.expl_stuck_timeout_sec);
+      manual_goal_active_     = false;
+      manual_last_progress_t_ = -1.0;
+      manual_has_moved_       = false;
+      pub_goal_reached_->publish(std_msgs::msg::Empty());
+    }
+  }
+
   // Pass current ESDF snapshot to planner (ground robot only)
   if (par_.use_esdf_cost && esdf_grid_) {
     mighty_ptr_->setEsdfGrid(esdf_grid_);
@@ -1785,6 +1819,9 @@ void MIGHTY_NODE::terminalGoalCallbackImpl(const geometry_msgs::msg::PoseStamped
     unreachable_consec_count_ = 0;
     // Operator override of a return-home — start a fresh session.
     home_return_requested_ = false;
+    // Arm the best-effort stuck watchdog fresh for this manual goal.
+    manual_last_progress_t_ = -1.0;
+    manual_has_moved_       = false;
   }
 
   // Set the terminal goal

@@ -125,6 +125,9 @@ void HGPManager::setupHGPPlanner(const std::string& global_planner, bool global_
   // Set max node expansion
   planner_ptr_->setMaxExpand(max_num_expansion);
 
+  // Best-effort toward occupied goals (see parameters::allow_occupied_goal).
+  planner_ptr_->setAllowOccupiedGoal(par_.allow_occupied_goal);
+
   // Enable 2D A* mode only when use_2d_planning is on
   planner_ptr_->set2DMode(is_ground_robot_ && par_.use_2d_planning);
 

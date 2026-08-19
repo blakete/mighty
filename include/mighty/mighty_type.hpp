@@ -89,6 +89,13 @@ struct parameters {
   bool use_free_goal;
   double free_goal_factor;
   bool relocate_occupied_goal;
+  // When true, A* does NOT hard-reject a terminal goal whose cell is occupied in the
+  // planning map. Instead it plans best-effort toward it and returns the partial path to
+  // the closest reachable (free) cell (best_node). Intended for goals that fall in
+  // conservative UNKNOWN->OCCUPIED planning cells: the robot heads toward the goal, and the
+  // unknown resolves as it approaches. Real obstacles are still hard-avoided during search
+  // (A* only traverses free cells). Default false = upstream behavior (reject occupied goal).
+  bool allow_occupied_goal{false};
 
   // LOS post processing parameters
   int los_cells;
