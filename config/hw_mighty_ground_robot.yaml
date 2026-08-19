@@ -95,7 +95,8 @@ mighty_node:
         # --- Local Planning ---
         horizon: 30.0                                   # [m] Planning horizon
         goal_radius: 0.5                                # [m] Goal reached threshold
-        goal_seen_radius: 0.75                           # [m] Distance to stop replanning
+
+        goal_seen_radius: 0.4                           # [m] Distance to stop replanning
         relocate_occupied_goal: false                    # [-] Keep the clicked goal as-is (do NOT snap it to the nearest free edge). With the classified planning map (UNKNOWN->OCCUPIED), snapping would stop the robot at the free boundary instead of pushing into the unknown.
         allow_occupied_goal: true                        # [-] Don't hard-reject a goal in occupied/UNKNOWN->OCCUPIED cells; A* plans best-effort toward it (closest reachable best_node) and the unknown resolves as the robot approaches. Real obstacles are still hard-avoided during search.
 
@@ -365,7 +366,7 @@ mighty_node:
         exploration.utility.dist_ref_m: 60.0
         exploration.utility.sensor_radius_m: 5.0
         exploration.utility.goal_select_threshold: -1.0e9
-        exploration.manager.merge_radius_m: 0.3
+        exploration.manager.merge_radius_m: 0.75
         exploration.manager.centroid_ema_alpha: 0.5
         exploration.manager.visit_radius_m: 0.5
         exploration.manager.visit_dwell_sec: 3.0
@@ -373,13 +374,13 @@ mighty_node:
         exploration.manager.max_frontiers: 1000
         exploration.manager.unreachable_consec_thresh: 5
         exploration.manager.stuck_timeout_sec: 5.0               # [s]   after moving then no progress for this long (e.g. parked at last A* waypoint), INVALIDATE frontier and re-select. 0 disables
-        exploration.manager.stuck_move_thresh_m: 0.15            # [m]   displacement below this counts as "no progress" for the stuck timeout
+        exploration.manager.stuck_move_thresh_m: 0.10            # [m]   displacement below this counts as "no progress" for the stuck timeout
         # Pursuit timeout: auto-INVALIDATE a frontier we've been chasing longer
         # than max(min_sec, dist/v_ref*factor). Set factor <= 0 to disable.
         exploration.manager.pursuit_timeout_factor: 3.0
         exploration.manager.pursuit_timeout_v_ref: 0.5
         exploration.manager.pursuit_timeout_min_sec: 10.0
-        exploration.manager.invalidation_keep_out_radius_m: 0.3
+        exploration.manager.invalidation_keep_out_radius_m: 0.75
         exploration.manager.invalidation_cooldown_sec: 60.0
         # Goal preemption: while pursuing a frontier, keep re-ranking every
         # select tick (select_rate_hz) and SWITCH goals when another frontier
