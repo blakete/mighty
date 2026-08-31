@@ -39,6 +39,13 @@ services:
     # optional DLIO_SEED_Z. ZENOH_ROUTER_CONFIG_URI rides along harmlessly: no
     # router runs in this container, the nodes are plain zenoh sessions.
     env_file: /etc/rover/rover.env
+    environment:
+      # Fleet zenoh session config (same file the drive/sensors siblings load):
+      # 5 s non-droppable stall bound + qos drop-toward-router rule; the
+      # /home/swarm/config mount below is required.
+      ZENOH_SESSION_CONFIG_URI: /home/swarm/config/zenoh_session_config.json5
+    volumes:
+      - "/home/swarm/config:/home/swarm/config:ro" # fleet zenoh session config
     init: true
     stop_grace_period: 15s
     restart: "no"                 # manual stack; a dead pane stays dead (native semantics)
