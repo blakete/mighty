@@ -6,14 +6,15 @@
 # 'hw_mighty', built right here in bash — no tmuxp, no run_hw_red_rover.py
 # (that script is the NATIVE `mighty` alias path and stays untouched).
 #
-#   mighty_hw.sh start [--odom-type dlio|dlio_in_mocap|mocap] [--two-d-only|--no-two-d]
+#   mighty_hw.sh start [--odom-type dlio|dlio_in_mocap|mocap|external] [--two-d-only|--no-two-d]
 #   mighty_hw.sh attach            # tmux attach (Ctrl-b d detaches; stack keeps running)
 #   mighty_hw.sh stop              # kill session, then compose down
 #   mighty_hw.sh status            # container + pane status
 #   mighty_hw.sh logs [...]        # container PID-1 output (idle loop; panes hold the real logs)
 #   mighty_hw.sh rebuild [...]     # stop + compose build + start (start flags forwarded)
 #
-# Panes by --odom-type (default dlio; two_d_only defaults ON, --no-two-d disables):
+# Panes by --odom-type (default: AUTO, see 'external'; two_d_only defaults OFF,
+# --two-d-only enables):
 #   dlio           Onboard MIGHTY | RViz 2D goal | DLIO | seed pose | tf map->odom
 #                  Replicates what dlio.service ran: DLIO anchored by a constant
 #                  seed-pose spoof on /<ns>/world at z=${DLIO_SEED_Z:-0.4}.
@@ -23,6 +24,12 @@
 #   mocap          no DLIO at all: mighty flips to use_onboard_localization:=false
 #                  + twist from mocap/twist, and two extra static TFs bridge
 #                  the mocap frames (<ns> -> <ns>/base_link, world -> <ns>/map).
+#   external       NO odometry panes at all: dlio.service (see dlio_ws) owns DLIO,
+#                  the seed pose and map->odom. MIGHTY is launched exactly as in
+#                  dlio mode (use_onboard_localization:=true) and consumes
+#                  <ns>/dlio/odom_node/odom + the map->odom TF over zenoh, so it
+#                  does not care that they come from another container.
+#                  AUTO-SELECTED when dlio.service or a 'dlio' container is up.
 #
 # NO MAPPER PANE. mighty_node subscribes to <ns>/occ_2d_topic + <ns>/esdf_2d_topic
 # (mighty_node.cpp:311-321, SensorDataQoS) and does not care who publishes them.
@@ -38,9 +45,11 @@
 #   sensors.service  livox + D455 + the base_link->lidar static TF
 #   OX08 Orin        elevation_mapping_cupy -> <ns>/occ_2d_topic, <ns>/esdf_2d_topic
 #                    (without it MIGHTY runs but never plans: no occupancy grid)
-# dlio.service must be DISABLED wherever this stack runs — its nodes and the
-# DLIO panes here are the same nodes (double-publish). Rollback path: re-enable
-# dlio.service and use the native `mighty` alias.
+# dlio.service and the DLIO panes here are THE SAME NODES — never run both. When
+# dlio.service (or a container named 'dlio') is up, `start` auto-selects
+# --odom-type external and launches no odometry panes; an explicit --odom-type
+# dlio/dlio_in_mocap is then REFUSED rather than silently double-published. On a
+# rover where dlio.service is inactive nothing changes — the default is still dlio.
 #
 # NOTE: DLIO runs a ~3 s stationary IMU calibration whenever its pane (re)starts
 # — keep the rover still. Identity (ROBOT_NAME, RMW, optional DLIO_SEED_Z) comes
@@ -67,12 +76,12 @@ dx() { echo "docker exec -it ${CONTAINER} bash -c '${SETUP} && ${WAIT_ROUTER} &&
 attach() { exec tmux attach -t "${SESSION}"; }
 
 usage() {
-    echo "usage: $0 {start [--odom-type dlio|dlio_in_mocap|mocap] [--two-d-only|--no-two-d] | attach | stop | status | logs | rebuild [start flags]}" >&2
+    echo "usage: $0 {start [--odom-type dlio|dlio_in_mocap|mocap|external] [--two-d-only|--no-two-d] | attach | stop | status | logs | rebuild [start flags]}" >&2
     exit 2
 }
 
 start() {
-    local odom_type=dlio two_d=false
+    local odom_type='' two_d=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --odom-type)  odom_type="${2:?--odom-type needs a value}"; shift ;;
@@ -82,10 +91,44 @@ start() {
         esac
         shift
     done
+
+    # Who owns DLIO on this rover? dlio.service (dlio_ws) runs the SAME nodes as
+    # the DLIO panes below. Detect the live state instead of hardcoding a
+    # per-rover default, so this directory stays rover-agnostic and a rover
+    # without the service behaves exactly as before. Note `grep -c`, not
+    # `grep -q`: under `set -o pipefail` an early-exiting grep -q SIGPIPEs the
+    # upstream docker ps and the pipeline returns 141 ON MATCH.
+    local dlio_owned=false
+    if systemctl is-active --quiet dlio.service 2>/dev/null; then
+        dlio_owned=true
+    elif docker ps --format '{{.Names}}' 2>/dev/null | grep -cx dlio >/dev/null; then
+        dlio_owned=true
+    fi
+
+    if [[ -z "${odom_type}" ]]; then
+        if [[ "${dlio_owned}" == true ]]; then
+            odom_type=external
+            echo "[mighty_hw] dlio.service owns DLIO on this rover — starting with --odom-type external"
+        else
+            odom_type=dlio
+        fi
+    fi
+
     case "${odom_type}" in
-        dlio|dlio_in_mocap|mocap) ;;
+        dlio|dlio_in_mocap|mocap|external) ;;
         *) echo "[mighty_hw] bad --odom-type '${odom_type}'" >&2; usage ;;
     esac
+
+    # Inverse guard: an EXPLICIT dlio mode while the service owns DLIO would put a
+    # second dlio_odom_node in the namespace, double-publishing dlio/odom_node/*
+    # and odom->base_link — MIGHTY's state estimate would flip between them.
+    if [[ "${dlio_owned}" == true ]] \
+       && [[ "${odom_type}" == dlio || "${odom_type}" == dlio_in_mocap ]]; then
+        echo "[mighty_hw] REFUSING --odom-type ${odom_type}: dlio.service (or a 'dlio' container)" \
+             "is already running the same nodes. Stop it first (sudo systemctl stop dlio)," \
+             "or use --odom-type external." >&2
+        exit 1
+    fi
 
     # Fail fast on the hard prereq, warn on the soft one — the pane-side
     # spin-waits still guard every node, this is just early readable feedback.
@@ -151,6 +194,16 @@ start() {
         mocap)
             titles+=('tf mocap->base_link' 'tf world->map' 'tf map->odom')
             cmds+=("$(dx "${tf_mocap_base}")" "$(dx "${tf_world_map}")" "$(dx "${tf_map_odom}")")
+            ;;
+        external)
+            # Nothing to add: dlio.service publishes DLIO, the seed pose and
+            # map->odom. MIGHTY (pane 0) still gates on wait_for_tf.py for
+            # <ns>/map -> <ns>/odom, which that service provides.
+            if [[ "${two_d}" == true ]]; then
+                echo "[mighty_hw] NOTE: --two-d-only is ignored with --odom-type external —" \
+                     "two_d_only belongs to dlio.service (DLIO_TWO_D_ONLY, or its own" \
+                     "--two-d-only flag)." >&2
+            fi
             ;;
     esac
     if (( ${#titles[@]} != ${#cmds[@]} )); then
