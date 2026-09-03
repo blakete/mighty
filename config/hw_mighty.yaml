@@ -26,6 +26,7 @@ mighty_node:
 
         # Visual (for real-world implementation, visual should be 0)
         visual_level: 2                                         # [-] visual level (0: no visual, 1: minimal visual, 2: full visual)
+        viz_period_s: 0.05                              # [s] Min period between visualization publishes in the replan loop. 20 Hz cycles (previous hardcoded value)
 
         # Global planner parameters
         global_planner: "sjps"                                  # ["sjps"]

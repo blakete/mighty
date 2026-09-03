@@ -32,6 +32,7 @@ mighty_node:
         use_hardware: true                              # [-] Real hardware vs simulation
         provide_goal_in_global_frame: false             # [-] Goal given in global frame (true for hardware with Vicon)
         visual_level: 2                                 # [-] Visualization level (0: none, 1: minimal, 2: full)
+        viz_period_s: 0.2                               # [s] Min period between visualization publishes in the replan loop. 5 Hz cycles: cuts cross-mesh marker traffic ~4x (RR06 -> hackbox)
 
         # --- Multi-Agent / Frame Alignment ---
         share_traj: true                               # [-] Publish own planned traj on /trajs (off for solo HW runs to skip the swarm channel)

@@ -66,6 +66,11 @@ struct parameters {
   // Visual level
   int visual_level;
 
+  // Minimum period between visualization publishes in the replan loop [s].
+  // The replan loop runs at 100 Hz; every MarkerArray publish in it shares one
+  // gate, so this single knob rate-limits the whole visualization block.
+  double viz_period_s;
+
   // Global planner parameters
   std::string global_planner;
   bool global_planner_verbose;

@@ -524,6 +524,9 @@ void MIGHTY_NODE::declareParameters() {
 
   // Visual
   this->declare_parameter("visual_level", 1);
+  // Shared throttle for the replan loop visualization block (see the do_viz
+  // gate). Default 0.05 s = 20 Hz, the value this was hardcoded to before.
+  this->declare_parameter("viz_period_s", 0.05);
 
   // Global planner parameters
   this->declare_parameter("file_path", "/home/kkondo/code/dynus_ws/src/dynus/data/data.txt");
@@ -870,6 +873,7 @@ void MIGHTY_NODE::setParameters() {
 
   // Visual level
   par_.visual_level = this->get_parameter("visual_level").as_int();
+  par_.viz_period_s = this->get_parameter("viz_period_s").as_double();
 
   // Global Planner parameters
   file_path_ = this->get_parameter("file_path").as_string();
@@ -1212,6 +1216,9 @@ void MIGHTY_NODE::printParameters() {
 
   // Visual
   RCLCPP_INFO(this->get_logger(), "Visual Level: %d", par_.visual_level);
+  RCLCPP_INFO(this->get_logger(), "Viz Period: %.3f s (%.1f Hz)",
+              par_.viz_period_s,
+              par_.viz_period_s > 0.0 ? 1.0 / par_.viz_period_s : 0.0);
 
   // HGP parameters
   RCLCPP_INFO(this->get_logger(), "File Path: %s", file_path_.c_str());
@@ -1665,16 +1672,23 @@ void MIGHTY_NODE::replanCallback() {
     RCLCPP_INFO(this->get_logger(), "Command to execution time: %.2f ms", command_to_exec_time_ms);
   }
 
-  // Throttle the visualization block to ~20 Hz. The replan loop is 100 Hz
-  // which is fine for control, but publishing all of these MarkerArrays at
-  // that rate (especially traj_committed_colored, hgp_path_marker,
+  // Throttle the visualization block. The replan loop is 100 Hz, which is fine
+  // for control, but publishing all of these MarkerArrays at that rate
+  // (especially traj_committed_colored, hgp_path_marker,
   // original_hgp_path_marker — measured at 100-200 Hz) overwhelms RViz and it
-  // drops messages with "some messages were lost" warnings. 20 Hz is visually
-  // smooth and cuts marker traffic ~5x.
+  // drops messages with "some messages were lost" warnings.
+  //
+  // Rate is par_.viz_period_s (default 0.05 s = 20 Hz, the value this used to
+  // hardcode). ONE gate for the whole block, so this is also the only correct
+  // place to rate-limit these topics: each cycle publishes a delete-only
+  // MarkerArray followed by the real one, so anything that drops individual
+  // messages downstream (a zenoh `downsampling` rule, say) passes the delete
+  // and drops its redraw, and RViz clears the display and never repaints.
+  // Throttling here keeps every emitted cycle a complete delete+redraw pair.
   bool do_viz = false;
   if (par_.visual_level >= 1) {
     const double t_now_viz = this->now().seconds();
-    if (t_now_viz - last_replan_viz_publish_t_ >= 0.05) {
+    if (t_now_viz - last_replan_viz_publish_t_ >= par_.viz_period_s) {
       do_viz = true;
       last_replan_viz_publish_t_ = t_now_viz;
     }
