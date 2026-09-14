@@ -76,6 +76,10 @@ def generate_launch_description():
     map_size_y_arg = DeclareLaunchArgument('map_size_y', default_value='20.0')
     map_size_z_arg = DeclareLaunchArgument('map_size_z', default_value='6.0')
     odometry_topic_arg = DeclareLaunchArgument('odometry_topic', default_value='visual_slam/odom')
+    only_nodes_arg = DeclareLaunchArgument('only_nodes', default_value='',
+        description='HARDWARE ONLY. Comma-separated subset of this file\'s nodes '
+                    'to start; empty = all. Keys are the nodes\' real ROS names: '
+                    'mighty_node, convert_odom_to_state, convert_vicon_to_state, mpc')
 
     # Opaque function to launch nodes
     def launch_setup(context, *args, **kwargs):
@@ -353,6 +357,41 @@ def generate_launch_description():
                 nodes_to_start.append(mpc_node)
             nodes_to_start.append(pcl_render_node) if parameters['sim_env'] == 'fake_sim' else None
 
+        # Optional node-subset filter, used by docker/mighty_hw.sh to give each
+        # node its OWN tmux pane and process (Ctrl-C restarts one node, not all
+        # three) while this file stays the single source of truth for parameters.
+        # The empty default starts whatever the mode logic above chose, so every
+        # other caller is unaffected. Keys are the nodes' real ROS names, so they
+        # can be copy-pasted straight out of `ros2 node list`.
+        only_nodes = LaunchConfiguration('only_nodes').perform(context)
+        if only_nodes:
+            if not use_hardware:
+                raise RuntimeError(
+                    'only_nodes:= is a hardware-only filter; in sim it would '
+                    'silently drop fake_sim/pcl_render and leave mighty with no state')
+            keyed = {
+                'mighty_node':            mighty_node,
+                'convert_odom_to_state':  hw_odom_to_state_node,
+                'convert_vicon_to_state': pose_twist_to_state_node,
+                'mpc':                    mpc_node,
+            }
+            wanted = [k.strip() for k in only_nodes.split(',') if k.strip()]
+            unknown = [k for k in wanted if k not in keyed]
+            if unknown:
+                raise RuntimeError(f'only_nodes:= unknown key(s) {unknown}; '
+                                   f'valid keys: {sorted(keyed)}')
+            picked = [keyed[k] for k in wanted if keyed[k] in nodes_to_start]
+            if not picked:
+                # An empty action list makes ros2 launch exit 0 in SILENCE, which
+                # in a tmux pane looks exactly like a healthy node. Fail loudly.
+                here = sorted(k for k, n in keyed.items() if n in nodes_to_start)
+                raise RuntimeError(
+                    f'only_nodes:={only_nodes} selects nothing this mode starts '
+                    f'(robot_type={robot_type}, '
+                    f'use_onboard_localization={use_onboard_localization}); '
+                    f'available here: {here}')
+            nodes_to_start = picked
+
         return nodes_to_start
 
     # Create launch description
@@ -389,5 +428,6 @@ def generate_launch_description():
         formation_self_offset_arg,
         formation_neighbor_ids_arg,
         formation_neighbor_offsets_arg,
+        only_nodes_arg,
         OpaqueFunction(function=launch_setup)
     ])

@@ -13,9 +13,24 @@
 #   mighty_hw.sh logs [...]        # container PID-1 output (idle loop; panes hold the real logs)
 #   mighty_hw.sh rebuild [...]     # stop + compose build + start (start flags forwarded)
 #
-# Panes by --odom-type (default: AUTO, see 'external'; two_d_only defaults OFF,
-# --two-d-only enables):
-#   dlio           Onboard MIGHTY | RViz 2D goal | DLIO | seed pose | tf map->odom
+# EVERY mode opens these four panes first:
+#   MIGHTY planner | <state converter> | MPC | RViz 2D goal
+# The first three are onboard_mighty.launch.py's three nodes, one pane each via
+# its only_nodes:= filter (mighty_node | convert_odom_to_state or
+# convert_vicon_to_state | mpc) — so Ctrl-C -> Up -> Enter restarts ONE node
+# instead of all three. The launch file still computes every parameter.
+#
+# ROLLBACK, and it is ASYMMETRIC: to undo the split, revert THIS HOST SCRIPT
+# ONLY (git checkout -- docker/mighty_hw.sh) and start again. No rebuild. Do NOT
+# revert the launch file while keeping this script: ros2 launch silently ignores
+# an argument it does not declare, so every pane would start the FULL node set
+# (three publishers on cmd_vel_auto). only_nodes is inert at its empty default,
+# so leaving the new launch file baked in is the safe state. The guard in
+# start() refuses to run against an image that predates it.
+#
+# Extra panes by --odom-type (default: AUTO, see 'external'; two_d_only defaults
+# OFF, --two-d-only enables):
+#   dlio           DLIO | seed pose | tf map->odom
 #                  Replicates what dlio.service ran: DLIO anchored by a constant
 #                  seed-pose spoof on /<ns>/world at z=${DLIO_SEED_Z:-0.4}.
 #   dlio_in_mocap  same minus the seed pose pane — a REAL mocap publishes
@@ -155,15 +170,42 @@ start() {
     local robot_name
     robot_name="$(docker exec "${CONTAINER}" printenv ROBOT_NAME)"
 
+    # This script is HOST-side but onboard_mighty.launch.py is BAKED INTO THE
+    # IMAGE, so the two can drift — and ros2 launch SILENTLY IGNORES an argument
+    # it does not declare (verified against the pre-split image). On a stale
+    # image every per-node pane would therefore launch the FULL node set: three
+    # mighty_node instances, three MPCs, three publishers on cmd_vel_auto — the
+    # exact duplicate-stack failure compose.hw.yaml's header warns about. Refuse
+    # to build the session instead. grep -c, not grep -q: under pipefail an
+    # early-exiting grep -q SIGPIPEs the upstream and returns 141 ON MATCH.
+    if ! docker exec "${CONTAINER}" bash -c \
+            "${SETUP} && ros2 launch mighty onboard_mighty.launch.py --show-args \
+             2>/dev/null | grep -c only_nodes" >/dev/null 2>&1; then
+        echo "[mighty_hw] this image's onboard_mighty.launch.py has no only_nodes:= argument," \
+             "so each per-node pane would start the FULL stack (three publishers on" \
+             "cmd_vel_auto). Rebuild the image first: make hw-build" >&2
+        exit 1
+    fi
+
     # ---- per-mode node commands (mind the single-quote rule above) ----------
     # Consumers gate on the TFs they need via wait_for_tf.py (the /tf_static
     # startup-race fix): the static publishers below latch one transient-local
     # sample, and a subscriber that forms too early would never receive it.
-    local mighty_cmd
+    # The gate is its OWN variable because only two of the three MIGHTY panes
+    # want it: mighty_node and mpc both resolve <ns>/map -> <ns>/odom, but the
+    # state converter is a pure sub->pub relay that never touches TF. Gating it
+    # too would stall a third pane for wait_for_tf.py's 60 s timeout whenever
+    # the TF is missing — and it exits 0 on timeout, so that stall is silent.
+    local tf_gate='ros2 run mighty wait_for_tf.py $ROBOT_NAME/map $ROBOT_NAME/odom && '
+    # state_node is picked in the SAME branch as use_onboard_localization so the
+    # two can never disagree about where state comes from.
+    local launch_base state_node
     if [[ "${odom_type}" == mocap ]]; then
-        mighty_cmd="${DECOMP}"' && ros2 run mighty wait_for_tf.py $ROBOT_NAME/map $ROBOT_NAME/odom && ros2 launch mighty onboard_mighty.launch.py x:=0.0 y:=0.0 z:=0.0 yaw:=0.0 namespace:=$ROBOT_NAME use_hardware:=true use_onboard_localization:=false robot_type:=red_rover depth_camera_name:=d455 twist_topic:=mocap/twist'
-    else  # dlio | dlio_in_mocap — identical mighty; only the seed differs
-        mighty_cmd="${DECOMP}"' && ros2 run mighty wait_for_tf.py $ROBOT_NAME/map $ROBOT_NAME/odom && ros2 launch mighty onboard_mighty.launch.py x:=0.0 y:=0.0 z:=0.0 yaw:=0.0 namespace:=$ROBOT_NAME use_hardware:=true use_onboard_localization:=true robot_type:=red_rover depth_camera_name:=d455'
+        state_node=convert_vicon_to_state
+        launch_base='ros2 launch mighty onboard_mighty.launch.py x:=0.0 y:=0.0 z:=0.0 yaw:=0.0 namespace:=$ROBOT_NAME use_hardware:=true use_onboard_localization:=false robot_type:=red_rover depth_camera_name:=d455 twist_topic:=mocap/twist'
+    else  # dlio | dlio_in_mocap | external — identical mighty; only the seed differs
+        state_node=convert_odom_to_state
+        launch_base='ros2 launch mighty onboard_mighty.launch.py x:=0.0 y:=0.0 z:=0.0 yaw:=0.0 namespace:=$ROBOT_NAME use_hardware:=true use_onboard_localization:=true robot_type:=red_rover depth_camera_name:=d455'
     fi
     local dlio_cmd='ros2 launch direct_lidar_inertial_odometry dlio.launch.py namespace:=$ROBOT_NAME initial_pose_topic:=world two_d_only:='"${two_d}"
     local seed_cmd='ros2 topic pub -r 2 /$ROBOT_NAME/world geometry_msgs/msg/PoseStamped "{header: {frame_id: world}, pose: {position: {z: ${DLIO_SEED_Z:-0.4}}, orientation: {w: 1}}}"'
@@ -176,10 +218,19 @@ start() {
     # (that is how the mapper removal once left pane 0 titled "Onboard MIGHTY"
     # while running the goal republisher, and MIGHTY never started at all).
     # The length check below turns any future mismatch into a startup error.
+    # onboard_mighty.launch.py's three nodes get one pane EACH via its
+    # only_nodes:= filter, so Ctrl-C -> Up -> Enter restarts a single node
+    # instead of all three. The launch file still computes every parameter
+    # (mighty_node's are a YAML merge plus overrides — never hand-roll them as
+    # ros2 run); only_nodes just picks which of its nodes this pane starts.
+    # NOTE: restarting the MPC pane is not instant — MPCNode builds an
+    # IPOPT/collocation NLP before its first control tick.
     local -a titles cmds
-    titles=('Onboard MIGHTY' 'RViz 2D goal')
+    titles=('MIGHTY planner' "${state_node}" 'MPC' 'RViz 2D goal')
     cmds=(
-        "$(dx "${mighty_cmd}")"
+        "$(dx "${DECOMP} && ${tf_gate}${launch_base} only_nodes:=mighty_node")"
+        "$(dx "${DECOMP} && ${launch_base} only_nodes:=${state_node}")"
+        "$(dx "${DECOMP} && ${tf_gate}${launch_base} only_nodes:=mpc")"
         "$(dx 'ros2 run mighty repub_rviz_2Dgoal.py')"
     )
     case "${odom_type}" in
