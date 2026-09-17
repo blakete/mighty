@@ -162,8 +162,9 @@ Reference run (2026-09-17, `mad_summer_2026/traversability_test_cases/bag_202608
 — "scene 5", 117 s, ~20 s stationary then a clean drive): rover — 27 exploration goals, 8845
 trajectories, 4162 `cmd_vel_auto`; laptop replay of the recording — 24 distinct exploration
 goals, 5712 trajectories, MPC to `v_max`, 0 TF/solver failures. The augmented bag is the
-one to test an image against, archived next to its source as
-`bag_20260806_151753_RR08_pass1_augmented_20260917/` (its `description.txt` has the recipe).
+one to test an image against, on the NAS at
+`mad_summer_2026/planner_test_cases/bag_20260806_151753_RR08_scene5_planner_replay/`
+(its `description.txt` lists inputs vs reference outputs and the recipe).
 
 Gotcha: the MPC reads its pose from `dlio/odom_node/pose` (`mpc.yaml: pose_topic`), not
 from `/state` or TF — leave that topic out of the replay and every command is exactly 0.
