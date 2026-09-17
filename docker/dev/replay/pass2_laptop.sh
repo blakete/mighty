@@ -15,6 +15,8 @@ BAG="${1:?augmented bag dir}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; D="$(cd "$HERE/../.." && pwd)"
 ENVF="${2:-$HERE/rover.RR08.env}"
 set -a; . "$ENVF"; set +a; R="${ROBOT_NAME:?}"
+# Count for the whole bag plus the planner's tail, whatever the bag's length.
+W=$(python3 -c "import yaml;print(int(yaml.safe_load(open('$BAG/metadata.yaml'))['rosbag2_bagfile_information']['duration']['nanoseconds']/1e9)+25)")
 cd "$D"
 ROVER_ENV_FILE="$ENVF" ./mighty_hw.sh start --dev 2>&1 | grep -E "session up|rror"
 sleep 8
@@ -24,7 +26,7 @@ docker run -d --name replay2 --network host --init --shm-size=256m --env-file "$
   -v "$D/dev:/home/swarm/config:ro" -v "$BAG:/bag:ro" -v "$HERE/restamp_relay.py:/relay.py:ro" \
   mighty-hw:local sleep infinity >/dev/null
 X() { docker exec replay2 bash -c "source /opt/ros/humble/setup.bash && source /home/swarm/code/mighty_ws/install/setup.bash && $1"; }
-docker exec -d replay2 bash -c "source /opt/ros/humble/setup.bash && source /home/swarm/code/mighty_ws/install/setup.bash && R=$R python3 - > /tmp/count.log 2>&1 <<'PY'
+docker exec -d replay2 bash -c "source /opt/ros/humble/setup.bash && source /home/swarm/code/mighty_ws/install/setup.bash && R=$R W=$W python3 - > /tmp/count.log 2>&1 <<'PY'
 import rclpy, time, math, os
 from rclpy.node import Node
 from geometry_msgs.msg import Twist, PoseStamped
@@ -40,7 +42,7 @@ class C(Node):
         if k=='cmd': s.vmax=max(s.vmax, math.hypot(m.linear.x, m.angular.z))
         if k=='explore': s.goals.add((round(m.pose.position.x,2), round(m.pose.position.y,2)))
 rclpy.init(); c=C(); t0=time.time()
-while time.time()-t0<70: rclpy.spin_once(c, timeout_sec=0.2)
+while time.time()-t0<int(os.environ['W']): rclpy.spin_once(c, timeout_sec=0.2)
 print('laptop outputs:', c.n); print('max |cmd_vel_auto| (lin+ang):', round(c.vmax,3)); print('distinct exploration goals:', len(c.goals))
 PY"
 T="/tf /tf_static /$R/dlio/odom_node/odom /$R/dlio/odom_node/pose /$R/occ_2d_topic /$R/esdf_2d_topic /$R/planning_occ_2d_topic"
@@ -51,6 +53,6 @@ sleep 3
 X "ros2 bag play /bag --topics $T --remap $REMAP 2>&1 | grep -v '^$' | grep -v zenoh_transport | tail -1"
 sleep 20
 docker exec replay2 tail -1 /tmp/relay.log | cut -c1-140
-for i in $(seq 1 30); do docker exec replay2 test -s /tmp/count.log && break; sleep 3; done; docker exec replay2 cat /tmp/count.log
+for i in $(seq 1 60); do docker exec replay2 test -s /tmp/count.log && break; sleep 3; done; docker exec replay2 cat /tmp/count.log
 docker exec hw-mighty bash -c "echo mpc CMD steps: \$(grep -c CMD /tmp/mpc_debug.log), failures: \$(grep -c failed /tmp/mpc_debug.log); grep CMD /tmp/mpc_debug.log | tail -1 | cut -c1-140"
 docker rm -f replay2 >/dev/null; ./mighty_hw.sh stop 2>&1 | tail -1

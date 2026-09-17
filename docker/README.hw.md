@@ -146,10 +146,12 @@ DLIO deskews with; `/tf_static` goes out transient-local).
    emit. Expect thousands of goals/trajectories, non-zero `cmd_vel_auto`, the same
    exploration goals as the rover run.
 
-Reference run (2026-09-17, `mad_summer_2026/…/bag_20260713_161125_RR08_scene_5_face_plant`,
-first 21 s): rover — 15 exploration goals, 3049 trajectories, MPC 0.36 m/s; laptop — the
-same 15 goals, MPC ramps to `v_max`, 0 TF/solver failures. The augmented bag is archived
-next to the source as `…_pass1_augmented_20260917/`.
+Reference run (2026-09-17, `mad_summer_2026/traversability_test_cases/bag_20260806_151753_RR08`
+— "scene 5", 117 s, ~20 s stationary then a clean drive): rover — 27 exploration goals, 8845
+trajectories, 4162 `cmd_vel_auto`; laptop replay of the recording — 24 distinct exploration
+goals, 5712 trajectories, MPC to `v_max`, 0 TF/solver failures. The augmented bag is the
+one to test an image against, archived next to its source as
+`bag_20260806_151753_RR08_pass1_augmented_20260917/` (its `description.txt` has the recipe).
 
 Gotcha: the MPC reads its pose from `dlio/odom_node/pose` (`mpc.yaml: pose_topic`), not
 from `/state` or TF — leave that topic out of the replay and every command is exactly 0.
