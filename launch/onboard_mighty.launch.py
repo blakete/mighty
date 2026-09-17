@@ -292,11 +292,14 @@ def generate_launch_description():
                     output='screen',
         )
 
-        camera_file = os.path.join( 
-        get_package_share_directory('local_sensing'), 
-        'config', 
-        'camera.yaml' 
-        )
+        # local_sensing is sim-only (pcl_render_node, appended below only when
+        # sim_env == 'fake_sim') and is NOT shipped in the hardware image, so
+        # resolve its share dir only when it can actually be used:
+        # get_package_share_directory raises at parse time otherwise, which
+        # took the whole hardware launch down with it.
+        camera_file = os.path.join(
+            get_package_share_directory('local_sensing'), 'config', 'camera.yaml'
+        ) if (not use_hardware and parameters.get('sim_env') == 'fake_sim') else ''
 
         pcl_render_node = Node(
             package='local_sensing',
