@@ -1,56 +1,66 @@
-# hw-mighty — the MIGHTY hardware autonomy stack in ONE container, host-tmux
-# variant (sibling of the rover drive/sensors/dlio compose files): the container
-# just IDLES (`sleep infinity`) and every node is a docker exec living in the
-# HOST tmux session 'hw_mighty', built directly by mighty_hw.sh — the single
-# entrypoint (run_hw_red_rover.py/tmuxp is the NATIVE `mighty` alias path only).
+# hw-mighty — ONE idling container; the MIGHTY planner, state converter, MPC and
+# the RViz goal republisher are docker-exec'd into it from a HOST tmux session
+# 'hw_mighty' built by mighty_hw.sh (the single entrypoint).
 #
-# The container must NEVER launch the session itself: when its command also ran
-# run_hw_red_rover.py (pre-2026-07-30), every start produced TWO full stacks —
-# an in-container session plus the host session — i.e. duplicate
-# mighty/MPC/mapper nodes (two publishers on cmd_vel_auto).
-#
-#   build:   docker compose -f compose.hw.yaml build     (or: make hw-build)
-#   up:      ./mighty_hw.sh start [--odom-type dlio|dlio_in_mocap|mocap]
-#   attach:  tmux attach -t hw_mighty                     (HOST session)
-#            (Ctrl-C / Up / Enter in a pane restarts just that node; Ctrl-b d detaches)
+#   build:   make hw-build            (docker compose build --ssh ...; see Makefile)
+#   pull:    ./mighty_hw.sh pull [tag] (fleet registry -> mighty-hw:local)
+#   up:      ./mighty_hw.sh start [--dev]
+#   attach:  tmux attach -t hw_mighty  (HOST session; Ctrl-C / Up / Enter restarts one node)
 #   down:    ./mighty_hw.sh stop
 #
-# PREREQS: drive.service (hosts the zenoh router on :7447) and sensors.service
-# (livox + D455 + base_link->lidar TF). This stack launches NO sensors and NO
-# router — the nodes attach to the host router over network_mode: host. Do NOT
-# run alongside the native `mighty` alias (double-publish), nor with
-# dlio.service enabled (the DLIO panes here are the same nodes).
+# The container must NEVER launch the session itself: when its command also
+# built the tmux session (pre-2026-07-30) every start produced TWO full stacks
+# double-publishing on cmd_vel_auto.
+#
+# PREREQS on a rover: drive.service (zenoh router on :7447), sensors.service
+# (livox + D455 + base_link->lidar TF), dlio.service (odometry + map->odom) and
+# the Orin mapper. This file launches none of them; the nodes attach to the host
+# router over network_mode: host.
 name: hw-mighty
 services:
   hw-mighty:
-    # Build context = /home/swarm/code (4 levels up from this docker/ dir) so the
-    # image bakes the HOST checkouts of mighty_ws / decomp_ws / livox_ws /
-    # Livox-SDK2 at their host paths. What ships is filtered by
-    # Dockerfile.hw.dockerignore.
     build:
-      context: ../../../..
-      dockerfile: mighty_ws/src/mighty/docker/Dockerfile.hw
+      context: ..                      # the mighty repo root; deps are cloned in-image
+      dockerfile: docker/Dockerfile.hw
     image: mighty-hw:local
     container_name: hw-mighty
-    network_mode: host            # share host net → reach the host rmw_zenohd on :7447
-    # Identity + ROS transport come from the rover's provisioned env, exactly like
-    # the drive/sensors/dlio siblings — nothing rover-specific in this directory.
-    # Provides ROBOT_NAME/VEHTYPE/VEHNUM/ROS_DOMAIN_ID/RMW_IMPLEMENTATION and the
-    # optional DLIO_SEED_Z. ZENOH_ROUTER_CONFIG_URI rides along harmlessly: no
-    # router runs in this container, the nodes are plain zenoh sessions.
-    env_file: /etc/rover/rover.env
+    network_mode: host                 # reach the host rmw_zenohd on :7447
+    # Identity + transport from the rover's provisioned env (ROBOT_NAME, VEHTYPE/
+    # VEHNUM, ROS_DOMAIN_ID, RMW_IMPLEMENTATION), exactly like the drive/sensors/
+    # dlio siblings — nothing in this directory is rover-specific. `required:
+    # false` only so that `stop` works on a laptop without the file; `start`
+    # refuses to build the session when ROBOT_NAME comes up empty.
+    env_file:
+      - path: ${ROVER_ENV_FILE:-/etc/rover/rover.env}
+        required: false
     environment:
-      # Fleet zenoh session config (same file the drive/sensors siblings load):
-      # 5 s non-droppable stall bound + qos drop-toward-router rule; the
-      # /home/swarm/config mount below is required.
+      # Fleet zenoh SESSION config (the file drive/sensors/dlio all load): 5 s
+      # non-droppable stall bound + the drop-toward-router qos rule. Resolved
+      # from the mount below; --dev points both at docker/dev/.
       ZENOH_SESSION_CONFIG_URI: /home/swarm/config/zenoh_session_config.json5
     volumes:
-      - "/home/swarm/config:/home/swarm/config:ro" # fleet zenoh session config
+      - "${ROVER_CONFIG_DIR:-/home/swarm/config}:/home/swarm/config:ro"
     init: true
     stop_grace_period: 15s
-    restart: "no"                 # manual stack; a dead pane stays dead (native semantics)
-    # Idle keep-alive: the nodes are started from the HOST tmux 'hw_mighty'
-    # session as docker execs (mighty_hw.sh start); the container only has to
-    # stay up. The session builder runs on the host, so flag/pane changes need
-    # no image rebuild.
+    restart: "no"                      # manual stack; a dead pane stays dead
     command: ["sleep", "infinity"]
+
+  # --dev only (compose profile 'dev', never started on a rover): an ISOLATED
+  # zenoh router from the same image on 127.0.0.1:7448, configured by
+  # dev/zenoh_router_config.json5 — listen only, multicast scouting off, no
+  # connect entries — so a laptop stack cannot join the fleet graph (the C2
+  # router on alienware-02 listens on *:7447). Sourced explicitly: bash -lc
+  # does not read /root/.bashrc for non-interactive shells.
+  zenoh-router:
+    profiles: [dev]
+    image: mighty-hw:local
+    container_name: hw-mighty-dev-router
+    network_mode: host
+    environment:
+      RMW_IMPLEMENTATION: rmw_zenoh_cpp
+      ZENOH_ROUTER_CONFIG_URI: /home/swarm/config/zenoh_router_config.json5
+    volumes:
+      - "${ROVER_CONFIG_DIR:-/home/swarm/config}:/home/swarm/config:ro"
+    init: true
+    restart: "no"
+    command: ["bash", "-c", "source /opt/ros/humble/setup.bash && exec ros2 run rmw_zenoh_cpp rmw_zenohd"]

@@ -1,0 +1,24 @@
+// Isolated zenoh router for `mighty_hw.sh start --dev` (ros2 run rmw_zenoh_cpp
+// rmw_zenohd). Listens on loopback :7448 only, scouts nothing, dials nothing —
+// a laptop stack must never reach the fleet's routers. Keys not listed here
+// take zenoh defaults.
+{
+  mode: "router",
+  listen: {
+    endpoints: ["tcp/127.0.0.1:7448"],
+  },
+  connect: {
+    endpoints: [],
+  },
+  scouting: {
+    multicast: { enabled: false },
+    gossip: { enabled: true, multihop: false },
+  },
+  timestamping: {
+    enabled: { router: true, peer: true, client: true },
+  },
+  adminspace: {
+    enabled: true,
+    permissions: { read: true, write: false },
+  },
+}

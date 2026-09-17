@@ -1,0 +1,45 @@
+// Session config for the nodes under `mighty_hw.sh start --dev`: the fleet
+// zenoh_session_config.json5 reduced to what a laptop needs — peer mode dialing
+// ONLY the isolated dev router on :7448, loopback listen, no multicast, no
+// per-zid qos rules. Keys not listed here take zenoh defaults.
+{
+  mode: "peer",
+  connect: {
+    timeout_ms: { router: -1, peer: -1, client: 0 },
+    endpoints: ["tcp/localhost:7448"],
+    exit_on_failure: { router: false, peer: false, client: true },
+  },
+  listen: {
+    timeout_ms: 0,
+    endpoints: ["tcp/localhost:0"],
+    exit_on_failure: true,
+  },
+  open: {
+    return_conditions: { connect_scouted: true, declares: true },
+  },
+  scouting: {
+    multicast: { enabled: false },
+    gossip: {
+      enabled: true,
+      multihop: false,
+      target: { router: ["router", "peer"], peer: ["router"] },
+      autoconnect: { router: [], peer: ["router", "peer"] },
+    },
+  },
+  timestamping: {
+    enabled: { router: true, peer: true, client: true },
+    drop_future_timestamp: false,
+  },
+  queries_default_timeout: 600000,
+  routing: {
+    peer: { mode: "peer_to_peer" },
+  },
+  transport: {
+    unicast: { qos: { enabled: true } },
+    link: { rx: { max_message_size: 1073741824 } },
+  },
+  adminspace: {
+    enabled: true,
+    permissions: { read: true, write: false },
+  },
+}
