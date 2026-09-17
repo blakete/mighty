@@ -127,6 +127,33 @@ With no sensors or odometry the planner and MPC panes sit in `wait_for_tf.py` un
 its 60 s timeout, then start; that is the expected shape of a dev run. `stop` removes
 the router too.
 
+## Functional test by bag replay (`dev/replay/`)
+
+A rover on wall power (lidar off) proves only the plumbing. `dev/replay/` turns a recorded
+Livox bag into a planner test in two passes, with **no mapper on the laptop and no sim
+time**: `restamp_relay.py` republishes bag topics with one constant offset so they land on
+the wall clock (headers, every `/tf` transform, and the Livox per-point `timestamp`, which
+DLIO deskews with; `/tf_static` goes out transient-local).
+
+1. **`pass1_rover.sh <bag> <seconds> <out>`** — on the rover, DISARMED, lidar off. Plays the
+   bag's `livox/{lidar,imu}` into the live graph; the real `dlio.service`, the real Orin
+   mapper and the deployed stack do the rest, and everything the planner needs (plus what it
+   produced) is recorded into an *augmented* bag. Afterwards `dlio.service` and the Orin
+   mapper hold replay state — restart them before real driving.
+2. **`pass2_laptop.sh <augmented bag> [env]`** — on a laptop. Replays only the planner
+   inputs (TF, DLIO odom **and pose**, the three `*_2d_topic` grids) into the `--dev` stack
+   running under the recording rover's name, and counts what the laptop's own planner/MPC
+   emit. Expect thousands of goals/trajectories, non-zero `cmd_vel_auto`, the same
+   exploration goals as the rover run.
+
+Reference run (2026-09-17, `mad_summer_2026/…/bag_20260713_161125_RR08_scene_5_face_plant`,
+first 21 s): rover — 15 exploration goals, 3049 trajectories, MPC 0.36 m/s; laptop — the
+same 15 goals, MPC ramps to `v_max`, 0 TF/solver failures. The augmented bag is archived
+next to the source as `…_pass1_augmented_20260917/`.
+
+Gotcha: the MPC reads its pose from `dlio/odom_node/pose` (`mpc.yaml: pose_topic`), not
+from `/state` or TF — leave that topic out of the replay and every command is exactly 0.
+
 ## Env & networking
 
 - Identity/transport from **`/etc/rover/rover.env`** via compose `env_file`

@@ -87,7 +87,9 @@ start() {
     done
 
     if [[ "${dev}" == true ]]; then
-        export ROVER_ENV_FILE="${SCRIPT_DIR}/dev/rover.env"
+        # A pre-set ROVER_ENV_FILE wins, so a bag replay can run the dev stack
+        # under the recording rover's name (ROBOT_NAME=RR08) — see README.
+        export ROVER_ENV_FILE="${ROVER_ENV_FILE:-${SCRIPT_DIR}/dev/rover.env}"
         export ROVER_CONFIG_DIR="${SCRIPT_DIR}/dev"
         ZENOH_ROUTER_PORT=7448
         COMPOSE+=(--profile dev)
