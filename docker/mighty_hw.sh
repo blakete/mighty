@@ -1,158 +1,113 @@
 #!/usr/bin/env bash
 # mighty_hw.sh — SINGLE entrypoint for the CONTAINERIZED MIGHTY hardware stack,
-# host-tmux variant (sibling of the rover drive/sensors services): the hw-mighty
-# container just idles (`sleep infinity`, see compose.hw.yaml) and every node
-# runs as a `docker exec` whose controlling pane lives in a HOST tmux session
-# 'hw_mighty', built right here in bash — no tmuxp, no run_hw_red_rover.py
-# (that script is the NATIVE `mighty` alias path and stays untouched).
+# host-tmux variant (sibling of the rover drive/sensors/dlio services): the
+# hw-mighty container just idles (`sleep infinity`, see compose.hw.yaml) and
+# every node runs as a `docker exec` whose controlling pane lives in a HOST tmux
+# session 'hw_mighty', built right here in bash.
 #
-#   mighty_hw.sh start [--odom-type dlio|dlio_in_mocap|mocap|external] [--two-d-only|--no-two-d]
+#   mighty_hw.sh start [--dev]     # bring the container up + build the session
 #   mighty_hw.sh attach            # tmux attach (Ctrl-b d detaches; stack keeps running)
 #   mighty_hw.sh stop              # kill session, then compose down
 #   mighty_hw.sh status            # container + pane status
 #   mighty_hw.sh logs [...]        # container PID-1 output (idle loop; panes hold the real logs)
+#   mighty_hw.sh pull [<tag>]      # fleet registry <tag> (default latest) -> mighty-hw:local
 #   mighty_hw.sh rebuild [...]     # stop + compose build + start (start flags forwarded)
 #
-# EVERY mode opens these four panes first:
-#   MIGHTY planner | <state converter> | MPC | RViz 2D goal
+# FOUR panes, always:
+#   MIGHTY planner | convert_odom_to_state | MPC | RViz 2D goal
 # The first three are onboard_mighty.launch.py's three nodes, one pane each via
-# its only_nodes:= filter (mighty_node | convert_odom_to_state or
-# convert_vicon_to_state | mpc) — so Ctrl-C -> Up -> Enter restarts ONE node
-# instead of all three. The launch file still computes every parameter.
+# its only_nodes:= filter, so Ctrl-C -> Up -> Enter restarts ONE node instead of
+# all three. The launch file still computes every parameter (mighty_node's are a
+# YAML merge plus overrides — never hand-roll them as ros2 run).
 #
-# ROLLBACK, and it is ASYMMETRIC: to undo the split, revert THIS HOST SCRIPT
-# ONLY (git checkout -- docker/mighty_hw.sh) and start again. No rebuild. Do NOT
+# ROLLBACK of the per-node split is ASYMMETRIC: revert THIS HOST SCRIPT ONLY
+# (git checkout -- docker/mighty_hw.sh) and start again — no rebuild. Do NOT
 # revert the launch file while keeping this script: ros2 launch silently ignores
 # an argument it does not declare, so every pane would start the FULL node set
-# (three publishers on cmd_vel_auto). only_nodes is inert at its empty default,
-# so leaving the new launch file baked in is the safe state. The guard in
-# start() refuses to run against an image that predates it.
+# (three publishers on cmd_vel_auto). start() refuses to run against an image
+# whose launch file has no only_nodes:=.
 #
-# Extra panes by --odom-type (default: AUTO, see 'external'; two_d_only defaults
-# OFF, --two-d-only enables):
-#   dlio           DLIO | seed pose | tf map->odom
-#                  Replicates what dlio.service ran: DLIO anchored by a constant
-#                  seed-pose spoof on /<ns>/world at z=${DLIO_SEED_Z:-0.4}.
-#   dlio_in_mocap  same minus the seed pose pane — a REAL mocap publishes
-#                  /<ns>/world, and DLIO anchors to the FIRST pose it receives,
-#                  so a running spoof would race it and win.
-#   mocap          no DLIO at all: mighty flips to use_onboard_localization:=false
-#                  + twist from mocap/twist, and two extra static TFs bridge
-#                  the mocap frames (<ns> -> <ns>/base_link, world -> <ns>/map).
-#   external       NO odometry panes at all: dlio.service (see dlio_ws) owns DLIO,
-#                  the seed pose and map->odom. MIGHTY is launched exactly as in
-#                  dlio mode (use_onboard_localization:=true) and consumes
-#                  <ns>/dlio/odom_node/odom + the map->odom TF over zenoh, so it
-#                  does not care that they come from another container.
-#                  AUTO-SELECTED when dlio.service or a 'dlio' container is up.
-#
-# NO MAPPER PANE. mighty_node subscribes to <ns>/occ_2d_topic + <ns>/esdf_2d_topic
-# (mighty_node.cpp:311-321, SensorDataQoS) and does not care who publishes them.
-# Those used to come from global_mapper_ros, which is NOT in mighty-hw:local —
-# the acl-mapping COPY/build is commented out in Dockerfile.hw, so launching it
-# here only ever produced a "package not found" pane. They now come from
-# elevation_mapping_cupy on the OX08 Orin (192.168.12.1), which needs a CUDA GPU
-# this NUC does not have. To go back to the onboard mapper, uncomment the
-# acl-mapping block in Dockerfile.hw, rebuild, and re-add a mapper pane.
-#
-# PREREQS in EVERY mode (this stack launches NO sensors, NO router, NO mapper):
-#   drive.service    hosts the zenoh router on :7447
+# THIS STACK RUNS THE PLANNER AND CONTROLLER ONLY. The rest is owned elsewhere:
+#   drive.service    zenoh router on :7447 (hard prereq — start fails fast without it)
 #   sensors.service  livox + D455 + the base_link->lidar static TF
+#   dlio.service     DLIO odometry, the seed pose and tf map->odom (dlio_ws)
 #   OX08 Orin        elevation_mapping_cupy -> <ns>/occ_2d_topic, <ns>/esdf_2d_topic
 #                    (without it MIGHTY runs but never plans: no occupancy grid)
-# dlio.service and the DLIO panes here are THE SAME NODES — never run both. When
-# dlio.service (or a container named 'dlio') is up, `start` auto-selects
-# --odom-type external and launches no odometry panes; an explicit --odom-type
-# dlio/dlio_in_mocap is then REFUSED rather than silently double-published. On a
-# rover where dlio.service is inactive nothing changes — the default is still dlio.
+# MIGHTY consumes <ns>/dlio/odom_node/odom + map->odom over zenoh and does not
+# care which container publishes them. The old --odom-type dlio / dlio_in_mocap /
+# mocap modes, which ran DLIO or mocap TFs in here, went away with the DLIO layer
+# of the image; mocap would come back as static-TF panes if ever needed.
 #
-# NOTE: DLIO runs a ~3 s stationary IMU calibration whenever its pane (re)starts
-# — keep the rover still. Identity (ROBOT_NAME, RMW, optional DLIO_SEED_Z) comes
-# from /etc/rover/rover.env via compose env_file; nothing in this directory is
-# rover-specific.
+# --dev (laptop): no /etc/rover/rover.env, no /home/swarm/config, no
+# drive.service. Uses dev/rover.env (ROBOT_NAME=RR99) + dev/zenoh_*_config.json5
+# and starts an ISOLATED zenoh router on 127.0.0.1:7448 from the same image
+# (compose profile 'dev'). It dials nothing: a dev stack must not join the fleet.
+#
+# Identity (ROBOT_NAME, RMW) comes from /etc/rover/rover.env via compose
+# env_file; nothing in this directory is rover-specific.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONTAINER=hw-mighty
 SESSION=hw_mighty
+IMAGE=mighty-hw:local
+REGISTRY=registry.gitlab.com/mit-acl/ugv/redrover/rover/mighty-hw
+ZENOH_ROUTER_PORT="${ZENOH_ROUTER_PORT:-7447}"
 COMPOSE=(docker compose -f "${SCRIPT_DIR}/compose.hw.yaml")
+# MIGHTY_HW_TUNE=1: overlay this checkout's config/launch/rviz (see compose.hw.tune.yaml)
+[[ -n "${MIGHTY_HW_TUNE:-}" ]] && COMPOSE+=(-f "${SCRIPT_DIR}/compose.hw.tune.yaml")
 
 # In-container command preludes. Pane commands are sent single-quoted, so $VARs
 # in them expand INSIDE the container (env_file provides ROBOT_NAME etc.) — and
 # therefore a pane command must never contain a single quote. Every pane
 # spin-waits on the router first; the guard shares the pane's history line so
-# Ctrl-C -> Up -> Enter re-runs it too.
+# Ctrl-C -> Up -> Enter re-runs it too. wait_router is a function, not a
+# constant, because --dev moves the port after the flags are parsed.
 SETUP='source /opt/ros/humble/setup.bash && source /home/swarm/code/mighty_ws/install/setup.bash'
-DECOMP='source /home/swarm/code/decomp_ws/install/setup.bash'
-WAIT_ROUTER='until (echo >/dev/tcp/127.0.0.1/7447) 2>/dev/null; do echo "waiting for zenoh router (drive.service)..."; sleep 2; done'
-
-dx() { echo "docker exec -it ${CONTAINER} bash -c '${SETUP} && ${WAIT_ROUTER} && $1'"; }
+wait_router() {
+    echo "until (echo >/dev/tcp/127.0.0.1/${ZENOH_ROUTER_PORT}) 2>/dev/null; do echo \"waiting for zenoh router on :${ZENOH_ROUTER_PORT}...\"; sleep 2; done"
+}
+dx() { echo "docker exec -it ${CONTAINER} bash -c '${SETUP} && $(wait_router) && $1'"; }
 
 attach() { exec tmux attach -t "${SESSION}"; }
 
 usage() {
-    echo "usage: $0 {start [--odom-type dlio|dlio_in_mocap|mocap|external] [--two-d-only|--no-two-d] | attach | stop | status | logs | rebuild [start flags]}" >&2
+    echo "usage: $0 {start [--dev] | attach | stop | status | logs | pull [<tag>] | rebuild [start flags]}" >&2
     exit 2
 }
 
 start() {
-    local odom_type='' two_d=false
+    local dev=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --odom-type)  odom_type="${2:?--odom-type needs a value}"; shift ;;
-            --two-d-only) two_d=true ;;
-            --no-two-d)   two_d=false ;;
+            --dev) dev=true ;;
             *) echo "[mighty_hw] unknown option: $1" >&2; usage ;;
         esac
         shift
     done
 
-    # Who owns DLIO on this rover? dlio.service (dlio_ws) runs the SAME nodes as
-    # the DLIO panes below. Detect the live state instead of hardcoding a
-    # per-rover default, so this directory stays rover-agnostic and a rover
-    # without the service behaves exactly as before. Note `grep -c`, not
-    # `grep -q`: under `set -o pipefail` an early-exiting grep -q SIGPIPEs the
-    # upstream docker ps and the pipeline returns 141 ON MATCH.
-    local dlio_owned=false
-    if systemctl is-active --quiet dlio.service 2>/dev/null; then
-        dlio_owned=true
-    elif docker ps --format '{{.Names}}' 2>/dev/null | grep -cx dlio >/dev/null; then
-        dlio_owned=true
-    fi
-
-    if [[ -z "${odom_type}" ]]; then
-        if [[ "${dlio_owned}" == true ]]; then
-            odom_type=external
-            echo "[mighty_hw] dlio.service owns DLIO on this rover — starting with --odom-type external"
-        else
-            odom_type=dlio
+    if [[ "${dev}" == true ]]; then
+        export ROVER_ENV_FILE="${SCRIPT_DIR}/dev/rover.env"
+        export ROVER_CONFIG_DIR="${SCRIPT_DIR}/dev"
+        ZENOH_ROUTER_PORT=7448
+        COMPOSE+=(--profile dev)
+        echo "[mighty_hw] --dev: identity from dev/rover.env, isolated zenoh router on 127.0.0.1:${ZENOH_ROUTER_PORT}"
+    else
+        # Fail fast on the hard prereq, warn on the soft ones — the pane-side
+        # spin-waits still guard every node, this is just early readable
+        # feedback. grep -c, not grep -q: under pipefail an early-exiting grep -q
+        # SIGPIPEs the upstream docker ps and returns 141 ON MATCH.
+        if ! (echo >/dev/tcp/127.0.0.1/${ZENOH_ROUTER_PORT}) 2>/dev/null; then
+            echo "[mighty_hw] no zenoh router on 127.0.0.1:${ZENOH_ROUTER_PORT} — start drive.service first" >&2
+            exit 1
         fi
-    fi
-
-    case "${odom_type}" in
-        dlio|dlio_in_mocap|mocap|external) ;;
-        *) echo "[mighty_hw] bad --odom-type '${odom_type}'" >&2; usage ;;
-    esac
-
-    # Inverse guard: an EXPLICIT dlio mode while the service owns DLIO would put a
-    # second dlio_odom_node in the namespace, double-publishing dlio/odom_node/*
-    # and odom->base_link — MIGHTY's state estimate would flip between them.
-    if [[ "${dlio_owned}" == true ]] \
-       && [[ "${odom_type}" == dlio || "${odom_type}" == dlio_in_mocap ]]; then
-        echo "[mighty_hw] REFUSING --odom-type ${odom_type}: dlio.service (or a 'dlio' container)" \
-             "is already running the same nodes. Stop it first (sudo systemctl stop dlio)," \
-             "or use --odom-type external." >&2
-        exit 1
-    fi
-
-    # Fail fast on the hard prereq, warn on the soft one — the pane-side
-    # spin-waits still guard every node, this is just early readable feedback.
-    if ! (echo >/dev/tcp/127.0.0.1/7447) 2>/dev/null; then
-        echo "[mighty_hw] no zenoh router on 127.0.0.1:7447 — start drive.service first" >&2
-        exit 1
-    fi
-    if ! docker ps --format '{{.Names}}' | grep -cx sensors >/dev/null; then
-        echo "[mighty_hw] WARNING: no 'sensors' container (sensors.service down?) — livox/DLIO/mapper will sit idle" >&2
+        if ! docker ps --format '{{.Names}}' | grep -cx sensors >/dev/null; then
+            echo "[mighty_hw] WARNING: no 'sensors' container (sensors.service down?) — no lidar, no odometry" >&2
+        fi
+        if ! systemctl is-active --quiet dlio.service 2>/dev/null \
+           && ! docker ps --format '{{.Names}}' | grep -cx dlio >/dev/null; then
+            echo "[mighty_hw] WARNING: dlio.service is not running — MIGHTY and MPC will wait on tf map->odom" >&2
+        fi
     fi
 
     "${COMPOSE[@]}" up -d
@@ -168,95 +123,51 @@ start() {
         exit 1
     fi
     local robot_name
-    robot_name="$(docker exec "${CONTAINER}" printenv ROBOT_NAME)"
+    robot_name="$(docker exec "${CONTAINER}" printenv ROBOT_NAME || true)"
+    if [[ -z "${robot_name}" ]]; then
+        echo "[mighty_hw] ROBOT_NAME is empty in the container — /etc/rover/rover.env missing?" \
+             "(set ROVER_ENV_FILE, or use --dev on a laptop)" >&2
+        "${COMPOSE[@]}" down
+        exit 1
+    fi
 
     # This script is HOST-side but onboard_mighty.launch.py is BAKED INTO THE
     # IMAGE, so the two can drift — and ros2 launch SILENTLY IGNORES an argument
-    # it does not declare (verified against the pre-split image). On a stale
-    # image every per-node pane would therefore launch the FULL node set: three
-    # mighty_node instances, three MPCs, three publishers on cmd_vel_auto — the
-    # exact duplicate-stack failure compose.hw.yaml's header warns about. Refuse
-    # to build the session instead. grep -c, not grep -q: under pipefail an
-    # early-exiting grep -q SIGPIPEs the upstream and returns 141 ON MATCH.
+    # it does not declare. On a stale image every per-node pane would therefore
+    # launch the FULL node set (three publishers on cmd_vel_auto). Refuse to
+    # build the session instead.
     if ! docker exec "${CONTAINER}" bash -c \
             "${SETUP} && ros2 launch mighty onboard_mighty.launch.py --show-args \
              2>/dev/null | grep -c only_nodes" >/dev/null 2>&1; then
         echo "[mighty_hw] this image's onboard_mighty.launch.py has no only_nodes:= argument," \
              "so each per-node pane would start the FULL stack (three publishers on" \
-             "cmd_vel_auto). Rebuild the image first: make hw-build" >&2
+             "cmd_vel_auto). Rebuild or pull a newer image first." >&2
         exit 1
     fi
 
-    # ---- per-mode node commands (mind the single-quote rule above) ----------
-    # Consumers gate on the TFs they need via wait_for_tf.py (the /tf_static
-    # startup-race fix): the static publishers below latch one transient-local
-    # sample, and a subscriber that forms too early would never receive it.
-    # The gate is its OWN variable because only two of the three MIGHTY panes
-    # want it: mighty_node and mpc both resolve <ns>/map -> <ns>/odom, but the
-    # state converter is a pure sub->pub relay that never touches TF. Gating it
-    # too would stall a third pane for wait_for_tf.py's 60 s timeout whenever
-    # the TF is missing — and it exits 0 on timeout, so that stall is silent.
+    # ---- pane commands (mind the single-quote rule above) --------------------
+    # mighty_node and mpc both resolve <ns>/map -> <ns>/odom, so they gate on
+    # wait_for_tf.py (the /tf_static startup-race fix: the static publisher
+    # latches one transient-local sample that a too-early subscriber never
+    # sees). The state converter is a pure sub->pub relay that never touches TF
+    # — gating it too would stall a third pane for the 60 s timeout whenever the
+    # TF is missing, and wait_for_tf.py exits 0 on timeout, so silently.
     local tf_gate='ros2 run mighty wait_for_tf.py $ROBOT_NAME/map $ROBOT_NAME/odom && '
-    # state_node is picked in the SAME branch as use_onboard_localization so the
-    # two can never disagree about where state comes from.
-    local launch_base state_node
-    if [[ "${odom_type}" == mocap ]]; then
-        state_node=convert_vicon_to_state
-        launch_base='ros2 launch mighty onboard_mighty.launch.py x:=0.0 y:=0.0 z:=0.0 yaw:=0.0 namespace:=$ROBOT_NAME use_hardware:=true use_onboard_localization:=false robot_type:=red_rover depth_camera_name:=d455 twist_topic:=mocap/twist'
-    else  # dlio | dlio_in_mocap | external — identical mighty; only the seed differs
-        state_node=convert_odom_to_state
-        launch_base='ros2 launch mighty onboard_mighty.launch.py x:=0.0 y:=0.0 z:=0.0 yaw:=0.0 namespace:=$ROBOT_NAME use_hardware:=true use_onboard_localization:=true robot_type:=red_rover depth_camera_name:=d455'
-    fi
-    local dlio_cmd='ros2 launch direct_lidar_inertial_odometry dlio.launch.py namespace:=$ROBOT_NAME initial_pose_topic:=world two_d_only:='"${two_d}"
-    local seed_cmd='ros2 topic pub -r 2 /$ROBOT_NAME/world geometry_msgs/msg/PoseStamped "{header: {frame_id: world}, pose: {position: {z: ${DLIO_SEED_Z:-0.4}}, orientation: {w: 1}}}"'
-    local tf_map_odom='ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 $ROBOT_NAME/map $ROBOT_NAME/odom'
-    local tf_mocap_base='ros2 run tf2_ros static_transform_publisher --frame-id $ROBOT_NAME --child-frame-id $ROBOT_NAME/base_link'
-    local tf_world_map='ros2 run tf2_ros static_transform_publisher --frame-id world --child-frame-id $ROBOT_NAME/map'
+    local launch_base='ros2 launch mighty onboard_mighty.launch.py x:=0.0 y:=0.0 z:=0.0 yaw:=0.0 namespace:=$ROBOT_NAME use_hardware:=true use_onboard_localization:=true robot_type:=red_rover depth_camera_name:=d455'
 
-    # titles[i] LABELS cmds[i] — the two arrays are positional, so dropping an
-    # entry from one and not the other silently mislabels every pane after it
-    # (that is how the mapper removal once left pane 0 titled "Onboard MIGHTY"
-    # while running the goal republisher, and MIGHTY never started at all).
-    # The length check below turns any future mismatch into a startup error.
-    # onboard_mighty.launch.py's three nodes get one pane EACH via its
-    # only_nodes:= filter, so Ctrl-C -> Up -> Enter restarts a single node
-    # instead of all three. The launch file still computes every parameter
-    # (mighty_node's are a YAML merge plus overrides — never hand-roll them as
-    # ros2 run); only_nodes just picks which of its nodes this pane starts.
+    # titles[i] LABELS cmds[i] — the arrays are positional, so dropping an entry
+    # from one and not the other silently mislabels every pane after it. The
+    # length check turns any future mismatch into a startup error.
     # NOTE: restarting the MPC pane is not instant — MPCNode builds an
     # IPOPT/collocation NLP before its first control tick.
     local -a titles cmds
-    titles=('MIGHTY planner' "${state_node}" 'MPC' 'RViz 2D goal')
+    titles=('MIGHTY planner' 'convert_odom_to_state' 'MPC' 'RViz 2D goal')
     cmds=(
-        "$(dx "${DECOMP} && ${tf_gate}${launch_base} only_nodes:=mighty_node")"
-        "$(dx "${DECOMP} && ${launch_base} only_nodes:=${state_node}")"
-        "$(dx "${DECOMP} && ${tf_gate}${launch_base} only_nodes:=mpc")"
+        "$(dx "${tf_gate}${launch_base} only_nodes:=mighty_node")"
+        "$(dx "${launch_base} only_nodes:=convert_odom_to_state")"
+        "$(dx "${tf_gate}${launch_base} only_nodes:=mpc")"
         "$(dx 'ros2 run mighty repub_rviz_2Dgoal.py')"
     )
-    case "${odom_type}" in
-        dlio)
-            titles+=('DLIO (seed-anchored)' 'seed pose' 'tf map->odom')
-            cmds+=("$(dx "${dlio_cmd}")" "$(dx "${seed_cmd}")" "$(dx "${tf_map_odom}")")
-            ;;
-        dlio_in_mocap)
-            titles+=('DLIO (mocap-seeded)' 'tf map->odom')
-            cmds+=("$(dx "${dlio_cmd}")" "$(dx "${tf_map_odom}")")
-            ;;
-        mocap)
-            titles+=('tf mocap->base_link' 'tf world->map' 'tf map->odom')
-            cmds+=("$(dx "${tf_mocap_base}")" "$(dx "${tf_world_map}")" "$(dx "${tf_map_odom}")")
-            ;;
-        external)
-            # Nothing to add: dlio.service publishes DLIO, the seed pose and
-            # map->odom. MIGHTY (pane 0) still gates on wait_for_tf.py for
-            # <ns>/map -> <ns>/odom, which that service provides.
-            if [[ "${two_d}" == true ]]; then
-                echo "[mighty_hw] NOTE: --two-d-only is ignored with --odom-type external —" \
-                     "two_d_only belongs to dlio.service (DLIO_TWO_D_ONLY, or its own" \
-                     "--two-d-only flag)." >&2
-            fi
-            ;;
-    esac
     if (( ${#titles[@]} != ${#cmds[@]} )); then
         echo "[mighty_hw] BUG: ${#titles[@]} pane titles but ${#cmds[@]} commands —" \
              "panes would be mislabeled; fix the titles/cmds arrays" >&2
@@ -282,7 +193,7 @@ start() {
     done
     tmux select-pane -t "${panes[0]}"
 
-    echo "[mighty_hw] ${SESSION} session up (rover: ${robot_name}, odom: ${odom_type}, two_d_only: ${two_d})"
+    echo "[mighty_hw] ${SESSION} session up (rover: ${robot_name}, router: 127.0.0.1:${ZENOH_ROUTER_PORT})"
     if [[ -t 0 && -t 1 ]]; then
         attach
     else
@@ -302,12 +213,14 @@ case "${cmd}" in
         ;;
     stop)
         # Session first: closing the panes HUPs the docker-exec'd nodes before
-        # the container itself goes away.
+        # the container itself goes away. --profile dev so a laptop's router
+        # container is removed too (no-op on a rover: nothing in that profile
+        # ever ran).
         tmux kill-session -t "${SESSION}" 2>/dev/null || true
-        exec "${COMPOSE[@]}" down
+        exec "${COMPOSE[@]}" --profile dev down
         ;;
     status)
-        docker ps --filter "name=^${CONTAINER}$" --format 'container: {{.Names}}  {{.Status}}' | grep . \
+        docker ps --filter "name=^${CONTAINER}$" --format 'container: {{.Names}}  {{.Status}}  ({{.Image}})' | grep . \
             || { echo "container: not running"; exit 1; }
         tmux list-panes -t "${SESSION}" \
             -F 'pane #{pane_index}  #{pane_title}  (#{pane_current_command})' 2>/dev/null \
@@ -316,9 +229,17 @@ case "${cmd}" in
     logs)
         exec docker logs "$@" "${CONTAINER}"
         ;;
+    pull)
+        tag="${1:-latest}"
+        docker pull "${REGISTRY}:${tag}"
+        docker tag "${REGISTRY}:${tag}" "${IMAGE}"
+        echo "[mighty_hw] ${IMAGE} is now ${REGISTRY}:${tag}"
+        ;;
     rebuild)
+        # The build clones the private mpc repo over SSH: uses your agent, or
+        # SSH_KEY=~/.ssh/<key> for a passphrase-free key when there is none.
         "$0" stop || true
-        "${COMPOSE[@]}" build
+        "${COMPOSE[@]}" build --ssh "default${SSH_KEY:+=${SSH_KEY}}"
         exec "$0" start "$@"
         ;;
     *)
