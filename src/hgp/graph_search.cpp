@@ -186,15 +186,27 @@ bool GraphSearch::static_jps_plan(StatePtr& currNode_ptr, int max_expand, int st
     auto current_time = std::chrono::steady_clock::now();
     if (std::chrono::duration_cast<std::chrono::milliseconds>(current_time - start_time) >
         timeout_duration) {
-      std::cerr << "astar_heat: timeout after " << expand_iteration
-                << " expansions, recovering partial path\n";
+      // Throttled: this is the A* inner loop, re-entered on every replan cycle
+      // (100 Hz). An unreachable goal makes it fire every cycle and flood the
+      // console; std::cerr also bypasses the ROS logger, so --log-level cannot
+      // mute it.
+      static rclcpp::Clock astar_timeout_log_clock(RCL_STEADY_TIME);
+      RCLCPP_WARN_THROTTLE(rclcpp::get_logger("mighty.hgp"), astar_timeout_log_clock, 2000,
+                           "astar_heat: timeout after %d expansions, recovering partial path",
+                           expand_iteration);
       path_ = recoverPath(best_node, start_id);
       return !path_.empty() && path_.size() > 1;
     }
 
     if (pq_.empty()) {
-      std::cerr << "astar_heat: priority queue empty after " << expand_iteration
-                << " expansions, recovering partial path\n";
+      // Throttled for the same reason as the timeout branch above: a goal that
+      // sits inside the planner inflation band leaves this firing on every
+      // replan cycle for as long as the goal stands.
+      static rclcpp::Clock astar_pq_log_clock(RCL_STEADY_TIME);
+      RCLCPP_WARN_THROTTLE(rclcpp::get_logger("mighty.hgp"), astar_pq_log_clock, 2000,
+                           "astar_heat: priority queue empty after %d expansions, "
+                           "recovering partial path",
+                           expand_iteration);
       path_ = recoverPath(best_node, start_id);
       return !path_.empty() && path_.size() > 1;
     }

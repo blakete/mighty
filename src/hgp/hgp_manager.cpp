@@ -348,9 +348,14 @@ bool HGPManager::solveHGP(const Vec3f& start_sent, const Vec3f& start_vel, const
     const size_t before = path.size();
     while (path.size() > 1 && tooCloseToObstacle(path.back())) path.pop_back();
     if (path.size() < before) {
-      std::cout << "[HGP] safety stand-off: backed off " << (before - path.size())
-                << " tail waypoint(s) (stop_distance=" << par_.hgp_stop_distance_m
-                << " m) on A* fallback path" << std::endl;
+      // Throttled: reached on every replan cycle (100 Hz) whenever A* returns a
+      // fallback path, which is the normal case during frontier exploration.
+      // std::cout also bypasses the ROS logger, so --log-level cannot mute it.
+      static rclcpp::Clock standoff_log_clock(RCL_STEADY_TIME);
+      RCLCPP_WARN_THROTTLE(rclcpp::get_logger("mighty.hgp"), standoff_log_clock, 2000,
+                           "[HGP] safety stand-off: backed off %zu tail waypoint(s) "
+                           "(stop_distance=%.2f m) on A* fallback path",
+                           before - path.size(), par_.hgp_stop_distance_m);
     }
   }
 
