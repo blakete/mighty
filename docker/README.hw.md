@@ -72,23 +72,102 @@ ignores an argument it does not declare, so every pane would start the FULL node
 three publishers on `cmd_vel_auto`. `start` refuses to build the session against an
 image whose launch file has no `only_nodes:=`.
 
-## Building (alienware-02, or any box with GitLab SSH access)
+## Building on a fresh machine
+
+The image is a pure function of *(this checkout, `mighty.repos`)*, so a fresh box needs
+only Docker, an SSH key with access to the private `mpc` repo, and the repo itself. No
+ROS, no colcon, no sibling workspaces on the host.
+
+### 0. Host prerequisites
+
+| | requirement | why |
+|---|---|---|
+| arch | **linux/amd64** | the rovers are amd64 NUCs; a native arm64 build (Orin, Apple silicon) produces an image they cannot run |
+| Docker | Engine ≥ 23 with the **compose v2** plugin (`docker compose`, not `docker-compose`) | `build --ssh` + BuildKit; RR08 runs Engine 29.7.2 / compose v5.4.0 |
+| network | internet on the first build | `# syntax=docker/dockerfile:1.7` pulls the BuildKit frontend; apt, pip, `snapshots.ros.org` and the dep clones all fetch |
+| disk | ~20 GB free under `/var/lib/docker` | the image is ~3.9 GB and the layer cache is several times that |
+| RAM | ≥ 8 GB | colcon builds mighty's C++ with every core; a memory-tight box shows up as `cc1plus ... Killed` |
+| SSH → gitlab.com | an account with access to `mit-acl/ugv/ugv_control/mpc` | the **only** private dependency. `dynus_interfaces` and `DecompROS2` clone over https, unauthenticated |
+| SSH → github.com | to clone this repo | not needed by the build itself |
+
+To `pull` or `push` images you also need `docker login registry.gitlab.com` with a
+GitLab PAT (`read_registry`, plus `write_registry` to publish).
+
+### 1. Sources
+
+```bash
+git clone git@github.com:blakete/mighty.git ~/code/mighty
+cd ~/code/mighty
+git checkout feature/hw-image-self-contained   # not merged as of 2026-09-17
+```
+
+Nothing else is cloned by hand: `mighty.repos` pins are resolved *inside* the build.
+
+### 2. Make the GitLab key reachable to the build
+
+The `mpc` clone happens in the `deps-src` stage under `--mount=type=ssh`, so the key is
+forwarded for that one RUN and never lands in a layer.
+
+```bash
+ssh-add -l || { eval "$(ssh-agent -s)"; ssh-add ~/.ssh/id_ed25519; }
+ssh -T git@gitlab.com     # expect: Welcome to GitLab, @<user>!
+```
+
+No agent (headless build box, cron): skip the agent and point `SSH_KEY` at a
+**passphrase-free** key in step 3 — `--ssh default=<path>` cannot prompt.
+
+### 3. Build
 
 ```bash
 cd docker
-SSH_KEY=$HOME/.ssh/id_ed25519 make hw-build     # no ssh-agent: point at a passphrase-free key
-make hw-build                                   # with an agent
+make hw-build                                   # with an ssh-agent
+SSH_KEY=$HOME/.ssh/id_ed25519 make hw-build     # without one
 ```
 
-Cloning `mpc` is the only step that needs credentials. On a rover, `swarm` is
-deliberately locked out of the git forges — build as `blakete`, or just `pull`.
+Either is `docker compose -f compose.hw.yaml build --ssh default[=$SSH_KEY]`, producing
+`mighty-hw:local`. Build context is ~80 MB (the repo minus `.git`, `docker/`, benchmark
+results — see `Dockerfile.hw.dockerignore`).
 
-Layer order keeps rebuilds cheap: the dependency clone + build re-run only when
-`mighty.repos` changes; a mighty edit re-runs the mighty colcon layer and the final copy.
-A config-only edit needs no rebuild at all (see *Parameters* below).
-Build context is ~80 MB (the repo minus `.git`, `docker/`, benchmark results).
+Cold, the two colcon stages dominate the wall clock. Layer order keeps repeat builds
+cheap: `deps-src`/`deps-build` are keyed on `mighty.repos` alone and re-run only when a
+pin moves; a mighty source edit re-runs just the mighty colcon layer and the final copy;
+a `config/*.yaml` edit needs no rebuild at all (see *Parameters* below).
 
-### Publishing
+### 4. Verify the image before it goes near a rover
+
+```bash
+docker run --rm mighty-hw:local bash -c '
+  source /opt/ros/humble/setup.bash &&
+  source /home/swarm/code/mighty_ws/install/setup.bash &&
+  ros2 pkg list | grep -E "^(mighty|mpc|dynus_interfaces|decomp)" &&
+  dpkg-query -W ros-humble-rmw-zenoh-cpp ros-humble-zenoh-cpp-vendor &&
+  ros2 launch mighty onboard_mighty.launch.py --show-args 2>/dev/null | grep -c only_nodes'
+```
+
+Expect, in order:
+
+1. six packages — `mighty`, `mpc`, `dynus_interfaces`, `decomp_ros_msgs`,
+   `decomp_rviz_plugins`, `decomp_test_node`. `decomp_util` is a plain CMake package and
+   never appears in `ros2 pkg list` — run
+   `ls /home/swarm/code/mighty_ws/install/decomp_util` inside the image instead.
+2. both zenoh packages at exactly the pinned versions (see *The RMW pin* below). The
+   build already fails on a mismatch; this catches a hand-patched image.
+3. `1` — the `only_nodes:=` argument exists. `0` or an error means `mighty_hw.sh start`
+   will refuse this image (it would otherwise run three full stacks, one per pane).
+
+Then a no-hardware smoke test on the build machine itself:
+
+```bash
+./mighty_hw.sh start --dev     # 4 panes + an isolated router on 127.0.0.1:7448
+./mighty_hw.sh stop
+```
+
+With no odometry the planner and MPC panes sit in `wait_for_tf.py` for its 60 s timeout
+and then start — that is the expected shape of a dev run, and it proves the binaries,
+the launch file and the zenoh session config load. It proves nothing about planning:
+for that, run the bag replay in *Functional test* below.
+
+### 5. Publish
 
 Tag convention on the fleet registry: `<branch>-<shortsha>` of this repo's HEAD, plus
 `latest` once validated on a rover.
@@ -100,6 +179,49 @@ docker tag mighty-hw:local $REG:$TAG && docker push $REG:$TAG
 # on the rover:
 ./mighty_hw.sh pull $TAG
 ```
+
+Tag from a **clean** tree — the sha is the only record of what went in, and `config/` is
+bind-mounted from the checkout anyway, so a dirty config does not even reach the image.
+
+### On a rover: pull, do not build
+
+`swarm` is deliberately locked out of the git forges fleet-wide, so the `mpc` clone
+cannot succeed as that user. Either build as `blakete` (who has the keys) or — the normal
+path — `./mighty_hw.sh pull <tag>` against the registry. The rovers have no registry
+credentials of their own by default; `docker login registry.gitlab.com` first, or
+`docker save | ssh ... docker load` from the build box.
+
+### The RMW pin is fleet-wide state
+
+`Dockerfile.hw` pins `ros-humble-rmw-zenoh-cpp` and `ros-humble-zenoh-cpp-vendor` to one
+exact apt build from a dated `snapshots.ros.org` repo, `apt-mark hold`s them and asserts
+the installed versions at the end of the layer. This is not tidiness: two builds that both
+call themselves `0.1.9` are not wire-compatible for TRANSIENT_LOCAL topics, and `/tf_static`
+is one — a mismatched image plans normally and commands exactly zero (RR08, 2026-09-17).
+
+Every container on a rover (drive, sensors, dlio, this one) must carry the same build. To
+move the fleet forward, bump all three ARGs together and rebuild **every** rover image in
+the same rollout. Candidate versions in a given snapshot:
+
+```bash
+curl -s http://snapshots.ros.org/humble/<date>/ubuntu/dists/jammy/main/binary-amd64/Packages.gz \
+  | gunzip | awk '/^Package: ros-humble-(rmw-zenoh-cpp|zenoh-cpp-vendor)$/{p=1;print} p&&/^Version:/{print;p=0}'
+```
+
+`packages.ros.org` keeps only the newest build per version, which is why the pin cannot
+come from there.
+
+### When the build fails
+
+| symptom | cause | fix |
+|---|---|---|
+| `Permission denied (publickey)` or `Host key verification failed` in the `deps-src` stage | no key forwarded, or the key has no access to `mpc` | `ssh-add -l`; `ssh -T git@gitlab.com`; or `SSH_KEY=<passphrase-free key> make hw-build` |
+| `AssertionError: HW_DEPS not in mighty.repos: [...]` | a `HW_DEPS` name does not match a `mighty.repos` key | fix the ARG or the repos entry — the filter fails loudly on purpose |
+| `unknown flag: --ssh` | compose v1 (`docker-compose`) | install the compose v2 plugin |
+| build ends at the `dpkg-query` test | the snapshot no longer carries the pinned build, or the three ARGs drifted apart | re-derive them with the `curl`/`awk` above |
+| `cc1plus: fatal error: Killed` | OOM during the mighty colcon layer | more RAM/swap, or build on a bigger box |
+| `rosdep ... cannot resolve` a new key | a dependency was added without a rosdistro key | add it to the `--skip-keys` list *and* install it explicitly, as `libeigen3-dev` and `nlohmann-json3-dev` already are |
+| `start` says `no zenoh router on 127.0.0.1:7447` | not a build problem | `drive.service` hosts the router; start it, or use `--dev` |
 
 ## Parameters: from the checkout, not the image
 
