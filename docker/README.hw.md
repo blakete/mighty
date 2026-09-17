@@ -1,132 +1,141 @@
 # hw-mighty container (hardware stack)
 
-The MIGHTY hardware autonomy stack (planner + MPC, and DLIO unless something else
-owns it) packaged as **one idling container** driven by **one script**:
-`mighty_hw.sh` builds a HOST tmux session `hw_mighty` in which every pane
-`docker exec`s its node into the container. Per-pane Ctrl-C / Up / Enter restarts
-a single node; Ctrl-b d detaches and the stack keeps running.
+The MIGHTY hardware autonomy stack — **planner + MPC, nothing else** — packaged as
+**one idling container** driven by **one script**: `mighty_hw.sh` builds a HOST tmux
+session `hw_mighty` in which every pane `docker exec`s its node into the container.
+Per-pane Ctrl-C / Up / Enter restarts a single node; Ctrl-b d detaches and the stack
+keeps running.
 
-Sources are **baked from the host checkouts** at their host paths
-(`/home/swarm/code/...`): the build context is `/home/swarm/code` because the
-image bakes four sibling trees — `mighty_ws/src`, `decomp_ws/src`,
-`livox_ws/install`, `Livox-SDK2`. See `Dockerfile.hw.dockerignore` for exactly
-what ships. The session builder lives on the host, so pane/flag changes need **no
-image rebuild** — only source changes do (`make hw-build` or
-`./mighty_hw.sh rebuild`). Budget a few minutes even when every layer is cached:
-the build context is large and uploading it dominates.
+## What ships, and where it comes from
+
+The image is a pure function of **this checkout + `mighty.repos`**. The build context is
+the mighty repo root; every dependency is cloned *inside* the build at its
+`mighty.repos` pin, filtered to the hardware closure (`HW_DEPS` in `Dockerfile.hw`):
+
+| in the image | source |
+|---|---|
+| `mighty` | this checkout (`COPY .`, filtered by `Dockerfile.hw.dockerignore`) |
+| `mpc` | `git@gitlab.com:mit-acl/ugv/ugv_control/mpc.git` @ pin (**private** — needs SSH at build) |
+| `dynus_interfaces` | github @ pin |
+| `DecompROS2` (`decomp_util`, `decomp_ros_msgs`, `decomp_rviz_plugins`, `decomp_test_node`) | github @ pin |
+
+Nothing else on the host is an input: no sibling workspaces, no prebuilt tarballs.
+Change a dependency by bumping its pin in `mighty.repos` and rebuilding.
+
+**Not in the image, on purpose** (each is owned by another service or host):
+
+| | owner | what MIGHTY consumes |
+|---|---|---|
+| DLIO odometry, seed pose, `map->odom` | `dlio.service` (`dlio_ws`) | `<ns>/dlio/odom_node/odom`, TF |
+| Livox MID-360, D455, `base_link->lidar` | `sensors.service` | `<ns>/livox/lidar` |
+| occupancy / ESDF | `elevation_mapping_cupy` on the OX08 Orin | `<ns>/occ_2d_topic`, `<ns>/esdf_2d_topic` |
+| zenoh router `:7447` | `drive.service` | everything above, over zenoh |
+
+Nothing in mighty, mpc or dynus_interfaces links the Livox SDK or driver; the only
+"livox" in mighty is a topic name and a frame-id string.
 
 ## Usage
 
 ```bash
-./mighty_hw.sh start [--odom-type dlio|dlio_in_mocap|mocap|external] [--two-d-only|--no-two-d]
-./mighty_hw.sh attach      # or: tmux attach -t hw_mighty
+./mighty_hw.sh start           # container up + 4-pane host session (auto-attaches on a tty)
+./mighty_hw.sh attach          # or: tmux attach -t hw_mighty
 ./mighty_hw.sh status
 ./mighty_hw.sh stop
-./mighty_hw.sh rebuild     # stop + image rebuild + start (start flags forwarded)
+./mighty_hw.sh pull [<tag>]    # fleet registry -> mighty-hw:local (default: latest)
+./mighty_hw.sh rebuild         # stop + build + start
 ```
 
 ## Panes
 
-Every mode opens these four first:
-
 | pane | node | `only_nodes:=` |
 |---|---|---|
 | `MIGHTY planner` | the planner | `mighty_node` |
-| `convert_odom_to_state` (`convert_vicon_to_state` in mocap) | odom/pose → `state` relay | same as the pane title |
+| `convert_odom_to_state` | odom → `state` relay | `convert_odom_to_state` |
 | `MPC` | tracks `mpc_waypoints`, publishes `cmd_vel_auto` | `mpc` |
 | `RViz 2D goal` | `repub_rviz_2Dgoal.py` | — |
 
-The first three panes all run `onboard_mighty.launch.py`; its `only_nodes:=`
-argument selects **which of that launch file's nodes** a given pane starts. They
-were one combined `Onboard MIGHTY` pane until per-node panes landed — splitting
-them means Ctrl-C / Up / Enter restarts a single node rather than all three,
-while the launch file stays the single source of truth for parameters
-(`mighty_node`'s are a computed merge of `mighty.yaml` <- `hw_mighty_ground_robot.yaml`
-plus programmatic overrides, so never hand-roll them as `ros2 run`). Keys are the
-nodes' real ROS names, so they can be copy-pasted out of `ros2 node list`, and a
-comma-separated list collapses several nodes back into one pane
-(`only_nodes:=convert_odom_to_state,mpc`).
+The first three all run `onboard_mighty.launch.py`; `only_nodes:=` selects which of
+that file's nodes a pane starts, so the launch file stays the single source of truth for
+parameters (`mighty_node`'s are a computed merge of `mighty.yaml` ←
+`hw_mighty_ground_robot.yaml` plus overrides — never hand-roll them as `ros2 run`).
 
-`only_nodes:=` defaults to empty, meaning "everything this mode selects", so
-every other caller of the launch file is unaffected. It is **hardware only** —
-in sim it would silently drop `fake_sim`/`pcl_render`, so the launch file
-rejects it when `use_hardware:=false`. A key that this mode does not start is
-also rejected, because `ros2 launch` with an empty action list exits 0 in
-silence, which in a tmux pane is indistinguishable from a healthy node.
+Only the planner and MPC panes gate on `wait_for_tf.py <ns>/map <ns>/odom` (the
+`/tf_static` startup-race fix); the state converter never touches TF. `wait_for_tf.py`
+warns and continues on timeout, so the stack never deadlocks. Restarting the MPC pane is
+**not instant** — `MPCNode` builds an IPOPT/collocation NLP first.
 
-Only the planner and MPC panes gate on `wait_for_tf.py`; the state converter is
-a pure sub→pub relay that never touches TF, so gating it too would stall a third
-pane for the 60 s timeout whenever the TF is missing.
+### Rollback of the per-node split is asymmetric
 
-Restarting the MPC pane is **not instant** — `MPCNode` builds an
-IPOPT/collocation NLP before its first control tick.
+Revert **this host script only** (`git checkout -- docker/mighty_hw.sh`), no rebuild.
+Do **not** revert the launch file while keeping the script: `ros2 launch` silently
+ignores an argument it does not declare, so every pane would start the FULL node set —
+three publishers on `cmd_vel_auto`. `start` refuses to build the session against an
+image whose launch file has no `only_nodes:=`.
 
-**No mapper pane.** `mighty_node` subscribes to `<ns>/occ_2d_topic` and
-`<ns>/esdf_2d_topic` and does not care who publishes them. They come from
-`elevation_mapping_cupy` on the OX08 Orin; the `acl-mapping` build is commented
-out of `Dockerfile.hw`.
-
-### Rollback is asymmetric
-
-To undo the per-node split, revert **this host script only**:
+## Building (alienware-02, or any box with GitLab SSH access)
 
 ```bash
-git checkout -- docker/mighty_hw.sh && ./mighty_hw.sh start
+cd docker
+SSH_KEY=$HOME/.ssh/id_ed25519 make hw-build     # no ssh-agent: point at a passphrase-free key
+make hw-build                                   # with an agent
 ```
 
-No rebuild. Do **not** revert the launch file while keeping the new script:
-`ros2 launch` silently ignores an argument it does not declare, so every pane
-would start the FULL node set — three publishers on `cmd_vel_auto`, the exact
-duplicate-stack failure `compose.hw.yaml`'s header warns about. `only_nodes` is
-inert at its empty default, so leaving the new launch file baked in is the safe
-state. `start()` guards this explicitly: it refuses to build the session against
-an image whose launch file has no `only_nodes:=` argument.
+Cloning `mpc` is the only step that needs credentials. On a rover, `swarm` is
+deliberately locked out of the git forges — build as `blakete`, or just `pull`.
 
-## Prerequisites (every mode)
+Layer order keeps rebuilds cheap: the dependency clone + build re-run only when
+`mighty.repos` changes; a mighty edit re-runs the mighty colcon layer and the final copy.
+Build context is ~80 MB (the repo minus `.git`, `docker/`, benchmark results).
 
-- **`drive.service`** — hosts the zenoh router on `:7447`; every pane spin-waits
-  on it, and `start` fails fast if it is absent.
-- **`sensors.service`** — livox MID-360 + D455. This stack launches **no sensors,
-  ever** (the old `--no-sensors` flag is gone because it is the only behavior).
-- **`elevation_mapping_cupy` on the OX08 Orin** — without it MIGHTY runs but
-  never plans: no occupancy grid.
-- **`dlio.service` and the DLIO panes here are the same nodes** — never run both.
-  `start` detects a live `dlio.service` (or a container named `dlio`) and
-  auto-selects `--odom-type external`, which opens no odometry panes; an explicit
-  `--odom-type dlio`/`dlio_in_mocap` is then refused rather than double-published.
+### Publishing
 
-## Odom types
+Tag convention on the fleet registry: `<branch>-<shortsha>` of this repo's HEAD, plus
+`latest` once validated on a rover.
 
-| `--odom-type` | Extra panes beyond the four above | Notes |
-|---|---|---|
-| `external` | *(none)* | **Auto-selected whenever `dlio.service` or a `dlio` container is up.** That stack owns DLIO, the seed pose and `tf map->odom`; MIGHTY consumes `<ns>/dlio/odom_node/odom` plus the map->odom TF over zenoh and does not care which container publishes them. `--two-d-only` is ignored here — `two_d_only` belongs to `dlio.service`. |
-| `dlio` | DLIO, seed pose, `tf map->odom` | The default when nothing else owns DLIO. Replicates what `dlio.service` ran: DLIO is told `initial_pose_topic:=world` and a 2 Hz constant `PoseStamped` spoof on `/<ns>/world` (z = `DLIO_SEED_Z`, default 0.4) anchors it. Works with no external infrastructure. |
-| `dlio_in_mocap` | DLIO, `tf map->odom` | A **real** mocap publishes `/<ns>/world`. No spoof pane — DLIO anchors to the **first** pose it receives, so a spoof would race the mocap and win. |
-| `mocap` | `tf mocap->base_link`, `tf world->map`, `tf map->odom` | No DLIO. Mighty runs `use_onboard_localization:=false` with `twist_topic:=mocap/twist`, and the converter pane becomes `convert_vicon_to_state`. |
+```bash
+REG=registry.gitlab.com/mit-acl/ugv/redrover/rover/mighty-hw
+TAG=$(git rev-parse --abbrev-ref HEAD | tr / -)-$(git rev-parse --short HEAD)
+docker tag mighty-hw:local $REG:$TAG && docker push $REG:$TAG
+# on the rover:
+./mighty_hw.sh pull $TAG
+```
 
-DLIO runs a ~3 s stationary IMU calibration whenever its pane (re)starts — keep
-the rover still. `--two-d-only` (default **OFF**) pins DLIO's published z to the
-seed; it applies only to the `dlio` / `dlio_in_mocap` panes.
+## Tuning parameters on a rover without rebuilding
+
+```bash
+MIGHTY_HW_TUNE=1 ./mighty_hw.sh start
+```
+
+`compose.hw.tune.yaml` bind-mounts this checkout's `config/`, `launch/`, `rviz/` over the
+installed share tree: edit a YAML, Ctrl-C / Up / Enter the pane. C++ edits still need a
+rebuild. `mpc`'s config lives in the mpc repo (cloned in-image), so it is not covered —
+commit there and bump the pin.
+
+## Running on a laptop (`--dev`)
+
+```bash
+./mighty_hw.sh start --dev
+```
+
+No `/etc/rover/rover.env`, no `/home/swarm/config`, no `drive.service`: identity comes
+from `dev/rover.env` (`ROBOT_NAME=RR99`), zenoh configs from `dev/`, and an **isolated**
+router is started from the same image on `127.0.0.1:7448` (compose profile `dev`).
+It listens on loopback only, scouts nothing and dials nothing, so a laptop stack can
+never join the fleet graph — including the C2 router on the same machine.
+
+With no sensors or odometry the planner and MPC panes sit in `wait_for_tf.py` until
+its 60 s timeout, then start; that is the expected shape of a dev run. `stop` removes
+the router too.
 
 ## Env & networking
 
-- Identity/transport come from **`/etc/rover/rover.env`** via compose
-  `env_file` (`ROBOT_NAME`, `VEHTYPE`/`VEHNUM`, `ROS_DOMAIN_ID`,
-  `RMW_IMPLEMENTATION`, optional `DLIO_SEED_Z`) — same as the
-  drive/sensors/dlio siblings, so this directory is rover-agnostic.
-- The container runs the mighty **nodes only** over `network_mode: host`,
-  attaching to the host zenoh router at `localhost:7447` (owned by
-  `drive.service`).
-- `/home/swarm/config` is mounted read-only and `ZENOH_SESSION_CONFIG_URI` points
-  at the fleet `zenoh_session_config.json5` there (5 s non-droppable stall bound
-  plus the drop-toward-router QoS rule). `ZENOH_ROUTER_CONFIG_URI` from rover.env
-  rides along harmlessly — no router runs in this container, the nodes are plain
-  zenoh sessions.
-
-## Startup ordering (/tf_static race)
-
-The static TF panes latch one transient-local sample; over rmw_zenoh a
-subscriber that forms before the publisher exists never receives it. Consumers
-therefore gate themselves with `ros2 run mighty wait_for_tf.py <pairs>` before
-launching — the MIGHTY planner and MPC panes wait on `<ns>/map -> <ns>/odom`.
-`wait_for_tf.py` warns and continues on timeout, so the stack never deadlocks.
+- Identity/transport from **`/etc/rover/rover.env`** via compose `env_file`
+  (`ROBOT_NAME`, `VEHTYPE`/`VEHNUM`, `ROS_DOMAIN_ID`, `RMW_IMPLEMENTATION`) — same as
+  the drive/sensors/dlio siblings; `ROVER_ENV_FILE` / `ROVER_CONFIG_DIR` override the
+  paths (that is all `--dev` does).
+- `network_mode: host`; the nodes attach to the host router at `localhost:7447`.
+- `/home/swarm/config` is mounted read-only and `ZENOH_SESSION_CONFIG_URI` points at the
+  fleet `zenoh_session_config.json5` there (5 s non-droppable stall bound plus the
+  drop-toward-router QoS rule).
+- In-image workspace path is the rover's host path (`/home/swarm/code/mighty_ws`), so
+  the pane setup line is what you would type on the rover.

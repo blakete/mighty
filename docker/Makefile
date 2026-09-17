@@ -165,14 +165,19 @@ shell:
 
 # ---------------------------------------------------------------------------
 # Hardware (rover) image: mighty-hw — see README.hw.md. Runs the mighty NODES in
-# one container, attaching to the HOST zenoh router (drive.service hosts it on :7447).
-# The SIM targets above are untouched. No bind-mounts / no dev override.
+# one container, attaching to the HOST zenoh router (drive.service hosts it on
+# :7447). Dependencies are cloned inside the build from mighty.repos; cloning the
+# private mpc repo needs SSH — `make hw-build` forwards your ssh-agent, or with
+# no agent point SSH_KEY at a passphrase-free key:
+#     SSH_KEY=$HOME/.ssh/id_ed25519 make hw-build
+# The SIM targets above are untouched.
 # ---------------------------------------------------------------------------
 HW_COMPOSE = docker compose -f compose.hw.yaml
 
-.PHONY: hw-build hw-up hw-down hw-attach hw-status
-hw-build:  ; $(HW_COMPOSE) build
+.PHONY: hw-build hw-up hw-down hw-attach hw-status hw-pull
+hw-build:  ; $(HW_COMPOSE) build --ssh default$(if $(SSH_KEY),=$(SSH_KEY))
 hw-up:     ; ./mighty_hw.sh start
 hw-down:   ; ./mighty_hw.sh stop
 hw-attach: ; tmux attach -t hw_mighty
 hw-status: ; ./mighty_hw.sh status
+hw-pull:   ; ./mighty_hw.sh pull $(TAG)
