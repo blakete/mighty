@@ -4,7 +4,7 @@
 #
 #   build:   make hw-build            (docker compose build --ssh ...; see Makefile)
 #   pull:    ./mighty_hw.sh pull [tag] (fleet registry -> mighty-hw:local)
-#   up:      ./mighty_hw.sh start [--dev]
+#   up:      ./mighty_hw.sh start [--dev]   (params: this checkout's config/, see volumes)
 #   attach:  tmux attach -t hw_mighty  (HOST session; Ctrl-C / Up / Enter restarts one node)
 #   down:    ./mighty_hw.sh stop
 #
@@ -40,6 +40,14 @@ services:
       ZENOH_SESSION_CONFIG_URI: /home/swarm/config/zenoh_session_config.json5
     volumes:
       - "${ROVER_CONFIG_DIR:-/home/swarm/config}:/home/swarm/config:ro"
+      # Planner parameters come from THIS CHECKOUT, not the image: the repo's
+      # config/ is mounted over the installed share tree, so a YAML edit + a
+      # pane restart (Ctrl-C / Up / Enter) takes effect with no rebuild, and a
+      # rover's parameter drift is one `git status` here. launch/ and rviz/ stay
+      # baked on purpose (a launch edit can reference things the image lacks —
+      # that is what start()'s only_nodes guard protects). mpc.yaml is NOT
+      # covered: it lives in the mpc repo at its mighty.repos pin.
+      - "../config:/home/swarm/code/mighty_ws/install/mighty/share/mighty/config:ro"
     init: true
     stop_grace_period: 15s
     restart: "no"                      # manual stack; a dead pane stays dead

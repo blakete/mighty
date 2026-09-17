@@ -85,6 +85,7 @@ deliberately locked out of the git forges — build as `blakete`, or just `pull`
 
 Layer order keeps rebuilds cheap: the dependency clone + build re-run only when
 `mighty.repos` changes; a mighty edit re-runs the mighty colcon layer and the final copy.
+A config-only edit needs no rebuild at all (see *Parameters* below).
 Build context is ~80 MB (the repo minus `.git`, `docker/`, benchmark results).
 
 ### Publishing
@@ -100,16 +101,27 @@ docker tag mighty-hw:local $REG:$TAG && docker push $REG:$TAG
 ./mighty_hw.sh pull $TAG
 ```
 
-## Tuning parameters on a rover without rebuilding
+## Parameters: from the checkout, not the image
+
+`compose.hw.yaml` bind-mounts **this checkout's `config/`** over the installed
+`share/mighty/config`, always. So on a rover:
 
 ```bash
-MIGHTY_HW_TUNE=1 ./mighty_hw.sh start
+vim config/hw_mighty_ground_robot.yaml     # edit
+# in the planner pane: Ctrl-C, Up, Enter   # restart that one node
+git commit -am "..."                        # the change is a commit here, never a rebuild
 ```
 
-`compose.hw.tune.yaml` bind-mounts this checkout's `config/`, `launch/`, `rviz/` over the
-installed share tree: edit a YAML, Ctrl-C / Up / Enter the pane. C++ edits still need a
-rebuild. `mpc`'s config lives in the mpc repo (cloned in-image), so it is not covered —
-commit there and bump the pin.
+What that covers and what it does not:
+
+| | source | change needs |
+|---|---|---|
+| `config/*.yaml` (planner params, zenoh session) | this checkout | pane restart |
+| `launch/`, `rviz/`, C++ | image | `make hw-build` + `pull` |
+| `mpc.yaml` | mpc repo @ its `mighty.repos` pin, baked | commit in mpc + pin bump + rebuild |
+
+`launch/` is deliberately not mounted: a launch edit can reference things the image does not
+contain, which is the drift `start`'s `only_nodes` guard exists to catch.
 
 ## Running on a laptop (`--dev`)
 

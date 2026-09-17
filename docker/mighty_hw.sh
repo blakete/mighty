@@ -13,6 +13,10 @@
 #   mighty_hw.sh pull [<tag>]      # fleet registry <tag> (default latest) -> mighty-hw:local
 #   mighty_hw.sh rebuild [...]     # stop + compose build + start (start flags forwarded)
 #
+# PARAMETERS come from this checkout's config/ (bind-mounted over the image's
+# copy, see compose.hw.yaml): edit the YAML, Ctrl-C / Up / Enter the pane. No
+# rebuild. Code, launch files and mpc.yaml are baked and need one.
+#
 # FOUR panes, always:
 #   MIGHTY planner | convert_odom_to_state | MPC | RViz 2D goal
 # The first three are onboard_mighty.launch.py's three nodes, one pane each via
@@ -54,8 +58,6 @@ IMAGE=mighty-hw:local
 REGISTRY=registry.gitlab.com/mit-acl/ugv/redrover/rover/mighty-hw
 ZENOH_ROUTER_PORT="${ZENOH_ROUTER_PORT:-7447}"
 COMPOSE=(docker compose -f "${SCRIPT_DIR}/compose.hw.yaml")
-# MIGHTY_HW_TUNE=1: overlay this checkout's config/launch/rviz (see compose.hw.tune.yaml)
-[[ -n "${MIGHTY_HW_TUNE:-}" ]] && COMPOSE+=(-f "${SCRIPT_DIR}/compose.hw.tune.yaml")
 
 # In-container command preludes. Pane commands are sent single-quoted, so $VARs
 # in them expand INSIDE the container (env_file provides ROBOT_NAME etc.) — and
