@@ -144,8 +144,19 @@ COPY --from=mighty-build /manifests /tmp/manifests
 # apt-mark hold + the dpkg-query at the end make a silent drift fail the build.
 # When the fleet moves forward, bump all three ARGs together and rebuild EVERY
 # rover image in the same rollout.
+#
+# 2026-09-19: the fleet pin moved to rmw_zenoh 0.1.9-1jammy.20260907.200640 (the
+# build the C2 cart and every rover drive/sensors/dlio image now carry -- rover repo
+# rover_bringup/docker/Dockerfile{,.sensors}, dlio_ws docker/Dockerfile). No
+# snapshots.ros.org snapshot carries that build yet (newest is 2026-08-07 =
+# 20260723), so RMW_ZENOH_CPP_VER resolves from stock packages.ros.org, which the
+# base image already lists; the snapshot line below still serves the vendor pin
+# (20260723.020902 is identical on both). packages.ros.org keeps only the newest
+# build per version, so this exact pin stops resolving once ROS rebuilds 0.1.9 --
+# the dpkg-query tripwire below fails the build loudly when that happens; move
+# every fleet image together (or re-pin to a snapshot once one carries 20260907).
 ARG ROS_SNAPSHOT=2026-08-07
-ARG RMW_ZENOH_CPP_VER=0.1.9-1jammy.20260723.022609
+ARG RMW_ZENOH_CPP_VER=0.1.9-1jammy.20260907.200640
 ARG ZENOH_CPP_VENDOR_VER=0.1.9-1jammy.20260723.020902
 # snapshots.ros.org is signed by "ROS Snapshot builder" (AD19BAB3CBF125EA), NOT by the
 # Open Robotics key in ros2-archive-keyring.gpg that packages.ros.org uses. Vendored
