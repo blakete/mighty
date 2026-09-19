@@ -8,6 +8,9 @@
 .gitattributes
 CLAUDE.md
 docker
+# ...but the vendored apt signing key must reach the build context.
+!docker/keys
+!docker/keys/**
 data
 imgs
 # benchmarking/ is 46 MB of results, but one script in it is an install(PROGRAMS)

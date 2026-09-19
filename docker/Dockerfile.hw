@@ -124,19 +124,52 @@ ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR ${WS}
 COPY --from=mighty-build /manifests /tmp/manifests
 # Exec deps come from the manifests alone. Explicit extras:
-#   rmw-zenoh-cpp + zenoh-cpp-vendor  fleet RMW; the vendor is named so a cached
-#                                     apt layer cannot pin an older wire library
+#   rmw-zenoh-cpp + zenoh-cpp-vendor  fleet RMW, PINNED to one exact apt build (below)
 #   tmux                              the panes are docker execs, but handy inside
 # (tf_transformations is imported only by scripts/convert_goal_to_cmd_vel.py,
 # which is not an install(PROGRAMS) target and never ships — and its apt
 # transforms3d breaks under numpy 2 anyway. Do not add it back blindly.)
-RUN apt-get update && rosdep update \
+#
+# RMW PIN. Every container on a rover (drive, sensors, dlio, this one) must run the
+# SAME rmw_zenoh build. Two builds that both call themselves 0.1.9 are not
+# interchangeable: with dlio/drive/sensors on 0.1.9-1jammy.20260723 and this image
+# on 0.1.9-1jammy.20260907 (what an unpinned install pulled on 2026-09-07),
+# TRANSIENT_LOCAL subscriptions across that boundary received NOTHING while
+# VOLATILE ones were fine. tf2 takes /tf_static as TRANSIENT_LOCAL, so MPC never
+# saw <ns>/map -> <ns>/odom, commanded 0/0 in AUTO, and the rover sat still with a
+# plan on screen (RR08, 2026-09-17). packages.ros.org keeps only the newest build
+# per version, so the pin comes from the dated ROS snapshot repo instead, which is
+# signed by the same ROS archive key the base image already ships in\n# /usr/share/keyrings/ros2-archive-keyring.gpg.
+# apt-mark hold + the dpkg-query at the end make a silent drift fail the build.
+# When the fleet moves forward, bump all three ARGs together and rebuild EVERY
+# rover image in the same rollout.
+ARG ROS_SNAPSHOT=2026-08-07
+ARG RMW_ZENOH_CPP_VER=0.1.9-1jammy.20260723.022609
+ARG ZENOH_CPP_VENDOR_VER=0.1.9-1jammy.20260723.020902
+# snapshots.ros.org is signed by "ROS Snapshot builder" (AD19BAB3CBF125EA), NOT by the
+# Open Robotics key in ros2-archive-keyring.gpg that packages.ros.org uses. Vendored
+# here rather than pulled from a keyserver so the build needs no keyserver and cannot
+# silently pick up a different key; the fingerprint assert below is the tripwire.
+ARG ROS_SNAPSHOT_KEY_FPR=4B63CF8FDE49746E98FA01DDAD19BAB3CBF125EA
+COPY docker/keys/ros-snapshot-archive-keyring.asc /tmp/ros-snapshot.asc
+RUN gpg --dearmor < /tmp/ros-snapshot.asc > /usr/share/keyrings/ros-snapshot-archive-keyring.gpg \
+ && gpg --show-keys --with-colons /tmp/ros-snapshot.asc | awk -F: '/^fpr/{print $10; exit}' \
+      | grep -qx "${ROS_SNAPSHOT_KEY_FPR}" \
+ && rm -f /tmp/ros-snapshot.asc \
+ && echo "deb [signed-by=/usr/share/keyrings/ros-snapshot-archive-keyring.gpg] http://snapshots.ros.org/humble/${ROS_SNAPSHOT}/ubuntu jammy main" \
+        > /etc/apt/sources.list.d/ros2-snapshot.list \
+ && printf 'Package: ros-humble-rmw-zenoh-cpp ros-humble-zenoh-cpp-vendor\nPin: origin snapshots.ros.org\nPin-Priority: 1001\n' \
+        > /etc/apt/preferences.d/99-rmw-zenoh-pin \
+ && apt-get update && rosdep update \
  && rosdep install -y --ignore-src --dependency-types exec --from-paths /tmp/manifests \
         --skip-keys "catkin ament_python gazebo_ros gazebo_plugins" \
  && apt-get install -y --no-install-recommends \
-        ros-humble-rmw-zenoh-cpp \
-        ros-humble-zenoh-cpp-vendor \
+        ros-humble-rmw-zenoh-cpp=${RMW_ZENOH_CPP_VER} \
+        ros-humble-zenoh-cpp-vendor=${ZENOH_CPP_VENDOR_VER} \
         tmux python3-pip \
+ && apt-mark hold ros-humble-rmw-zenoh-cpp ros-humble-zenoh-cpp-vendor \
+ && test "$(dpkg-query -W -f='${Version}' ros-humble-rmw-zenoh-cpp)" = "${RMW_ZENOH_CPP_VER}" \
+ && test "$(dpkg-query -W -f='${Version}' ros-humble-zenoh-cpp-vendor)" = "${ZENOH_CPP_VENDOR_VER}" \
  && rm -rf /var/lib/apt/lists/* /tmp/manifests
 # mpc_node imports casadi/do_mpc. Pinned to what the rovers ran natively;
 # numpy/scipy second so their pins win over do-mpc's resolver.
