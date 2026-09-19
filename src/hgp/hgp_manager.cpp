@@ -303,16 +303,50 @@ bool HGPManager::solveHGP(const Vec3f& start_sent, const Vec3f& start_vel, const
     mighty_utils::resamplePathUniform(path, max_dist_vertexes_);
   }
 
-  // For ground robots, trim the path at the first non-free waypoint (using 2D map)
+  // For ground robots, trim the EXECUTED path where it leaves observed free space
+  // (2D planning map). An OCCUPIED waypoint stops it, as before. UNKNOWN stops it
+  // only where the path runs through >= par_.trim_min_unknown_run_cells consecutive
+  // unknown cells (sampled along each segment at map resolution): the mapper leaves
+  // small unknown pockets as -1 on purpose (traversable holes), and cutting at a
+  // 1-cell speckle would park the robot mid-island. The path then ends at the last
+  // known-free sample before the run, i.e. at the edge of what has been observed,
+  // and grows with the map as the robot advances (the global path itself still
+  // reaches the goal through unknown, priced by w_unknown).
   if (is_ground_robot_ && map_util_for_planning_->has2DMap() && path.size() > 1) {
+    const auto& mu = map_util_for_planning_;
+    const double res = mu->getRes();
+    const int min_run = std::max(1, par_.trim_min_unknown_run_cells);
     vec_Vecf<3> free_path;
     free_path.push_back(path[0]);
-    for (size_t i = 1; i < path.size(); i++) {
-      Veci<3> pi = map_util_for_planning_->floatToInt(path[i]);
-      if (map_util_for_planning_->get2DOccupancy(pi(0), pi(1)) == 0) {
-        free_path.push_back(path[i]);
+    bool cut = false;
+    for (size_t i = 1; i < path.size() && !cut; i++) {
+      const Veci<3> wi = mu->floatToInt(path[i]);
+      if (mu->is2DOccupied(wi(0), wi(1))) break;  // stop at first occupied waypoint
+      // Sample the segment for an unknown run of >= min_run cells.
+      const Vecf<3> a = path[i - 1];
+      const Vecf<3> b = path[i];
+      const int n = std::max(1, static_cast<int>(std::ceil((b - a).norm() / res)));
+      int run = 0;
+      Vecf<3> last_free = a;
+      Vecf<3> run_start = a;
+      for (int s = 1; s <= n; ++s) {
+        const Vecf<3> p = a + (b - a) * (static_cast<decimal_t>(s) / n);
+        const Veci<3> pi = mu->floatToInt(p);
+        if (mu->is2DUnknown(pi(0), pi(1))) {
+          if (run == 0) run_start = last_free;
+          if (++run >= min_run) {
+            cut = true;
+            break;
+          }
+        } else {
+          run = 0;
+          last_free = p;
+        }
+      }
+      if (cut) {
+        if ((run_start - free_path.back()).norm() > 0.5 * res) free_path.push_back(run_start);
       } else {
-        break;  // stop at first occupied cell
+        free_path.push_back(b);
       }
     }
     if (free_path.size() >= 2) {

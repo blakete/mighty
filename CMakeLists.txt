@@ -185,6 +185,21 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_occ_grid_2d_unknown
     rclcpp Eigen3 nav_msgs)
 
+  # Tri-state 2D planning map + A* unknown pricing (2026-09; see map_util.hpp
+  # buildMap2DFromOcc2D and graph_search.cpp getSucc).
+  ament_add_gtest(test_map_2d_tristate
+    src/test/test_map_2d_tristate.cpp)
+  target_link_libraries(test_map_2d_tristate ${PCL_LIBRARIES})
+  ament_target_dependencies(test_map_2d_tristate
+    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
+
+  ament_add_gtest(test_graph_search_unknown_cost
+    src/test/test_graph_search_unknown_cost.cpp
+    src/hgp/graph_search.cpp)
+  target_link_libraries(test_graph_search_unknown_cost ${PCL_LIBRARIES})
+  ament_target_dependencies(test_graph_search_unknown_cost
+    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
+
   ament_add_gtest(test_frontier_detector
     src/test/test_frontier_detector.cpp
     src/mighty/frontier_detector.cpp)

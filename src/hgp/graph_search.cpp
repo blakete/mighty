@@ -57,6 +57,9 @@ inline int GraphSearch::coordToId(int x, int y, int z) const {
   return x + y * xDim_ + z * xDim_ * yDim_;
 }
 
+// isFree() treats val_unknown_ (-1) as free (`<= val_free_`). It is only used by the
+// JPS jump()/hasForced() path (global_planner "sjps"); astar_heat uses getSucc(),
+// which blocks on is2DOccupied() and prices unknown via w_unknown instead.
 inline bool GraphSearch::isFree(int x, int y, int z) const {
   return x >= 0 && x < xDim_ && y >= 0 && y < yDim_ && z >= 0 && z < zDim_ &&
          cMap_[coordToId(x, y, z)] <= val_free_;
@@ -166,7 +169,12 @@ bool GraphSearch::static_jps_plan(StatePtr& currNode_ptr, int max_expand, int st
   seen_[currNode_ptr->id] = true;
 
   int expand_iteration = 0;
-  cMap_ = (map_util_->map_).data();
+  // NOTE: cMap_ is the map the constructor was given -- in 2D mode that is
+  // map_util_->get2DMapData() (hgp_planner.cpp), NOT the 3D map_. A previous
+  // `cMap_ = map_util_->map_.data();` here silently overrode it, so isUnknown()
+  // / isOccupied() read the 3D voxel map, which on hardware (2D-only pipeline,
+  // empty cloud) is entirely val_unknown_: every step paid w_unknown and the
+  // tri-state 2D map was invisible to A*.
 
   // Track the best (closest-to-goal) node for partial path recovery
   StatePtr best_node = currNode_ptr;
@@ -599,7 +607,7 @@ void GraphSearch::getSucc(const StatePtr& curr, std::vector<int>& succ_ids,
     // Occupancy check
     if (map_util_ && map_util_->has2DMap() && zDim_ == 1 && esdf_grid_) {
       // ESDF mode: only check the 2D ESDF-derived map (skip inflated 3D grid)
-      if (map_util_->get2DOccupancy(new_x, new_y) != 0) {
+      if (map_util_->is2DOccupied(new_x, new_y)) {  // unknown passes, priced below
         continue;
       }
     } else {
@@ -609,7 +617,7 @@ void GraphSearch::getSucc(const StatePtr& curr, std::vector<int>& succ_ids,
           continue;
         }
       }
-      if (map_util_ && map_util_->has2DMap() && map_util_->get2DOccupancy(new_x, new_y) != 0) {
+      if (map_util_ && map_util_->has2DMap() && map_util_->is2DOccupied(new_x, new_y)) {
         continue;
       }
     }
@@ -624,8 +632,8 @@ void GraphSearch::getSucc(const StatePtr& curr, std::vector<int>& succ_ids,
       const int side2_x = curr->x;
       const int side2_y = curr->y + d[1];
       if (map_util_ && map_util_->has2DMap()) {
-        if (map_util_->get2DOccupancy(side1_x, side1_y) != 0 ||
-            map_util_->get2DOccupancy(side2_x, side2_y) != 0) {
+        if (map_util_->is2DOccupied(side1_x, side1_y) ||
+            map_util_->is2DOccupied(side2_x, side2_y)) {
           continue;
         }
       }
@@ -654,7 +662,8 @@ void GraphSearch::getSucc(const StatePtr& curr, std::vector<int>& succ_ids,
     }
 
     // Base geometric step cost (1, √2, √3)
-    double step_cost = std::sqrt(double(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]));
+    const double geom_step = std::sqrt(double(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]));
+    double step_cost = geom_step;
 
     // -------- Dynamic heat-map cost (soft) --------
     // Static obstacles remain hard-blocked by isOccupied() above.
@@ -704,8 +713,13 @@ void GraphSearch::getSucc(const StatePtr& curr, std::vector<int>& succ_ids,
     }
 
     // -------- Unknown cell penalty --------
+    // Proportional to the geometric step (w_unknown is "multiples of base
+    // cost", see graph_search.hpp): an additive constant made the metric inside
+    // unknown space anisotropic (diagonals relatively cheap), which by itself
+    // moves where a path chooses to leave the observed region. Costs only grow,
+    // so the Euclidean heuristic stays admissible.
     if (w_unknown_ > 0.0 && isUnknown(new_x, new_y, new_z)) {
-      step_cost += w_unknown_;
+      step_cost += w_unknown_ * geom_step;
     }
 
     succ_ids.push_back(new_id);

@@ -92,6 +92,7 @@ mighty_node:
         hgp_timeout_duration_ms: 10000                  # [ms] Global planner timeout
         max_expand: 1000000                               # [-] Max A* node expansions
         hgp_stop_distance_m: 0.6                          # [m] Safety stand-off on A* FALLBACK (best_node) paths: back off the path tail so the last WAYPOINT (robot center target) keeps this clearance from the nearest occupied cell (cell-center to cell-center, quantized up by ceil(dist/res)). Excludes footprint -> body clearance ~= this - robot_radius. 0 = disabled.
+        trim_min_unknown_run_cells: 3                   # [cells] The EXECUTED path is cut where it enters a run of this many consecutive UNKNOWN cells (edge of observed space); shorter unknown pockets (the mapper leaves <=4-cell holes as -1 on purpose) are driven through. The global path still reaches the goal through unknown, priced by w_unknown.
 
         # --- Local Planning ---
         horizon: 30.0                                   # [m] Planning horizon
@@ -155,7 +156,7 @@ mighty_node:
         global_planner_heuristic_weight: 1.0             # [-] A* heuristic weight (higher = greedier)
         heat_weight: 5.0                                # [-] Overall heat map weight in A* cost
         max_dist_vertexes: 0.5                          # [m] Max distance between path vertices
-        w_unknown: 1.0                                  # [-] Cost weight for unknown cells
+        w_unknown: 2.0                                  # [-] Extra cost per A* step through an UNKNOWN 2D cell, in multiples of the geometric step (2.0 => an unknown step costs 3x a free one). Live in 2D mode since the 2026-09 tri-state planning map: window cells the mapper does not cover, and mapper -1 cells, are UNKNOWN (never free). Raise to 3.0 if the path still flips between exits.
         w_align: 0.0                                    # [-] Cost weight for alignment with initial velocity
         decay_len_cells: 100.0                          # [-] Decay length for alignment cost
         w_side: 0.0                                     # [-] Cost weight for lateral tie-breaking

@@ -263,6 +263,7 @@ struct parameters {
   // last committed waypoint keeps at least this clearance from any occupied cell.
   // <= 0 disables (default) -> behavior identical to before.
   double hgp_stop_distance_m{0.0};
+  int trim_min_unknown_run_cells{3};  // [cells] executed path is cut only at an UNKNOWN run this long (see HGPManager::solveHGP)
 
   // Debug flags
   bool debug_verbose;

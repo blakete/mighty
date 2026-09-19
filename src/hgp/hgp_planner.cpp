@@ -6,6 +6,7 @@
  * See LICENSE file for the license information
  * -------------------------------------------------------------------------- */
 
+#include <rclcpp/rclcpp.hpp>
 #include <hgp/hgp_planner.hpp>
 
 #include <fstream>
@@ -359,7 +360,7 @@ bool HGPPlanner::plan(const Vecf<3>& start, const Vecf<3>& start_vel, const Vecf
       status_ = 1;
       return false;
     }
-    if (!map_util_->useSoftCostObstacles() && map_util_->get2DOccupancy(sx, sy) != 0) {
+    if (!map_util_->useSoftCostObstacles() && map_util_->is2DOccupied(sx, sy)) {
       std::cout << bold << red << "Start is occupied in 2D map" << reset << std::endl;
       status_ = 1;
       return false;
@@ -400,8 +401,15 @@ bool HGPPlanner::plan(const Vecf<3>& start, const Vecf<3>& start_vel, const Vecf
   // In non-soft-cost mode, reject if goal cell is occupied
   if (is_2d_mode_ && map_util_->has2DMap()) {
     const int gx = goal_int(0), gy = goal_int(1);
-    if (!map_util_->useSoftCostObstacles() && map_util_->get2DOccupancy(gx, gy) != 0) {
-      std::cout << bold << red << "Goal is occupied in 2D map" << reset << std::endl;
+    // Occupied only: a goal in UNKNOWN (beyond the mapper's coverage) is legitimate
+    // and A* prices the unknown leg via w_unknown. Throttled: this runs on every
+    // replan cycle for as long as such a goal stands, and std::cout bypasses the
+    // ROS logger (it flooded a pane with 6.5k copies on 2026-09-18).
+    if (!map_util_->useSoftCostObstacles() && map_util_->is2DOccupied(gx, gy)) {
+      static rclcpp::Clock goal_occ_log_clock(RCL_STEADY_TIME);
+      RCLCPP_WARN_THROTTLE(rclcpp::get_logger("mighty.hgp"), goal_occ_log_clock, 2000,
+                           "Goal is occupied in 2D map (goal=%.2f,%.2f cell=%d,%d)", goal(0),
+                           goal(1), gx, gy);
       status_ = 2;
       return false;
     }

@@ -6,6 +6,7 @@
  * See LICENSE file for the license information
  * -------------------------------------------------------------------------- */
 
+#include <algorithm>
 #include <mighty/mighty_node.hpp>
 #include <mighty/esdf_grid_2d.hpp>
 #include <mighty/occ_grid_2d.hpp>
@@ -546,6 +547,7 @@ void MIGHTY_NODE::declareParameters() {
   this->declare_parameter("hgp_timeout_duration_ms", 1000);
   this->declare_parameter("max_expand", 10000);
   this->declare_parameter("hgp_stop_distance_m", 0.0);
+  this->declare_parameter("trim_min_unknown_run_cells", 3);
   this->declare_parameter("use_free_start", false);
   this->declare_parameter("free_start_factor", 1.0);
   this->declare_parameter("use_free_goal", false);
@@ -893,6 +895,8 @@ void MIGHTY_NODE::setParameters() {
   par_.hgp_timeout_duration_ms = this->get_parameter("hgp_timeout_duration_ms").as_int();
   par_.max_expand = this->get_parameter("max_expand").as_int();
   par_.hgp_stop_distance_m = this->get_parameter("hgp_stop_distance_m").as_double();
+  par_.trim_min_unknown_run_cells =
+      static_cast<int>(this->get_parameter("trim_min_unknown_run_cells").as_int());
   par_.max_num_expansion = par_.max_expand;
 
   par_.use_free_start = this->get_parameter("use_free_start").as_bool();
@@ -1243,6 +1247,16 @@ void MIGHTY_NODE::printParameters() {
   RCLCPP_INFO(this->get_logger(), "Relocate Occupied Goal?: %d", par_.relocate_occupied_goal);
   RCLCPP_INFO(this->get_logger(), "max_dist_vertexes: %f", par_.max_dist_vertexes);
   RCLCPP_INFO(this->get_logger(), "w_unknown: %f", par_.w_unknown);
+  RCLCPP_INFO(this->get_logger(), "trim_min_unknown_run_cells: %d", par_.trim_min_unknown_run_cells);
+  {
+    const double half_w = 0.5 * std::min(par_.min_wdx, par_.min_wdy) - par_.map_buffer;
+    if (par_.horizon > half_w) {
+      RCLCPP_WARN(this->get_logger(),
+                  "horizon %.1f m > planner window half-width %.1f m (min(min_wdx,min_wdy)/2 - "
+                  "map_buffer): a subgoal projected that far sits on the window's edge",
+                  par_.horizon, half_w);
+    }
+  }
   RCLCPP_INFO(this->get_logger(), "w_align: %f", par_.w_align);
   RCLCPP_INFO(this->get_logger(), "decay_len_cells: %f", par_.decay_len_cells);
   RCLCPP_INFO(this->get_logger(), "w_side: %f", par_.w_side);
@@ -3248,6 +3262,33 @@ void MIGHTY_NODE::planningOcc2DCallback(const nav_msgs::msg::OccupancyGrid::Shar
   // ONLY the planner here. Do NOT run FrontierDetector, touch the VisitedMap, or set
   // current_detect_grid_ — those stay on the RAW occ_2d in occ2DCallback. The mapper
   // refreshes this map every cycle, so MIGHTY adds no persistence/clearing logic.
+  // Coverage vs planner window (logged once per grid-size change). The planner's
+  // robot-centred window is >= min_wdx x min_wdy and grows to contain the goal;
+  // any part of it the mapper does not cover is UNKNOWN in the tri-state 2D map
+  // (traversable at w_unknown per step, never free). Before 2026-09 it was FREE,
+  // which let goals beyond the mapper's coverage be reached through whichever gap
+  // in the observed edge was cheapest that cycle -- the exit flipped every update.
+  {
+    static double logged_cov_x = -1.0, logged_cov_y = -1.0;
+    const double cov_x = msg->info.width * msg->info.resolution;
+    const double cov_y = msg->info.height * msg->info.resolution;
+    if (cov_x != logged_cov_x || cov_y != logged_cov_y) {
+      logged_cov_x = cov_x;
+      logged_cov_y = cov_y;
+      RCLCPP_INFO(this->get_logger(),
+                  "planning_occ_2d coverage %.1f x %.1f m (res %.2f); planner window >= %.1f x %.1f m "
+                  "(min_wdx/min_wdy), horizon %.1f m, w_unknown %.2f",
+                  cov_x, cov_y, msg->info.resolution, par_.min_wdx, par_.min_wdy, par_.horizon,
+                  par_.w_unknown);
+      if (cov_x < par_.min_wdx || cov_y < par_.min_wdy) {
+        RCLCPP_WARN(this->get_logger(),
+                    "planner window exceeds mapper coverage: window cells outside the %.1f x %.1f m "
+                    "grid are UNKNOWN (priced at w_unknown=%.2f per step); goals out there are "
+                    "reached only by crossing unobserved space",
+                    cov_x, cov_y, par_.w_unknown);
+      }
+    }
+  }
   planning_occ_grid_2d_ = OccGrid2D::fromOccupancyGrid(*msg);
   mighty_ptr_->setOccGrid2D(planning_occ_grid_2d_);
   if (par_.use_hardware && par_.use_2d_planning && par_.vehicle_type == "ground_robot") {
@@ -4043,7 +4084,8 @@ void MIGHTY_NODE::publishGround2DOccupied() {
   pcl::PointCloud<pcl::PointXYZI> cloud;
   for (int x = 0; x < dimX; ++x) {
     for (int y = 0; y < dimY; ++y) {
-      if (map_util->get2DOccupancy(x, y) != 0) {  // occupied
+      if (map_util->is2DOccupied(x, y)) {  // occupied ONLY: unknown now covers the whole
+                                            // window exterior (~70k cells) -- not for the mesh
         pcl::PointXYZI pt;
         pt.x = origin(0) + (x + 0.5f) * res;
         pt.y = origin(1) + (y + 0.5f) * res;

@@ -1854,6 +1854,30 @@ class MapUtil {
     return map_2d_[static_cast<size_t>(x) + static_cast<size_t>(dimX) * y];
   }
 
+  // The 2D map is TRI-STATE (val_free_ / val_unknown_ / val_occ_) since 2026-09:
+  // window cells the mapper never covered, and mapper cells reported as -1, are
+  // val_unknown_ -- traversable for A* at a per-step cost (w_unknown), never
+  // free. Use these two helpers instead of `get2DOccupancy(...) != 0`, which
+  // conflates unknown with occupied.
+  /** @brief True if the 2D cell is OCCUPIED. Out-of-bounds counts as occupied
+   *  (the window edge is never planned through). */
+  bool is2DOccupied(int x, int y) const {
+    if (!has_2d_map_) return false;
+    const int dimX = dim_(0);
+    const int dimY = dim_(1);
+    if (x < 0 || x >= dimX || y < 0 || y >= dimY) return true;
+    return map_2d_[static_cast<size_t>(x) + static_cast<size_t>(dimX) * y] == val_occ_;
+  }
+  /** @brief True if the 2D cell is UNKNOWN (no mapper coverage, or -1 from the
+   *  mapper). Out-of-bounds counts as unknown. */
+  bool is2DUnknown(int x, int y) const {
+    if (!has_2d_map_) return false;
+    const int dimX = dim_(0);
+    const int dimY = dim_(1);
+    if (x < 0 || x >= dimX || y < 0 || y >= dimY) return true;
+    return map_2d_[static_cast<size_t>(x) + static_cast<size_t>(dimX) * y] == val_unknown_;
+  }
+
   /** @brief Get terrain gradient cost at grid coordinates. */
   float getTerrainCost(int x, int y) const {
     if (!has_2d_map_) return 0.0f;
@@ -1959,7 +1983,8 @@ class MapUtil {
     const int dimY = dim_(1);
     const size_t n2d = static_cast<size_t>(dimX) * dimY;
 
-    map_2d_.assign(n2d, val_free_);
+    // Start UNKNOWN: only cells the ESDF actually covers become free/occupied.
+    map_2d_.assign(n2d, val_unknown_);
     heat_2d_.assign(n2d, 0.0f);
 
     // A MIGHTY cell of width res_ centered at (wx, wy) intersects an obstacle
@@ -1981,13 +2006,17 @@ class MapUtil {
           if (d <= half_diag) {
             map_2d_[idx] = val_occ_;
             heat_2d_[idx] = static_cast<float>(h_max);
-          } else if (d < d_safe) {
-            heat_2d_[idx] = static_cast<float>(h_max * (1.0 - d / d_safe));
+          } else {
+            map_2d_[idx] = val_free_;
+            if (d < d_safe) heat_2d_[idx] = static_cast<float>(h_max * (1.0 - d / d_safe));
           }
         }
-        // Outside ESDF bounds: leave as free (initialized above). Marking
-        // OOB as occupied creates phantom walls when MIGHTY's robot-centered
-        // window extends past the mapper's fixed-origin coverage.
+        // Outside ESDF bounds: stays UNKNOWN (initialized above), never free.
+        // A* can still cross it at w_unknown per step, so this does not ring
+        // the window with phantom walls -- but the planner no longer treats
+        // space the mapper has never seen as free (that made a goal beyond the
+        // mapper's coverage look reachable through the cheapest gap in the
+        // observed edge, and the path flipped between gaps every map update).
       }
     }
     mergeDynamicHeatInto2D();
@@ -2008,7 +2037,12 @@ class MapUtil {
     const int dimY = dim_(1);
     const size_t n2d = static_cast<size_t>(dimX) * dimY;
 
-    map_2d_.assign(n2d, val_free_);
+    // TRI-STATE build. Start UNKNOWN; a cell becomes OCCUPIED if any source cell
+    // under it is occupied, FREE if any source cell under it is known-free, and
+    // stays UNKNOWN when the mapper reports -1 for everything under it or does
+    // not cover it at all (MIGHTY's robot-centred window is larger than the
+    // mapper's grid). Precedence: occupied > unknown > free.
+    map_2d_.assign(n2d, val_unknown_);
     heat_2d_.assign(n2d, 0.0f);
 
     // Compute distance field from the binary occupancy grid (truncated at d_safe)
@@ -2018,6 +2052,7 @@ class MapUtil {
     const int occ_w = occ.width();
     const int occ_h = occ.height();
     const auto& occ_data = occ.occupiedData();
+    const auto& unk_data = occ.unknownData();
 
     for (int y = 0; y < dimY; ++y) {
       for (int x = 0; x < dimX; ++x) {
@@ -2028,14 +2063,35 @@ class MapUtil {
         const size_t idx = static_cast<size_t>(x) + static_cast<size_t>(dimX) * y;
 
         // Range of underlying occ-grid cells overlapping this MIGHTY cell.
-        int ox_min = static_cast<int>(std::floor((wx - half - occ.originX()) * inv_occ_res));
-        int ox_max = static_cast<int>(std::floor((wx + half - occ.originX()) * inv_occ_res));
-        int oy_min = static_cast<int>(std::floor((wy - half - occ.originY()) * inv_occ_res));
-        int oy_max = static_cast<int>(std::floor((wy + half - occ.originY()) * inv_occ_res));
+        // kEdgeEps (in source-cell units) makes the edge arithmetic deterministic:
+        // planner and mapper lattices are typically aligned, so an edge lands
+        // exactly on a source-cell boundary and float noise (20.9999 vs 21.0000)
+        // would otherwise decide which cells are sampled.
+        constexpr double kEdgeEps = 1e-6;
+        const double lo_x = (wx - half - occ.originX()) * inv_occ_res;
+        const double hi_x = (wx + half - occ.originX()) * inv_occ_res;
+        const double lo_y = (wy - half - occ.originY()) * inv_occ_res;
+        const double hi_y = (wy + half - occ.originY()) * inv_occ_res;
+        int ox_min = static_cast<int>(std::floor(lo_x + kEdgeEps));
+        int ox_max = static_cast<int>(std::floor(hi_x + kEdgeEps));
+        int oy_min = static_cast<int>(std::floor(lo_y + kEdgeEps));
+        int oy_max = static_cast<int>(std::floor(hi_y + kEdgeEps));
 
-        // Clip to source grid. Cells with no overlap at all stay free
-        // (don't ring the map with phantom walls when MIGHTY's window
-        // extends past the mapper's fixed-origin coverage).
+        // Clip to source grid. Cells with no overlap at all stay UNKNOWN
+        // (initialized above): traversable at w_unknown per A* step, never
+        // free. Marking them occupied would ring the window with phantom
+        // walls; marking them free (the pre-2026-09 behaviour) let A* route a
+        // goal beyond the mapper's coverage through whichever gap in the
+        // observed edge happened to be cheapest that cycle.
+        // The inclusive [ox_min, ox_max] range above deliberately takes in the next
+        // source cell when this cell's upper edge lands exactly on a source-cell
+        // boundary (aligned lattices => a 2x2 block): a one-cell conservative
+        // inflation for OCCUPIED that predates the tri-state map and is kept as is.
+        // FREE vs UNKNOWN must not inherit that bias (an unknown cell would read
+        // free whenever its +x/+y neighbour is free, shrinking the unobserved ring
+        // by a cell), so that decision uses the strict half-open overlap below.
+        const int ox_max_strict = static_cast<int>(std::floor(hi_x - kEdgeEps));
+        const int oy_max_strict = static_cast<int>(std::floor(hi_y - kEdgeEps));
         ox_min = std::max(ox_min, 0);
         oy_min = std::max(oy_min, 0);
         ox_max = std::min(ox_max, occ_w - 1);
@@ -2045,11 +2101,10 @@ class MapUtil {
         }
 
         // Mark occupied if ANY underlying source cell is occupied. Otherwise
-        // pull heat from the nearest underlying source cell (smallest d → max heat).
-        // NOTE: occ_data only flags true-occupied cells (>=100). Unknown cells
-        // (-1) are implicitly traversable for HGP A* — this gives us the
-        // "plan through unknown" semantics that frontier exploration needs.
+        // FREE if any source cell is known-free, else UNKNOWN. Heat comes from
+        // the nearest occupied source cell (smallest d -> max heat) either way.
         bool any_occ = false;
+        bool any_free = false;
         float min_d = static_cast<float>(d_safe);
         for (int oy = oy_min; oy <= oy_max && !any_occ; ++oy) {
           for (int ox = ox_min; ox <= ox_max; ++ox) {
@@ -2058,6 +2113,7 @@ class MapUtil {
               any_occ = true;
               break;
             }
+            if (!unk_data[oidx] && ox <= ox_max_strict && oy <= oy_max_strict) any_free = true;
             if (dist[oidx] < min_d) min_d = dist[oidx];
           }
         }
@@ -2065,8 +2121,11 @@ class MapUtil {
         if (any_occ) {
           map_2d_[idx] = val_occ_;
           heat_2d_[idx] = static_cast<float>(h_max);
-        } else if (min_d < static_cast<float>(d_safe)) {
-          heat_2d_[idx] = static_cast<float>(h_max * (1.0 - min_d / d_safe));
+        } else {
+          if (any_free) map_2d_[idx] = val_free_;  // else: stays val_unknown_
+          if (min_d < static_cast<float>(d_safe)) {
+            heat_2d_[idx] = static_cast<float>(h_max * (1.0 - min_d / d_safe));
+          }
         }
       }
     }
