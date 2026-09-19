@@ -139,7 +139,8 @@ COPY --from=mighty-build /manifests /tmp/manifests
 # saw <ns>/map -> <ns>/odom, commanded 0/0 in AUTO, and the rover sat still with a
 # plan on screen (RR08, 2026-09-17). packages.ros.org keeps only the newest build
 # per version, so the pin comes from the dated ROS snapshot repo instead, which is
-# signed by the same ROS archive key the base image already ships in\n# /usr/share/keyrings/ros2-archive-keyring.gpg.
+# signed by the same ROS archive key the base image already ships in
+# /usr/share/keyrings/ros2-archive-keyring.gpg.
 # apt-mark hold + the dpkg-query at the end make a silent drift fail the build.
 # When the fleet moves forward, bump all three ARGs together and rebuild EVERY
 # rover image in the same rollout.
