@@ -6,6 +6,8 @@
 # session 'hw_mighty', built right here in bash.
 #
 #   mighty_hw.sh start [--dev]     # bring the container up + build the session
+#   mighty_hw.sh start --monitor   # same, then hold the foreground while the session
+#                                  # lives (mighty.service's main process, see mighty.service.in)
 #   mighty_hw.sh attach            # tmux attach (Ctrl-b d detaches; stack keeps running)
 #   mighty_hw.sh stop              # kill session, then compose down
 #   mighty_hw.sh status            # container + pane status
@@ -74,15 +76,16 @@ dx() { echo "docker exec -it ${CONTAINER} bash -c '${SETUP} && $(wait_router) &&
 attach() { exec tmux attach -t "${SESSION}"; }
 
 usage() {
-    echo "usage: $0 {start [--dev] | attach | stop | status | logs | pull [<tag>] | rebuild [start flags]}" >&2
+    echo "usage: $0 {start [--dev|--monitor] | attach | stop | status | logs | pull [<tag>] | rebuild [start flags]}" >&2
     exit 2
 }
 
 start() {
-    local dev=false
+    local dev=false monitor=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --dev) dev=true ;;
+            --monitor) monitor=true ;;
             *) echo "[mighty_hw] unknown option: $1" >&2; usage ;;
         esac
         shift
@@ -101,9 +104,18 @@ start() {
         # spin-waits still guard every node, this is just early readable
         # feedback. grep -c, not grep -q: under pipefail an early-exiting grep -q
         # SIGPIPEs the upstream docker ps and returns 141 ON MATCH.
+        # Under --monitor (systemd) the router is a WAIT, not an exit: at boot
+        # After=drive.service is satisfied as soon as drive_host_tmux.sh is
+        # running, which is before zenohd inside it listens, so failing here
+        # would fail the unit on every cold boot.
         if ! (echo >/dev/tcp/127.0.0.1/${ZENOH_ROUTER_PORT}) 2>/dev/null; then
-            echo "[mighty_hw] no zenoh router on 127.0.0.1:${ZENOH_ROUTER_PORT} — start drive.service first" >&2
-            exit 1
+            if [[ "${monitor}" == true ]]; then
+                echo "[mighty_hw] waiting for the zenoh router on 127.0.0.1:${ZENOH_ROUTER_PORT} (drive.service)..."
+                until (echo >/dev/tcp/127.0.0.1/${ZENOH_ROUTER_PORT}) 2>/dev/null; do sleep 2; done
+            else
+                echo "[mighty_hw] no zenoh router on 127.0.0.1:${ZENOH_ROUTER_PORT} — start drive.service first" >&2
+                exit 1
+            fi
         fi
         if ! docker ps --format '{{.Names}}' | grep -cx sensors >/dev/null; then
             echo "[mighty_hw] WARNING: no 'sensors' container (sensors.service down?) — no lidar, no odometry" >&2
@@ -198,7 +210,16 @@ start() {
     tmux select-pane -t "${panes[0]}"
 
     echo "[mighty_hw] ${SESSION} session up (rover: ${robot_name}, router: 127.0.0.1:${ZENOH_ROUTER_PORT})"
-    if [[ -t 0 && -t 1 ]]; then
+    if [[ "${monitor}" == true ]]; then
+        # systemd main process (same shape as drive/sensors/dlio_host_tmux.sh):
+        # live exactly as long as the session does, so `tmux kill-session -t
+        # hw_mighty` deactivates mighty.service and its ExecStopPost runs `stop`.
+        echo "[mighty_hw] --monitor: holding while the session lives — attach with: tmux attach -t ${SESSION}"
+        while tmux has-session -t "${SESSION}" 2>/dev/null; do
+            sleep 5
+        done
+        echo "[mighty_hw] session ended."
+    elif [[ -t 0 && -t 1 ]]; then
         attach
     else
         echo "[mighty_hw] no tty — attach with: tmux attach -t ${SESSION}"

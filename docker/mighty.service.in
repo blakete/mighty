@@ -1,0 +1,54 @@
+# mighty.service — MIGHTY planner + MPC (the hw-mighty container), HOST-tmux
+# variant. Sibling of the rover's drive/sensors/dlio units and the same shape:
+# the unit's main process is `mighty_hw.sh start --monitor`, which builds the
+# host tmux session 'hw_mighty' and then holds the foreground for as long as
+# the session lives.
+#
+# Template: @PLACEHOLDERS@ are filled by hand and the result installed to
+# /etc/systemd/system/mighty.service (see README.hw.md, "As a service"):
+#   sed -e 's|@SERVICE_USER@|swarm|g' -e 's|@MIGHTY_DIR@|/home/swarm/code/mighty|g' \
+#       mighty.service.in | sudo tee /etc/systemd/system/mighty.service
+# Do NOT render it with provision_rover.sh: that regenerates /etc/rover/rover.env
+# unconditionally and would clobber the hand-set ZENOH_ROUTER_CONFIG_URI.
+#
+# Boot entrypoint: brings the hw-mighty container up and builds the HOST tmux
+# session 'hw_mighty' whose panes docker-exec the nodes into it.
+#   attach:  tmux attach -t hw_mighty        (as @SERVICE_USER@, straight on the host)
+#   kill:    tmux kill-session -t hw_mighty  -> unit exits -> ExecStopPost downs the container
+# `systemctl stop` likewise tears down session + container. Restart=no: a dead
+# node stays dead until hand-restart (Ctrl-C / Up / Enter in its pane), exactly
+# as drive/sensors/dlio.
+#
+# After=drive.service sensors.service dlio.service is ordering ONLY (deliberately
+# no Requires): the zenoh router lives in the drive stack, odometry + map->odom
+# come from dlio.service, and every pane spin-waits on the router itself, so a
+# sibling restart leaves the planner up and self-recovering. Under --monitor the
+# script also WAITS for the router rather than failing, because at boot
+# After=drive.service is satisfied before zenohd inside it is listening.
+#
+# MUTUALLY EXCLUSIVE with a hand-run `mighty start`: both build the same
+# 'hw_mighty' session (the later one replaces the earlier). Use
+# `systemctl {start,stop,restart} mighty` on a rover where this unit is enabled.
+
+[Unit]
+Description=MIGHTY hardware stack (containerized: planner + odom->state + MPC + RViz goal relay, host tmux 'hw_mighty')
+After=network-online.target docker.service drive.service sensors.service dlio.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=exec
+User=@SERVICE_USER@
+Restart=no
+# Main process is `mighty_hw.sh start --monitor`, which holds the foreground
+# while the 'hw_mighty' session lives. On stop, kill ONLY it: the service user's
+# shared host tmux server (and any unrelated sessions on it) must survive.
+# ExecStopPost then tears down session + container.
+KillMode=process
+ExecStart=@MIGHTY_DIR@/docker/mighty_hw.sh start --monitor
+ExecStopPost=@MIGHTY_DIR@/docker/mighty_hw.sh stop
+TimeoutStartSec=120
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -45,6 +45,28 @@ Nothing in mighty, mpc or dynus_interfaces links the Livox SDK or driver; the on
 ./mighty_hw.sh rebuild         # stop + build + start
 ```
 
+### As a service (`mighty.service`)
+
+On a rover the stack runs under systemd like its siblings (`drive`, `sensors`,
+`dlio`): `mighty.service.in` is the same host-tmux unit shape, with
+`mighty_hw.sh start --monitor` as the main process — it builds the `hw_mighty`
+session, then holds the foreground while the session lives, so
+`tmux kill-session -t hw_mighty` deactivates the unit and `ExecStopPost` runs
+`stop`. Under `--monitor` a missing router is a wait, not an error (at boot
+`After=drive.service` is satisfied before zenohd inside it listens).
+
+```bash
+sed -e 's|@SERVICE_USER@|swarm|g' -e 's|@MIGHTY_DIR@|/home/swarm/code/mighty|g' \
+    mighty.service.in | sudo tee /etc/systemd/system/mighty.service
+sudo systemctl daemon-reload && sudo systemctl enable --now mighty.service
+systemctl status mighty; tmux attach -t hw_mighty      # as swarm
+```
+
+Render it by hand — never via `provision_rover.sh`, which regenerates
+`/etc/rover/rover.env`. Where the unit is enabled, drive it with
+`systemctl {start,stop,restart} mighty` rather than a bare `mighty start`: both
+build the same session, and a hand-started one is not tracked by the unit.
+
 ## Panes
 
 | pane | node | `only_nodes:=` |
