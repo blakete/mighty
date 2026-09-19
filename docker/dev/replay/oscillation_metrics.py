@@ -81,6 +81,10 @@ def main():
     ap.add_argument("--grid", choices=["planning", "raw"], default="planning",
                     help="planning_occ_2d_topic (default, falls back to raw) or occ_2d_topic")
     ap.add_argument("--switch-deg", type=float, default=30.0)
+    ap.add_argument("--bearing", choices=["endpoint", "first"], default="endpoint",
+                    help="heading = start->endpoint of the local path (default) or its first grid "
+                         "segment; the first segment of an 8-connected A* path alternates between "
+                         "orthogonal and diagonal steps (90 vs 59 deg) and is not the oscillation")
     a = ap.parse_args()
     topics, rows = load(a.bag)
     ns = "/" + a.robot
@@ -101,8 +105,10 @@ def main():
     loc = [(t, longest_polyline(d)) for t, d in rows(ns + "/hgp_path_marker")]
     loc = [(t, p) for t, p in loc if p]
     switches = []
+    def head(p):
+        return bearing(p[0], p[-1] if a.bearing == "endpoint" else p[1])
     for (ta, pa), (tb, pb) in zip(loc, loc[1:]):
-        if ang_diff(bearing(pa[0], pa[1]), bearing(pb[0], pb[1])) > a.switch_deg:
+        if ang_diff(head(pa), head(pb)) > a.switch_deg:
             switches.append(tb)
 
     # --- global path: exit edges + arc length ---
