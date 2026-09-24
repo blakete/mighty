@@ -196,6 +196,21 @@ bool HGPManager::checkIfPointOccupied(const Vec3f& point) {
   return mu->isOccupied(point_int);
 }
 
+bool HGPManager::checkIfPointOccupied2D(const Vec3f& point) {
+  const auto& mu = map_util_for_planning_ ? map_util_for_planning_ : map_util_;
+  if (!mu || !mu->has2DMap()) return false;
+
+  int dimX, dimY;
+  mu->get2DDimensions(dimX, dimY);
+  const auto origin = mu->getOrigin();
+  const double res = mu->getRes();
+  if (res <= 0.0) return false;
+
+  const int x = static_cast<int>(std::floor((point.x() - origin(0)) / res));
+  const int y = static_cast<int>(std::floor((point.y() - origin(1)) / res));
+  return mu->is2DOccupied(x, y);
+}
+
 // Sample along [p0, p1] at a safe step to ensure we don't skip thin obstacles.
 // Uses the occupancy from the (already inflated) planning map.
 inline bool isSegmentFree(const mighty::VoxelMapUtil& map, const Vec3f& p0, const Vec3f& p1,
@@ -539,6 +554,28 @@ bool HGPManager::cvxEllipsoidDecomp(EllipsoidDecomp3D& ellip, const vec_Vecf<3>&
   poly_out.clear();
   poly_out.resize(num_seg);
 
+  // Bounding box around THIS path, padded by local_box_size_ + drone_radius_ + a buffer.
+  // add_local_bbox() clips every per-segment polyhedron to local_box_size_ around that
+  // segment regardless, so any obstacle point farther than this margin from every path
+  // point cannot bind on any segment's polyhedron -- only the padding changes, not the
+  // math. Without this filter the loops below scan the ENTIRE map window (has been
+  // observed at ~50k points for one segment with sfc_use_unknown_as_obstacle=true on a
+  // largely-unexplored window), which is both needless O(window-area) work every replan
+  // and, at that scale, well beyond what decomp_util's ellipsoid decomposition has been
+  // exercised with in this codebase -- the likely cause of a SIGSEGV inside ellip.dilate().
+  float path_x_lo = static_cast<float>(path.front()(0));
+  float path_x_hi = path_x_lo;
+  float path_y_lo = static_cast<float>(path.front()(1));
+  float path_y_hi = path_y_lo;
+  for (const auto& p : path) {
+    path_x_lo = std::min(path_x_lo, static_cast<float>(p(0)));
+    path_x_hi = std::max(path_x_hi, static_cast<float>(p(0)));
+    path_y_lo = std::min(path_y_lo, static_cast<float>(p(1)));
+    path_y_hi = std::max(path_y_hi, static_cast<float>(p(1)));
+  }
+  const float margin = std::max(local_box_size_[0], local_box_size_[1]) +
+                       static_cast<float>(drone_radius_) + 0.5f;
+
   // For ground robot: build a projected obstacle set at z=0 + floor/ceiling slabs.
   // When sfc_use_unknown_as_obstacle is true, use the 2D map (which merges unknown+occupied).
   // When false, project the caller-provided base_uo (occupied-only 3D points) to z=0.
@@ -550,9 +587,16 @@ bool HGPManager::cvxEllipsoidDecomp(EllipsoidDecomp3D& ellip, const vec_Vecf<3>&
     const auto origin = map_util_for_planning_->getOrigin();
     const float res = static_cast<float>(map_util_for_planning_->getRes());
 
+    // Restrict the scan to the path's bounding box (in cell indices) instead of the
+    // whole window -- same effect as the world-frame filter, without per-cell bounds checks.
+    const int scan_x_min = std::max(0, static_cast<int>(std::floor((path_x_lo - margin - origin(0)) / res)));
+    const int scan_x_max = std::min(dimX - 1, static_cast<int>(std::ceil((path_x_hi + margin - origin(0)) / res)));
+    const int scan_y_min = std::max(0, static_cast<int>(std::floor((path_y_lo - margin - origin(1)) / res)));
+    const int scan_y_max = std::min(dimY - 1, static_cast<int>(std::ceil((path_y_hi + margin - origin(1)) / res)));
+
     // Add 2D occupied cells as obstacle points at z=0
-    for (int x = 0; x < dimX; ++x) {
-      for (int y = 0; y < dimY; ++y) {
+    for (int x = scan_x_min; x <= scan_x_max; ++x) {
+      for (int y = scan_y_min; y <= scan_y_max; ++y) {
         if (map_util_for_planning_->get2DOccupancy(x, y) != 0) {  // not free
           const float wx = origin(0) + (x + 0.5f) * res;
           const float wy = origin(1) + (y + 0.5f) * res;
@@ -561,11 +605,11 @@ bool HGPManager::cvxEllipsoidDecomp(EllipsoidDecomp3D& ellip, const vec_Vecf<3>&
       }
     }
 
-    // Add floor/ceiling virtual points covering the local window
-    const float x_lo = origin(0);
-    const float y_lo = origin(1);
-    const float x_hi = origin(0) + dimX * res;
-    const float y_hi = origin(1) + dimY * res;
+    // Add floor/ceiling virtual points covering the path's local area (not the whole window)
+    const float x_lo = std::max(static_cast<float>(origin(0)), path_x_lo - margin);
+    const float y_lo = std::max(static_cast<float>(origin(1)), path_y_lo - margin);
+    const float x_hi = std::min(static_cast<float>(origin(0)) + dimX * res, path_x_hi + margin);
+    const float y_hi = std::min(static_cast<float>(origin(1)) + dimY * res, path_y_hi + margin);
     const float floor_step = res * 2.0f;  // every 2 cells for density
     for (float fx = x_lo; fx <= x_hi; fx += floor_step) {
       for (float fy = y_lo; fy <= y_hi; fy += floor_step) {
@@ -581,9 +625,10 @@ bool HGPManager::cvxEllipsoidDecomp(EllipsoidDecomp3D& ellip, const vec_Vecf<3>&
     const auto origin = map_util_for_planning_->getOrigin();
     const auto dim = map_util_for_planning_->getDim();
     const float res = static_cast<float>(map_util_for_planning_->getRes());
-    const float x_lo = origin(0), y_lo = origin(1);
-    const float x_hi = origin(0) + dim(0) * res;
-    const float y_hi = origin(1) + dim(1) * res;
+    const float x_lo = std::max(static_cast<float>(origin(0)), path_x_lo - margin);
+    const float y_lo = std::max(static_cast<float>(origin(1)), path_y_lo - margin);
+    const float x_hi = std::min(static_cast<float>(origin(0)) + dim(0) * res, path_x_hi + margin);
+    const float y_hi = std::min(static_cast<float>(origin(1)) + dim(1) * res, path_y_hi + margin);
     const float floor_step = res * 2.0f;
     for (float fx = x_lo; fx <= x_hi; fx += floor_step) {
       for (float fy = y_lo; fy <= y_hi; fy += floor_step) {
@@ -614,6 +659,10 @@ bool HGPManager::cvxEllipsoidDecomp(EllipsoidDecomp3D& ellip, const vec_Vecf<3>&
     }
 
     ellip.set_obs(vec_uo);
+    if (par_.debug_verbose) {
+      std::cout << "cvxEllipsoidDecomp: segment " << i << " obstacle point count = "
+                << vec_uo.size() << std::endl;
+    }
 
     seg_path.clear();
     if (is_ground_robot_) {
@@ -1331,6 +1380,17 @@ void HGPManager::findClosestNonOccupiedPoint(const Vec3f& point,
     closest_non_occupied_point = point;
   }
   mtx_map_util_.unlock();
+}
+
+bool HGPManager::findClosestNonOccupied2DPoint(const Vec3f& point,
+                                               Vec3f& closest_non_occupied_point) {
+  std::lock_guard<std::mutex> lock(mtx_map_util_);
+  const auto& mu = map_util_for_planning_ ? map_util_for_planning_ : map_util_;
+  if (!mu) {
+    closest_non_occupied_point = point;
+    return false;
+  }
+  return mu->findClosestNonOccupied2DPoint(point, closest_non_occupied_point);
 }
 
 int HGPManager::countUnknownCells() const { return map_util_for_planning_->countUnknownCells(); }

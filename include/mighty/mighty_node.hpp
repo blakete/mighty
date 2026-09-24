@@ -272,6 +272,12 @@ class MIGHTY_NODE : public rclcpp::Node {
 
   // ESDF subscription (ground robot only)
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr sub_esdf_2d_;
+  // esdf_grid_ is written by esdfCallback() on cb_group_map_ and read by
+  // replanCallback() on cb_group_replan_ -- a different callback group, and
+  // (per main()) MultiThreadedExecutor actually runs them concurrently. Unlike
+  // occ_grid_2d_/planning_occ_grid_2d_ (each confined to one callback group),
+  // this one crosses groups, so it needs its own lock.
+  std::mutex mtx_esdf_grid_;
   std::shared_ptr<const class EsdfGrid2D> esdf_grid_;
 
   // Binary 2D occupancy subscription (ground robot only).

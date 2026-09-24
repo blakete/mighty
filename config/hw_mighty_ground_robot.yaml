@@ -102,12 +102,12 @@ mighty_node:
         # --- L-BFGS Optimization Weights ---
         dynamic_weight: 1e+2                         # [-] Dynamic obstacle avoidance weight
         time_weight: 1e+3                               # [-] Time cost weight
-        stat_weight: 0.0                                # [-] Static obstacle weight
+        stat_weight: 0.0 #1e+2 # WAS ZERO                                # [-] Static obstacle weight
         jerk_weight: 1e+3                              # [-] Jerk smoothness weight
         dyn_constr_vel_weight: 1e+3                     # [-] Velocity constraint violation weight
         dyn_constr_acc_weight: 1e+3                     # [-] Acceleration constraint violation weight
         dyn_constr_jerk_weight: 1e+3                    # [-] Jerk constraint violation weight
-        planner_Co: 0.1                                 # [m] Collision clearance for static obstacles
+        planner_Co: 0.2 # WAS 0.1                                 # [m] Collision clearance for static obstacles
         planner_Cw: 3.0                                 # [m] Collision clearance for dynamic obstacles
 
         # --- Safety Corridors ---
@@ -312,7 +312,7 @@ mighty_node:
 
         # --- Debug ---
         global_planner_verbose: false                   # [-] Global planner debug output
-        debug_verbose: false                            # [-] General debug output
+        debug_verbose: true                            # [-] General debug output
         closed_form_traj_verbose: false                 # [-] Closed-form trajectory debug
         verbose_computation_time: false                 # [-] Print computation times
 

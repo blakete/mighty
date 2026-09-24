@@ -1584,8 +1584,13 @@ void MIGHTY_NODE::replanCallback() {
   setComputationTimesToZero();
 
   // Pass current ESDF snapshot to planner (ground robot only)
-  if (par_.use_esdf_cost && esdf_grid_) {
-    mighty_ptr_->setEsdfGrid(esdf_grid_);
+  if (par_.use_esdf_cost) {
+    std::shared_ptr<const EsdfGrid2D> esdf_grid_snap;
+    {
+      std::lock_guard<std::mutex> lock(mtx_esdf_grid_);
+      esdf_grid_snap = esdf_grid_;
+    }
+    if (esdf_grid_snap) mighty_ptr_->setEsdfGrid(esdf_grid_snap);
   }
 
   // Replan
@@ -3253,7 +3258,9 @@ void MIGHTY_NODE::unknownMapCallback(const sensor_msgs::msg::PointCloud2::ConstP
 }
 
 void MIGHTY_NODE::esdfCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
-  esdf_grid_ = EsdfGrid2D::fromOccupancyGrid(*msg, par_.esdf_truncation_distance);
+  auto grid = EsdfGrid2D::fromOccupancyGrid(*msg, par_.esdf_truncation_distance);
+  std::lock_guard<std::mutex> lock(mtx_esdf_grid_);
+  esdf_grid_ = grid;
 }
 
 void MIGHTY_NODE::planningOcc2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {

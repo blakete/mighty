@@ -89,6 +89,14 @@ class MIGHTY {
    */
   bool checkIfPointOccupied(const Vec3f& point);
 
+  /** @brief NEW BRANCH of checkIfPointOccupied(): checks the 2D ground-robot
+   *  tri-state map instead of the 3D voxel map -- see
+   *  HGPManager::checkIfPointOccupied2D() for why this exists.
+   *  @param point Query position.
+   *  @return True if the 2D cell is occupied.
+   */
+  bool checkIfPointOccupied2D(const Vec3f& point);
+
   /** @brief Check if a point is in a free voxel.
    *  @param point Query position.
    *  @return True if free.
@@ -215,6 +223,12 @@ class MIGHTY {
    *          should drop the goal in that case.
    */
   bool sanitizeTerminalGoal(state& goal);
+
+  /** @brief NEW: 2D-map counterpart of sanitizeTerminalGoal(), used for
+   *  ground-robot 2D deployments -- see the branch at the top of
+   *  sanitizeTerminalGoal() for why. Same contract/return value.
+   */
+  bool sanitizeTerminalGoal2D(state& goal);
 
   /** @brief Change the drone state machine status.
    *  @param new_status One of DroneStatus enum values.
@@ -391,11 +405,35 @@ class MIGHTY {
    */
   void setInitialPose(const geometry_msgs::msg::TransformStamped& init_pose);
 
-  /** @brief Set the 2D ESDF grid for ground robot obstacle cost. Thread-safe (immutable snapshot). */
-  void setEsdfGrid(std::shared_ptr<const class EsdfGrid2D> grid) { esdf_grid_ = grid; }
+  /** @brief Set the 2D ESDF grid for ground robot obstacle cost.
+   *  Locked: the *pointed-to* grid is immutable, but the shared_ptr member itself
+   *  is written here from the map-callback thread and read from the replan thread
+   *  (see getEsdfGridSnapshot()/getOccGrid2DSnapshot()) -- unsynchronized shared_ptr
+   *  read/write across threads is a data race regardless of what it points to
+   *  (observed as an intermittent SIGSEGV in practice).
+   */
+  void setEsdfGrid(std::shared_ptr<const class EsdfGrid2D> grid) {
+    std::lock_guard<std::mutex> lock(mtx_2d_grids_);
+    esdf_grid_ = grid;
+  }
 
-  /** @brief Set the binary 2D occupancy grid for ground robot A* planning. */
-  void setOccGrid2D(std::shared_ptr<const class OccGrid2D> grid) { occ_grid_2d_ = grid; }
+  /** @brief Set the binary 2D occupancy grid for ground robot A* planning. Locked: see setEsdfGrid(). */
+  void setOccGrid2D(std::shared_ptr<const class OccGrid2D> grid) {
+    std::lock_guard<std::mutex> lock(mtx_2d_grids_);
+    occ_grid_2d_ = grid;
+  }
+
+  /** @brief Thread-safe copy of the current ESDF grid pointer. */
+  std::shared_ptr<const class EsdfGrid2D> getEsdfGridSnapshot() {
+    std::lock_guard<std::mutex> lock(mtx_2d_grids_);
+    return esdf_grid_;
+  }
+
+  /** @brief Thread-safe copy of the current 2D occupancy grid pointer. */
+  std::shared_ptr<const class OccGrid2D> getOccGrid2DSnapshot() {
+    std::lock_guard<std::mutex> lock(mtx_2d_grids_);
+    return occ_grid_2d_;
+  }
 
   /** @brief Apply the initial pose transform to a piecewise polynomial trajectory.
    *  @param pwp Trajectory to transform in place.
@@ -460,6 +498,7 @@ class MIGHTY {
       safe_corridor_polytopes_whole_;  // Polytope (Linear) constraints for whole trajectory
   std::shared_ptr<lbfgs::SolverLBFGS>
       whole_traj_solver_ptr_;                    // L-BFGS solver pointer for the whole trajectory
+  std::mutex mtx_2d_grids_;  // Guards esdf_grid_/occ_grid_2d_ -- see setEsdfGrid()
   std::shared_ptr<const class EsdfGrid2D> esdf_grid_;  // 2D ESDF grid (ground robot only)
   std::shared_ptr<const class OccGrid2D> occ_grid_2d_;  // Binary 2D occupancy (ground robot only)
   std::vector<std::shared_ptr<dynTraj>> trajs_;  // Dynamic trajectory

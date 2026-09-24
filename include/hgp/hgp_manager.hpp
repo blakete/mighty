@@ -141,6 +141,16 @@ class HGPManager {
    */
   bool checkIfPointOccupied(const Vec3f& point);
 
+  /** @brief NEW BRANCH of checkIfPointOccupied(): checks the 2D ground-robot
+   *  tri-state map (map_2d_) instead of the 3D voxel map. Use this for
+   *  ground-robot 2D deployments, where the 3D map is never populated (see
+   *  findClosestNonOccupied2DPoint() in map_util.hpp for why) and
+   *  checkIfPointOccupied() cannot see real occupancy there.
+   *  @param point Query position in world coordinates.
+   *  @return True if the 2D cell is occupied. False if no 2D map exists yet.
+   */
+  bool checkIfPointOccupied2D(const Vec3f& point);
+
   /** @brief Run the HGP global planner from start to goal.
    *  @param start_sent Start position in world coordinates.
    *  @param start_vel Current velocity at start.
@@ -254,6 +264,15 @@ class HGPManager {
    *  @param closest_non_occupied_point Output position of the nearest free or unknown voxel.
    */
   void findClosestNonOccupiedPoint(const Vec3f& point, Vec3f& closest_non_occupied_point);
+
+  /** @brief NEW BRANCH of findClosestNonOccupiedPoint(): searches the 2D
+   *  ground-robot tri-state map instead of the 3D voxel map. See
+   *  checkIfPointOccupied2D() for why this is needed.
+   *  @param point Query position in world coordinates.
+   *  @param closest_non_occupied_point Output position of the nearest non-occupied 2D cell.
+   *  @return True if a non-occupied cell was found within the search radius.
+   */
+  bool findClosestNonOccupied2DPoint(const Vec3f& point, Vec3f& closest_non_occupied_point);
 
   /** @brief Count the number of unknown cells in the current map.
    *  @return Number of unknown cells.

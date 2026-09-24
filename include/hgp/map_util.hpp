@@ -1047,6 +1047,69 @@ class MapUtil {
   }
 
   /**
+   * @brief Find a non-occupied point (free or unknown) on the 2D ground-robot
+   *        tri-state map closest to the given point. NEW BRANCH: mirrors
+   *        findClosestNonOccupiedPoint() above, but searches map_2d_ (via
+   *        get2DOccupancy) instead of the 3D voxel map (map_). The 3D map is
+   *        never populated for ground-robot deployments with no 3D point-cloud
+   *        source (see buildMap2DFromOcc2D()/updateMap2DOnly(), which feed it
+   *        empty clouds) -- findClosestNonOccupiedPoint() and isOccupied()
+   *        therefore cannot see real occupancy from occ_2d_topic at all for
+   *        those deployments. This function does not replace or modify the
+   *        original -- callers choose which one to use.
+   * @param  point : The given query position in world coordinates (z passed through unchanged)
+   * @param  closest_non_occupied_point : Output position of the nearest non-occupied 2D cell
+   * @return true if a non-occupied cell was found (or the query point already was one)
+   */
+  bool findClosestNonOccupied2DPoint(const Vec3f& point, Vec3f& closest_non_occupied_point) {
+    closest_non_occupied_point = point;
+
+    if (!has_2d_map_) return false;
+
+    int dimX, dimY;
+    get2DDimensions(dimX, dimY);
+    const auto origin = getOrigin();
+    const float res = static_cast<float>(getRes());
+    if (res <= 0.0f) return false;
+
+    const int cx = static_cast<int>(std::floor((point.x() - origin(0)) / res));
+    const int cy = static_cast<int>(std::floor((point.y() - origin(1)) / res));
+
+    // Already non-occupied (free or unknown): nothing to do.
+    if (get2DOccupancy(cx, cy) != val_occ_) return true;
+
+    // Expanding-radius (in cells) search, ~5 m cap to match findClosestNonOccupiedPoint().
+    const int max_radius_cells = static_cast<int>(std::ceil(5.0f / res));
+    for (int r = 1; r <= max_radius_cells; ++r) {
+      float min_dist = std::numeric_limits<float>::max();
+      bool found = false;
+      for (int dx = -r; dx <= r; ++dx) {
+        for (int dy = -r; dy <= r; ++dy) {
+          // Only the outer ring of this radius -- interior cells were already
+          // checked (and would have returned) at a smaller r.
+          if (dx != -r && dx != r && dy != -r && dy != r) continue;
+          const int nx = cx + dx;
+          const int ny = cy + dy;
+          if (nx < 0 || nx >= dimX || ny < 0 || ny >= dimY) continue;
+          if (get2DOccupancy(nx, ny) == val_occ_) continue;  // still occupied
+
+          const float wx = origin(0) + (nx + 0.5f) * res;
+          const float wy = origin(1) + (ny + 0.5f) * res;
+          const Vec3f candidate(wx, wy, static_cast<float>(point.z()));
+          const float dist = (candidate - point).norm();
+          if (dist < min_dist) {
+            min_dist = dist;
+            closest_non_occupied_point = candidate;
+            found = true;
+          }
+        }
+      }
+      if (found) return true;
+    }
+    return false;  // nothing non-occupied found within the search radius
+  }
+
+  /**
    * @brief Get indices of the neighbors of a point given the radius
    * @param Veci<3> point_int : The given point
    * @param std::vector<int>& neighbor_indices : The indices of the neighbors
