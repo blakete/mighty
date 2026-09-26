@@ -238,6 +238,7 @@ start() {
              | grep -c \"'platform':\"" >/dev/null 2>&1; then
         echo "[mighty_hw] this image has no mighty_hw.launch.py with a platform:= argument" \
              "(it predates this checkout). Pull or rebuild the image first." >&2
+        "${COMPOSE[@]}" down >/dev/null 2>&1 || true
         exit 1
     fi
 
