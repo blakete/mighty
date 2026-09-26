@@ -406,8 +406,9 @@ check() {
         ok "${IMAGE}: ${mine:-?}"
         for c in $(docker ps --format '{{.Names}}'); do
             [[ "${c}" == "${CONTAINER}" ]] && continue
-            other="$(docker exec "${c}" dpkg-query -W -f='${Version}' ros-humble-rmw-zenoh-cpp 2>/dev/null || true)"
-            [[ -z "${other}" ]] && continue
+            # Containers without ROS (or without rmw_zenoh) are none of our business.
+            other="$(docker exec "${c}" dpkg-query -W -f='${Version}' ros-humble-rmw-zenoh-cpp 2>/dev/null)" || continue
+            [[ "${other}" =~ ^[0-9] ]] || continue
             [[ "${other}" == "${mine}" ]] && ok "${c}: ${other}" \
                 || warn "${c}: ${other} differs from ${IMAGE} — TRANSIENT_LOCAL topics may not cross"
         done

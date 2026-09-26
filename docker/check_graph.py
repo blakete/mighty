@@ -40,12 +40,23 @@ while time.time() < end:
     rclpy.spin_once(node, timeout_sec=0.1)
 
 
+# The stack's own nodes: inputs and consumers must come from somewhere else
+# (mighty_node, for one, also publishes on unknown_grid).
+STACK = {'mighty_node', 'convert_odom_to_state', 'convert_vicon_to_state', 'mpc', 'mighty_check'}
+
+
+def external(infos):
+    return [i for i in infos if i.node_name not in STACK]
+
+
 def publishers(name):
-    return node.count_publishers(topic(name))
+    """Publishers on a topic, not counting the MIGHTY stack's own nodes."""
+    return len(external(node.get_publishers_info_by_topic(topic(name))))
 
 
 def subscribers(name):
-    return node.count_subscribers(topic(name))
+    """Subscribers on a topic, not counting the MIGHTY stack's own nodes."""
+    return len(external(node.get_subscriptions_info_by_topic(topic(name))))
 
 
 def need_publisher(name, level, why):
@@ -99,13 +110,14 @@ if TF_GATE and TF_GATE != ['none']:
             report('FAIL', f'TF {target} -> {source} missing — planner and MPC wait 60 s, '
                            'then run degraded (MPC commands 0)')
 
-# A running stack: exactly one of each output
+# A running stack: exactly one of each output (all publishers, including duplicates
+# left over from a double start)
 if STACK_UP:
-    n = publishers('state')
+    n = node.count_publishers(topic('state'))
     report('PASS' if n == 1 else 'FAIL',
            f'{topic("state")}: {n} publisher(s)' + ('' if n == 1 else ' — expected exactly 1'))
     if PLATFORM == 'ground_robot':
-        n = publishers('cmd_vel_auto')
+        n = node.count_publishers(topic('cmd_vel_auto'))
         report('PASS' if n == 1 else 'FAIL', f'{topic("cmd_vel_auto")}: {n} publisher(s)'
                + ('' if n == 1 else ' — expected exactly 1 (0: MPC down; 2+: double stack)'))
 
