@@ -14,7 +14,10 @@
 #   livox driver    sensors.service                  -> <ns>/livox/{lidar,imu}
 #   mapper          elevation_mapping_cupy, OX08 Orin -> <ns>/occ_2d_topic, esdf_2d_topic
 #   zenoh router    drive.service                    -> :7447
-#   sim repos       gazebo/uav_simulator/livox sim   (BUILD_SIMULATION=OFF)
+#   simulation      docker/dev/sim (dev-only harness, never in this image)
+#   rviz            DecompROS2's decomp_rviz_plugins/decomp_test_node are deleted
+#                   right after cloning (see deps-src); mighty vendors the one
+#                   conversion it used (include/mighty/decomp_ros_utils.hpp)
 # Nothing in mighty, mpc or dynus_interfaces links the Livox SDK or driver:
 # the only "livox" in mighty is a topic name and a frame-id string.
 #
@@ -22,6 +25,7 @@
 #   deps-src     clone HW_DEPS at their pins   (keyed on mighty.repos ONLY)
 #   deps-build   rosdep + colcon the deps      (re-runs only when a pin moves)
 #   mighty-build COPY this checkout + colcon   (the layer you iterate on)
+#   mighty-test  gtests, built ONLY with --target mighty-test (make hw-test)
 #   runtime      exec deps + the install tree  (what ships)
 #
 # Cloning needs SSH for the private mpc repo (GitLab): build with
@@ -61,6 +65,11 @@ missing = [k for k in keep if k not in repos]
 assert not missing, f'HW_DEPS not in mighty.repos: {missing}'
 yaml.safe_dump({'repositories': {k: repos[k] for k in keep}}, sys.stdout)
 PY
+# DecompROS2's rviz plugin and its test node are never used on hardware, and the
+# plugin's manifest is what made rosdep install rviz2/Qt/OGRE into every stage.
+# Delete (not COLCON_IGNORE): rosdep and the runtime manifest collector read
+# package.xml files regardless of COLCON_IGNORE.
+RUN rm -rf ${WS}/src/DecompROS2/decomp_rviz_plugins ${WS}/src/DecompROS2/decomp_test_node
 
 # ---------- deps-build: rosdep + colcon the dependency workspace ----------------
 FROM ros:humble-ros-base AS deps-build
@@ -72,19 +81,16 @@ COPY --from=deps-src ${WS}/src ${WS}/src
 # --skip-keys: ament_python is mpc's buildtool_depend, not a rosdistro key;
 # catkin: DecompUtil ships a catkin-era package.xml (buildtool_depend
 # catkin) but is a plain CMake project — colcon builds it fine, rosdep cannot
-# resolve the key. libeigen3-dev is explicit: decomp_util and mighty
-# find_package(Eigen3) without declaring it.
+# resolve the key. Explicit, because decomp_util declares no dependencies at
+# all: libeigen3-dev (it find_package()s Eigen3) and libboost-dev (its tests,
+# which it builds unconditionally, include boost/geometry.hpp; Boost used to
+# arrive only through decomp_rviz_plugins' PCL dependency).
 RUN apt-get update && rosdep update \
  && rosdep install -y --ignore-src --from-paths src --skip-keys "catkin ament_python" \
- && apt-get install -y --no-install-recommends libeigen3-dev \
+ && apt-get install -y --no-install-recommends libeigen3-dev libboost-dev \
  && rm -rf /var/lib/apt/lists/*
-# decomp_util first, on its own: decomp_rviz_plugins find_package()s it
-# without declaring the dependency in package.xml, so colcon cannot order
-# them in one invocation.
 RUN source /opt/ros/humble/setup.bash \
- && colcon build --packages-select decomp_util --cmake-args -DCMAKE_BUILD_TYPE=Release \
- && source install/setup.bash \
- && colcon build --packages-skip decomp_util --cmake-args -DCMAKE_BUILD_TYPE=Release \
+ && colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release \
  && rm -rf build log
 
 # ---------- mighty-build: this checkout on top of the deps -----------------------
@@ -94,27 +100,36 @@ SHELL ["/bin/bash", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR ${WS}
 # The manifest alone first, so the apt layer below is keyed on package.xml and
-# a source edit re-runs only the colcon layer.
-# gazebo_ros/gazebo_plugins are declared <depend>s but only the BUILD_SIMULATION
-# targets use them; gazebo_msgs stays (fake_sim links it unconditionally, and it
-# is messages only). nlohmann-json3-dev: find_package()ed, not declared.
+# a source edit re-runs only the colcon layer. (rosdep also installs the
+# test_depends here, so the mighty-test stage needs no extra apt layer.)
 COPY package.xml ${WS}/src/mighty/package.xml
 RUN apt-get update && rosdep update \
- && rosdep install -y --ignore-src --from-paths src --skip-keys "catkin ament_python gazebo_ros gazebo_plugins" \
- && apt-get install -y --no-install-recommends nlohmann-json3-dev \
+ && rosdep install -y --ignore-src --from-paths src --skip-keys "catkin ament_python" \
  && rm -rf /var/lib/apt/lists/*
 # Build context = the mighty repo root (compose: context ..). What ships is
 # filtered by Dockerfile.hw.dockerignore next to this file.
 COPY . ${WS}/src/mighty
 RUN source /opt/ros/humble/setup.bash && source install/setup.bash \
  && colcon build --packages-select mighty \
-        --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_SIMULATION=OFF -DBUILD_TESTING=OFF \
+        --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
  && rm -rf build log
 # Manifests for the runtime stage's rosdep, with mtimes pinned so the COPY
 # --from below (and the apt layer behind it) stays cached across source edits.
 RUN mkdir -p /manifests && cd src \
  && find . -name package.xml -exec cp --parents {} /manifests \; \
  && find /manifests -exec touch -d @0 {} +
+
+# ---------- mighty-test: gtests (not part of the default build) ------------------
+# Only built when targeted: `make hw-test` (docker build --target mighty-test).
+# Rebuilds mighty with BUILD_TESTING=ON in its own stage, so the shipped image is
+# built exactly the same way whether or not the tests ran.
+FROM mighty-build AS mighty-test
+RUN source /opt/ros/humble/setup.bash && source install/setup.bash \
+ && colcon build --packages-select mighty \
+        --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+ && colcon test --packages-select mighty --return-code-on-test-failure \
+        --event-handlers console_direct+ \
+ && colcon test-result --verbose
 
 # ---------- runtime: exec deps + the baked workspace -----------------------------
 FROM ros:humble-ros-base
@@ -174,7 +189,7 @@ RUN gpg --dearmor < /tmp/ros-snapshot.asc > /usr/share/keyrings/ros-snapshot-arc
         > /etc/apt/preferences.d/99-rmw-zenoh-pin \
  && apt-get update && rosdep update \
  && rosdep install -y --ignore-src --dependency-types exec --from-paths /tmp/manifests \
-        --skip-keys "catkin ament_python gazebo_ros gazebo_plugins" \
+        --skip-keys "catkin ament_python" \
  && apt-get install -y --no-install-recommends \
         ros-humble-rmw-zenoh-cpp=${RMW_ZENOH_CPP_VER} \
         ros-humble-zenoh-cpp-vendor=${ZENOH_CPP_VENDOR_VER} \

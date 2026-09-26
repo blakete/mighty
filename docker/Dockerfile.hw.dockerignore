@@ -1,22 +1,17 @@
 # BuildKit per-Dockerfile ignore for Dockerfile.hw. Paths are relative to the
 # build context = the mighty repo root (compose: context ..).
 #
-# worlds/, meshes/, urdf/, config/, launch/, rviz/ MUST ship: CMakeLists.txt
-# install(DIRECTORY ...) errors on a missing source dir, it does not skip.
+# config/ and launch/ MUST ship: CMakeLists.txt install(DIRECTORY ...) errors on
+# a missing source dir, it does not skip.
 .git
 .vscode
 .gitattributes
-CLAUDE.md
+*.md
+# docker/ holds the host-side tooling and the dev-only sim harness (docker/dev/sim),
+# none of which belongs in the image...
 docker
 # ...but the vendored apt signing key must reach the build context.
 !docker/keys
 !docker/keys/**
-data
-imgs
-# benchmarking/ is 46 MB of results, but one script in it is an install(PROGRAMS)
-# target, so keep just that file.
-benchmarking/*
-!benchmarking/unc_benchmark_node.py
 **/__pycache__
-**/*.ipynb
 **/log
