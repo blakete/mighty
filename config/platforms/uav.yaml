@@ -18,7 +18,7 @@ mighty_node:
         provide_goal_in_global_frame: true                     # [-] Provide goal in the global frame
         use_hardware: true                                     # [-] Use hardware
         share_traj: true                                         # [-] Publish own planned traj on /trajs (off for solo runs to skip the swarm channel)
-        use_frame_alignment: true                                # [-] Use inter-agent frame alignment
+        use_frame_alignment: true              # [-] true: a peer's /trajs is IGNORED until /frame_align/<ns>/<peer> arrives (nothing publishes it on hardware); false: peers' trajectories are used as if in this vehicle's map frame
         num_agents: 10                                           # [-] Number of agents (for frame alignment subscriptions)
 
         # Flight mode should be terminal_goal
