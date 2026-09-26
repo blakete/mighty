@@ -13,9 +13,14 @@ Handles: any message with header.stamp; tf2_msgs/TFMessage (each transform);
 sensor_msgs/PointCloud2 with a Livox per-point float64 'timestamp' field in ns
 (DLIO deskews with it — shifting only the header would break odometry).
 
-    restamp_relay.py [--in-prefix /replay] TOPIC=TYPE [TOPIC=TYPE ...]
+    restamp_relay.py [--in-prefix /replay] [--hold HZ] TOPIC=TYPE [TOPIC=TYPE ...]
     e.g. restamp_relay.py /RR08/livox/lidar=sensor_msgs/msg/PointCloud2 \
                           /RR08/livox/imu=sensor_msgs/msg/Imu
+
+--hold HZ: once the bag stops (no input for 1 s), keep republishing the last
+message of every topic at HZ, stamped with the current time (for /tf, the last
+transform of every parent/child pair). The vehicle then stays at its final pose
+with its final map, so goals can be sent to a planner for as long as needed.
 """
 import argparse
 import sys
@@ -41,11 +46,15 @@ def set_stamp_ns(stamp, ns):
 
 
 class RestampRelay(Node):
-    def __init__(self, in_prefix, topics):
+    def __init__(self, in_prefix, topics, hold_hz=0.0):
         super().__init__('restamp_relay')
         self.offset_ns = None          # fixed once, from the first message seen
         self.count = {}
         self.pubs = {}
+        self.last = {}                 # topic -> last relayed message (for --hold)
+        self.last_tf = {}              # (parent, child) -> last TransformStamped on /tf
+        self.last_input_ns = None
+        self.holding = False
         qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
                          history=HistoryPolicy.KEEP_LAST, depth=50,
                          durability=DurabilityPolicy.VOLATILE)
@@ -63,6 +72,8 @@ class RestampRelay(Node):
             self.count[topic] = 0
             self.get_logger().info(f'{in_prefix}{topic} -> {topic} ({type_name})')
         self.create_timer(5.0, self.report)
+        if hold_hz > 0:
+            self.create_timer(1.0 / hold_hz, self.hold)
 
     def first_stamp_ns(self, msg):
         if hasattr(msg, 'header'):
@@ -90,6 +101,8 @@ class RestampRelay(Node):
                 msg.data = buf.tobytes()
 
     def relay(self, topic, msg):
+        self.last_input_ns = self.get_clock().now().nanoseconds
+        self.holding = False
         if self.offset_ns is None:
             first = self.first_stamp_ns(msg)
             if first is None:
@@ -99,6 +112,36 @@ class RestampRelay(Node):
         self.shift(msg)
         self.pubs[topic].publish(msg)
         self.count[topic] += 1
+        if topic == '/tf':
+            for tr in msg.transforms:
+                self.last_tf[(tr.header.frame_id, tr.child_frame_id)] = tr
+        else:
+            self.last[topic] = msg
+
+    def hold(self):
+        now = self.get_clock().now()
+        if self.last_input_ns is None or now.nanoseconds - self.last_input_ns < NS:
+            return
+        if not self.holding:
+            self.holding = True
+            self.get_logger().info('bag finished: holding the last pose, TF and maps '
+                                   '(republished with the current time)')
+        stamp = now.to_msg()
+        for topic, msg in self.last.items():
+            if topic.endswith('tf_static'):
+                continue                   # latched: already delivered
+            if hasattr(msg, 'header'):
+                msg.header.stamp = stamp
+            if hasattr(msg, 'twist') and hasattr(msg, 'pose'):   # Odometry: parked
+                msg.twist.twist.linear.x = msg.twist.twist.linear.y = msg.twist.twist.linear.z = 0.0
+                msg.twist.twist.angular.x = msg.twist.twist.angular.y = msg.twist.twist.angular.z = 0.0
+            self.pubs[topic].publish(msg)
+        if self.last_tf:
+            msg = self.pubs['/tf'].msg_type()
+            for tr in self.last_tf.values():
+                tr.header.stamp = stamp
+                msg.transforms.append(tr)
+            self.pubs['/tf'].publish(msg)
 
     def report(self):
         self.get_logger().info('relayed ' + ', '.join(f'{t}:{n}' for t, n in self.count.items()))
@@ -107,6 +150,8 @@ class RestampRelay(Node):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--in-prefix', default='/replay')
+    ap.add_argument('--hold', type=float, default=0.0, metavar='HZ',
+                    help='after the bag ends, republish the last messages at HZ')
     ap.add_argument('pairs', nargs='+', metavar='TOPIC=TYPE')
     args = ap.parse_args()
     topics = []
@@ -116,7 +161,7 @@ def main():
         t, ty = p.split('=', 1)
         topics.append((t, ty))
     rclpy.init()
-    node = RestampRelay(args.in_prefix, topics)
+    node = RestampRelay(args.in_prefix, topics, args.hold)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

@@ -302,6 +302,18 @@ transform, the Livox per-point `timestamp`), so no sim time is involved.
 Reference: `mad_summer_2026/planner_test_cases/bag_20260806_151753_RR08_scene5_planner_replay/`
 on the NAS (its `description.txt` lists inputs, reference outputs and the recipe).
 
+**Click goals on a replayed bag (`dev/replay/goal_session.sh`).** Runs MIGHTY `--dev`
+under the bag's vehicle name, RViz from the containerized-rviz image bound to the dev
+router only (never to a `:7447` router on the machine), and the bag's planner inputs
+(TF, odometry, the three 2D grids) through `restamp_relay.py --hold`: after the bag
+ends the vehicle stays parked at its last pose with its last map, and every 2D Goal
+click makes the local planner replan.
+
+```bash
+docker/dev/replay/goal_session.sh up /path/to/bag_dir    # opens RViz; tmux attach -t hw_mighty
+docker/dev/replay/goal_session.sh down
+```
+
 **Simulator (`dev/sim/`)** — a dev-only fake_sim harness for the UAV mode; never part of
 the hardware image. See `dev/sim/README.md`.
 
