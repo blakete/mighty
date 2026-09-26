@@ -58,12 +58,25 @@ double debug_log_t(double now_sec) {
  * @brief Constructor
  */
 MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
-  // Get id from ns
+  // Agent id: the agent_id parameter if set, else the namespace's trailing digits
+  // (RR08 -> 8). It is this agent's id on /trajs, the self-filter for peers'
+  // trajectories, and part of the frame-alignment topic names.
   ns_ = this->get_namespace();
   ns_ = ns_.substr(ns_.find_last_of("/") + 1);
-  id_str_ = ns_.substr(ns_.size() -
-                       2);  // ns is like NX01, so we get the last two characters and convert to int
-  id_ = std::stoi(id_str_);
+  const int64_t agent_id_param = this->declare_parameter<int64_t>("agent_id", -1);
+  id_str_ = ns_.substr(ns_.find_last_not_of("0123456789") + 1);
+  if (agent_id_param >= 0) {
+    id_ = static_cast<int>(agent_id_param);
+    if (id_str_.empty()) id_str_ = std::to_string(id_);
+  } else if (!id_str_.empty()) {
+    id_ = std::stoi(id_str_);
+  } else {
+    RCLCPP_FATAL(this->get_logger(),
+                 "Cannot derive an agent id from namespace '%s': it must end in digits "
+                 "(e.g. RR08), or set the agent_id parameter.",
+                 ns_.c_str());
+    throw std::runtime_error("mighty_node: no agent id (namespace has no trailing digits)");
+  }
 
   // Declare, set, and print parameters
   this->declareParameters();
@@ -216,7 +229,7 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
   if (par_.use_frame_alignment) {
     for (int i = 1; i <= par_.num_agents; i++) {
       if (i == id_) continue;
-      std::string prefix = ns_.substr(0, ns_.size() - 2);
+      std::string prefix = ns_.substr(0, ns_.find_last_not_of("0123456789") + 1);
       char other_name[16];
       std::snprintf(other_name, sizeof(other_name), "%s%02d", prefix.c_str(), i);
       std::string topic = "/frame_align/" + ns_ + "/" + std::string(other_name);
@@ -246,7 +259,10 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
         100ms, std::bind(&MIGHTY_NODE::goalReachedCheckCallback, this), this->cb_groups_re_[2]);
   timer_cleanup_old_trajs_ = this->create_wall_timer(
       500ms, std::bind(&MIGHTY_NODE::cleanUpOldTrajsCallback, this), this->cb_groups_mu_[4]);
-  if (par_.use_hardware)
+  // The initial pose is only consumed when goals are given in the global frame
+  // (MIGHTY::updateState / goal transform); without that the lookup would just
+  // fail every 100 ms forever.
+  if (par_.use_hardware && par_.provide_goal_in_global_frame)
     timer_initial_pose_ = this->create_wall_timer(
         100ms, std::bind(&MIGHTY_NODE::getInitialPoseHwCallback, this), this->cb_groups_mu_[8]);
 
@@ -288,14 +304,8 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
         std::bind(&MIGHTY_NODE::unknownMapCallback, this, std::placeholders::_1), options_map);
     RCLCPP_INFO(this->get_logger(),
                 "Hardware mode: subscribing to occupancy_grid and unknown_grid independently");
-  } else if (par_.sim_env != "fake_sim") {
-    // Gazebo sim: synchronize the occupancy grid and unknown grid
-    occup_grid_sub_.subscribe(this, "occupancy_grid", rmw_qos_profile_sensor_data, options_map);
-    unknown_grid_sub_.subscribe(this, "unknown_grid", rmw_qos_profile_sensor_data, options_map);
-    sync_.reset(new Sync(MySyncPolicy(10), occup_grid_sub_, unknown_grid_sub_));
-    sync_->registerCallback(
-        std::bind(&MIGHTY_NODE::mapCallback, this, std::placeholders::_1, std::placeholders::_2));
   } else {
+    // Dev simulator (docker/dev/sim): fake_sim's rendered sensor cloud.
     sub_fake_sim_occupancy_map_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
         "sensor_point_cloud",
         rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(rmw_qos_profile_sensor_data)),
@@ -503,6 +513,9 @@ void MIGHTY_NODE::declareParameters() {
   // UAV or Ground robot
   this->declare_parameter("vehicle_type", "uav");
   this->declare_parameter("provide_goal_in_global_frame", false);
+  // Parent frame of the <ns>/init_pose TF looked up when goals are given in the
+  // global frame (hardware + provide_goal_in_global_frame, e.g. mocap).
+  this->declare_parameter("init_pose_parent_frame", "map");
   this->declare_parameter("use_hardware", false);
   this->declare_parameter("map_frame_id", "map");
   this->declare_parameter("share_traj", true);
@@ -825,6 +838,7 @@ void MIGHTY_NODE::setParameters() {
   // Vehicle type (UAV, Wheeled Robit, or Quadruped)
   par_.vehicle_type = this->get_parameter("vehicle_type").as_string();
   par_.provide_goal_in_global_frame = this->get_parameter("provide_goal_in_global_frame").as_bool();
+  init_pose_parent_frame_ = this->get_parameter("init_pose_parent_frame").as_string();
   par_.use_hardware = this->get_parameter("use_hardware").as_bool();
   par_.map_frame_id = this->get_parameter("map_frame_id").as_string();
   par_.share_traj = this->get_parameter("share_traj").as_bool();
@@ -1932,7 +1946,7 @@ void MIGHTY_NODE::getInitialPoseHwCallback() {
   // First find the transformation matrix from map to camera
   try {
     init_pose_transform_stamped_ =
-        tf2_buffer_->lookupTransform("map", initial_pose_topic_, tf2::TimePointZero);
+        tf2_buffer_->lookupTransform(init_pose_parent_frame_, initial_pose_topic_, tf2::TimePointZero);
 
     // Print out the initial pose
     RCLCPP_INFO(this->get_logger(), "Initial pose received: (%f, %f, %f)",
@@ -3201,30 +3215,6 @@ void MIGHTY_NODE::publishFOV() {
   marker_fov_.header.stamp = this->now();
   pub_fov_->publish(marker_fov_);
   return;
-}
-
-// ----------------------------------------------------------------------------
-
-void MIGHTY_NODE::mapCallback(const sensor_msgs::msg::PointCloud2::ConstPtr& map_msg,
-                              const sensor_msgs::msg::PointCloud2::ConstPtr& unk_msg) {
-  RCLCPP_INFO_ONCE(this->get_logger(),
-                   "mapCallback triggered — synced occupancy_grid + unknown_grid received");
-
-  // use PCL's own Ptr (boost::shared_ptr)
-  pcl::PointCloud<pcl::PointXYZ>::Ptr map_pc(new pcl::PointCloud<pcl::PointXYZ>());
-  pcl::fromROSMsg(*map_msg, *map_pc);
-
-  pcl::PointCloud<pcl::PointXYZ>::Ptr unk_pc(new pcl::PointCloud<pcl::PointXYZ>());
-  pcl::fromROSMsg(*unk_msg, *unk_pc);
-
-  mighty_ptr_->updateMap(map_pc, unk_pc);
-
-  // Publish heat cloud visualization if enabled
-  if (par_.use_heat_map) {
-    publishHeatCloud();
-  }
-  publishGround2DOccupied();
-  publishGround2DHeat();
 }
 
 // ----------------------------------------------------------------------------

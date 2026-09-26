@@ -15,9 +15,6 @@
 
 #include <Eigen/Dense>
 
-#include <message_filters/subscriber.h>
-#include <message_filters/sync_policies/approximate_time.h>
-#include <message_filters/time_synchronizer.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
@@ -68,11 +65,6 @@ struct FrontierRecord;
 #include "std_msgs/msg/color_rgba.hpp"
 #include "tf2_ros/create_timer_ros.h"
 
-typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::PointCloud2,
-                                                        sensor_msgs::msg::PointCloud2>
-    MySyncPolicy;
-typedef message_filters::Synchronizer<MySyncPolicy> Sync;
-
 namespace mighty {
 
 using PCLPoint = pcl::PointXYZ;
@@ -106,8 +98,6 @@ class MIGHTY_NODE : public rclcpp::Node {
   void swarmGoalCallback(const geometry_msgs::msg::PoseStamped& msg);
   // Frontier exploration goal-selection loop, runs at expl_select_rate_hz.
   void exploreSelectCallback();
-  void mapCallback(const sensor_msgs::msg::PointCloud2::ConstPtr& pcl2ptr_map_ros,
-                   const sensor_msgs::msg::PointCloud2::ConstPtr& pcl2ptr_unk_ros);
   void occupancyMapCallback(const sensor_msgs::msg::PointCloud2::ConstPtr& map_msg);
   void unknownMapCallback(const sensor_msgs::msg::PointCloud2::ConstPtr& unk_msg);
   void esdfCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
@@ -244,12 +234,7 @@ class MIGHTY_NODE : public rclcpp::Node {
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_swarm_goal_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_fake_sim_occupancy_map_;
 
-  // Time synchronizer
-  message_filters::Subscriber<sensor_msgs::msg::PointCloud2> occup_grid_sub_;
-  message_filters::Subscriber<sensor_msgs::msg::PointCloud2> unknown_grid_sub_;
-  std::shared_ptr<Sync> sync_;
-
-  // Independent map subscribers (fallback when sync fails, e.g. hardware)
+  // Map subscribers (hardware: occupancy_grid + unknown_grid; dev sim: sensor_point_cloud)
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_occupancy_grid_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_unknown_grid_;
 
@@ -461,6 +446,7 @@ class MIGHTY_NODE : public rclcpp::Node {
   // initial pose (for hardware)
   bool initial_pose_received_ = false;
   std::string initial_pose_topic_;
+  std::string init_pose_parent_frame_;
   geometry_msgs::msg::TransformStamped init_pose_transform_stamped_;
 
   // Frame alignment transforms (inter-agent)

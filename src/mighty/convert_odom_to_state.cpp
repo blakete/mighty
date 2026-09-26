@@ -10,6 +10,7 @@ OdometryToStateNode::OdometryToStateNode() : Node("odometry_to_state_node") {
   rclcpp::QoS state_qos(rclcpp::KeepLast(1));
   state_qos.reliable().durability_volatile();
   state_publisher_ = this->create_publisher<dynus_interfaces::msg::State>("state", state_qos);
+  pose_publisher_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("pose", state_qos);
 }
 
 void OdometryToStateNode::callback(const nav_msgs::msg::Odometry::SharedPtr odom_msg) {
@@ -36,6 +37,12 @@ void OdometryToStateNode::callback(const nav_msgs::msg::Odometry::SharedPtr odom
 
   // Publish the State message
   state_publisher_->publish(state_msg);
+
+  // Same pose, as the PoseStamped the MPC tracks against
+  geometry_msgs::msg::PoseStamped pose_msg;
+  pose_msg.header = odom_msg->header;
+  pose_msg.pose = odom_msg->pose.pose;
+  pose_publisher_->publish(pose_msg);
 }
 
 int main(int argc, char* argv[]) {
