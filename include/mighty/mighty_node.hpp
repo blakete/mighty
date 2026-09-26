@@ -19,12 +19,10 @@
 #include <message_filters/sync_policies/approximate_time.h>
 #include <message_filters/time_synchronizer.h>
 #include <pcl_conversions/pcl_conversions.h>
-#include <tf2_eigen/tf2_eigen.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 
 #include <dynus_interfaces/msg/dyn_traj.hpp>
-#include <dynus_interfaces/msg/dyn_traj_array.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <nav_msgs/msg/path.hpp>
@@ -51,39 +49,24 @@ struct FrontierRecord;
 
 #include "mighty/peer_tracker.hpp"
 
-#include "ament_index_cpp/get_package_share_directory.hpp"
 #include "rclcpp/rclcpp.hpp"
 
 #include "dynus_interfaces/msg/goal.hpp"
-#include "dynus_interfaces/msg/pn_adaptation.hpp"
 #include "dynus_interfaces/msg/state.hpp"
 #include "dynus_interfaces/msg/trajectory.hpp"
 #include "dynus_interfaces/msg/yaw_output.hpp"
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored \
-    "-Wdeprecated-declarations"  // pcl::SAC_SAMPLE_SIZE is protected since PCL 1.8.0 // NOLINT
-#include <pcl/sample_consensus/model_types.h>
-#pragma GCC diagnostic pop
 #include <algorithm>
-#include <execution>
 #include <memory>
 #include <string>
 
-#include <pcl/filters/extract_indices.h>
-#include <pcl/filters/passthrough.h>
-#include <pcl/io/pcd_io.h>
-#include <pcl/segmentation/sac_segmentation.h>
 
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 
 #include "nav_msgs/msg/occupancy_grid.hpp"
-#include "pcl_ros/transforms.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "std_msgs/msg/color_rgba.hpp"
-#include "std_srvs/srv/empty.hpp"
 #include "tf2_ros/create_timer_ros.h"
-#include "tf2_ros/message_filter.h"
 
 typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::PointCloud2,
                                                         sensor_msgs::msg::PointCloud2>

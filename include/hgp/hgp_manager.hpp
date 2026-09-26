@@ -15,7 +15,7 @@
 #include <decomp_util/ellipsoid_decomp.h>
 #include <decomp_util/seed_decomp.h>
 
-#include <decomp_rviz_plugins/data_ros_utils.hpp>
+#include <mighty/decomp_ros_utils.hpp>
 
 // Map includes
 #include <hgp/read_map.hpp>

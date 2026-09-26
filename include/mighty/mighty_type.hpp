@@ -17,7 +17,7 @@
 #include <Eigen/Core>
 
 #include <mighty/lbfgs_solver_utils.hpp>
-#include <sim/exprtk.hpp>
+#include <third_party/exprtk.hpp>
 
 #include "hgp/data_type.hpp"
 

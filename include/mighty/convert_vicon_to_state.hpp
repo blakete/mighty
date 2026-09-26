@@ -1,19 +1,15 @@
 #pragma once
 
-#include <mighty/mighty.hpp>
+#include <memory>
 
 #include "rclcpp/rclcpp.hpp"
 
 #include "dynus_interfaces/msg/state.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
-#include "geometry_msgs/msg/quaternion.hpp"
 #include "geometry_msgs/msg/twist_stamped.hpp"
-#include "geometry_msgs/msg/vector3.hpp"
 #include "message_filters/subscriber.h"
 #include "message_filters/sync_policies/approximate_time.h"
-#include "message_filters/sync_policies/exact_time.h"
 #include "message_filters/synchronizer.h"
-#include "std_msgs/msg/header.hpp"
 
 // Define the synchronization policy
 typedef message_filters::sync_policies::ApproximateTime<geometry_msgs::msg::PoseStamped,

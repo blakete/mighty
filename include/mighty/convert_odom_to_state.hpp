@@ -2,14 +2,9 @@
 
 #include <dynus_interfaces/msg/state.hpp>
 
-#include "mighty/mighty.hpp"
-
 #include "rclcpp/rclcpp.hpp"
 
-#include "geometry_msgs/msg/quaternion.hpp"
-#include "geometry_msgs/msg/vector3.hpp"
 #include "nav_msgs/msg/odometry.hpp"
-#include "std_msgs/msg/header.hpp"
 
 /** @brief ROS 2 node that converts nav_msgs/Odometry to dynus_interfaces/State.
  *

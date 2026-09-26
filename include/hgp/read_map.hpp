@@ -20,7 +20,6 @@
 
 #include "hgp/data_utils.hpp"
 
-#include <yaml-cpp/yaml.h>
 
 /** @brief Reads a point cloud into a voxelized occupancy grid with obstacle inflation.
  *

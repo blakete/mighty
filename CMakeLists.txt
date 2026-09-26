@@ -10,50 +10,26 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-# avoid Found-related error (ref: https://stackoverflow.com/questions/18327197/opencv-is-considered-to-be-not-found)
-set(decomp_rviz_plugins_FOUND 1)
-
-# Option to disable Gazebo-dependent targets (e.g. on Jetson/ARM64)
-option(BUILD_SIMULATION "Build Gazebo simulation targets" ON)
-
 # find dependencies
 find_package(ament_cmake REQUIRED)
-find_package(ament_cmake_python REQUIRED)
-
-# NOTE: find_package(gazebo) must be called before PCL and other packages.
-# Otherwise jsoncpp-namespaced-targets.cmake (pulled in via
-# ignition-fuel_tools) fails with "JsonCpp::JsonCpp target already exists"
-# because another package has already created the target.
-if(BUILD_SIMULATION)
-  find_package(gazebo REQUIRED)
-  find_package(gazebo_ros REQUIRED)
-endif()
-
 find_package(rclcpp REQUIRED)
-find_package(rclpy REQUIRED)
-find_package(rclcpp_components REQUIRED)
-find_package(example_interfaces REQUIRED)
-find_package(visualization_msgs REQUIRED)
-find_package(Eigen3 REQUIRED)
+find_package(dynus_interfaces REQUIRED)
 find_package(decomp_util REQUIRED)
 find_package(decomp_ros_msgs REQUIRED)
-find_package(decomp_rviz_plugins REQUIRED)
-find_package(decomp_test_node REQUIRED)
+find_package(Eigen3 REQUIRED)
+# Only common + kdtree are used, but pcl_conversions re-finds PCL without
+# components and exports every PCL library, so narrowing here would not help.
 find_package(PCL REQUIRED)
 find_package(pcl_conversions REQUIRED)
-find_package(rosidl_default_generators REQUIRED)
-find_package(dynus_interfaces REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
-find_package(nav_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
-find_package(tf2_eigen REQUIRED)
-find_package(std_srvs REQUIRED)
-find_package(pcl_ros REQUIRED)
-find_package(nlohmann_json REQUIRED)
-find_package(gazebo_msgs REQUIRED)
-
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}")
+find_package(message_filters REQUIRED)
 
 # OpenMP
 find_package(OpenMP REQUIRED)
@@ -65,111 +41,46 @@ endif()
 
 # include directories
 include_directories(${EIGEN3_INCLUDE_DIR} ${PCL_INCLUDE_DIRS} ${DECOMP_UTIL_INCLUDE_DIRS} include)
-link_directories(${PCL_LIBRARY_DIRS} ${BOOST_LIBRARY_DIRS})
-if(BUILD_SIMULATION)
-  include_directories(${GAZEBO_INCLUDE_DIRS})
-  link_directories(${GAZEBO_LIBRARY_DIRS})
-endif()
+link_directories(${PCL_LIBRARY_DIRS})
 add_definitions(${PCL_DEFINITIONS})
+
+# Everything the planner (and the tests that compile planner sources) includes.
+set(PLANNER_DEPS
+  rclcpp dynus_interfaces decomp_ros_msgs Eigen3 pcl_conversions
+  geometry_msgs nav_msgs sensor_msgs std_msgs visualization_msgs
+  tf2 tf2_ros tf2_geometry_msgs message_filters)
 
 # add executables
 add_executable(mighty src/mighty/mighty_node.cpp src/mighty/mighty.cpp src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/mighty/utils.cpp src/mighty/lbfgs_solver.cpp src/mighty/lbfgs_solver_utils.cpp src/mighty/frontier_detector.cpp src/mighty/frontier_manager.cpp)
 target_link_libraries(mighty ${PCL_LIBRARIES})
-ament_target_dependencies(mighty rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
+ament_target_dependencies(mighty ${PLANNER_DEPS})
 
-# Add odom to state converter
+# nav_msgs/Odometry -> dynus_interfaces/State
 add_executable(convert_odom_to_state src/mighty/convert_odom_to_state.cpp)
-target_link_libraries(convert_odom_to_state)
-ament_target_dependencies(convert_odom_to_state rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 sensor_msgs std_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen)
+ament_target_dependencies(convert_odom_to_state rclcpp dynus_interfaces nav_msgs)
 
-# Add vicon to state converter
+# Mocap PoseStamped + TwistStamped -> dynus_interfaces/State
 add_executable(convert_vicon_to_state src/mighty/convert_vicon_to_state.cpp)
-target_link_libraries(convert_vicon_to_state)
-ament_target_dependencies(convert_vicon_to_state rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen)
+ament_target_dependencies(convert_vicon_to_state rclcpp dynus_interfaces geometry_msgs message_filters)
 
-# Add the executable for the lbfgs solver test file
-add_executable(test_lbfgs_solver src/test/test_lbfgs_solver.cpp src/mighty/lbfgs_solver.cpp src/mighty/lbfgs_solver_utils.cpp)
-ament_target_dependencies(test_lbfgs_solver rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs)
-
-# Add the fake_sim executable (uses gazebo_msgs only, no Gazebo library needed)
-add_executable(fake_sim src/mighty/fake_sim.cpp)
-target_link_libraries(fake_sim)
-ament_target_dependencies(fake_sim rclcpp rclcpp_components visualization_msgs dynus_interfaces sensor_msgs gazebo_msgs sensor_msgs tf2 tf2_ros nav_msgs)
-
-# Simulation-only targets (require Gazebo, not available on ARM64/Jetson)
-if(BUILD_SIMULATION)
-  add_executable(convert_velodyne_to_ros_time src/mighty/convert_velodyne_to_ros_time.cpp)
-  target_link_libraries(convert_velodyne_to_ros_time)
-  ament_target_dependencies(convert_velodyne_to_ros_time rclcpp rclcpp_components visualization_msgs dynus_interfaces sensor_msgs gazebo_msgs sensor_msgs tf2 tf2_ros nav_msgs)
-
-  add_library(move_model SHARED src/sim/move_model.cpp)
-  target_link_libraries(move_model ${GAZEBO_LIBRARIES})
-  ament_target_dependencies(move_model rclcpp tf2 tf2_ros geometry_msgs)
-
-  add_library(imu_plugin SHARED src/sim/gazebo_ros_imu_sensor.cpp)
-  target_link_libraries(imu_plugin ${GAZEBO_LIBRARIES})
-  ament_target_dependencies(imu_plugin sensor_msgs gazebo_ros)
-
-  add_executable(dynamic_forest_node src/sim/dynamic_forest_node.cpp)
-  ament_target_dependencies(dynamic_forest_node
-    rclcpp
-    geometry_msgs
-    gazebo_msgs
-    visualization_msgs
-    std_msgs
-    tf2_ros
-    dynus_interfaces
-  )
-endif()
-
-# install for launch and config files
+# install launch and config files
 install(DIRECTORY
-launch
-config
-rviz
-worlds
-urdf
-meshes
-DESTINATION share/${PROJECT_NAME}
+  launch
+  config
+  DESTINATION share/${PROJECT_NAME}
 )
 
-# install for executables (always built)
+# install executables
 install(TARGETS
   mighty
-  fake_sim
   convert_odom_to_state
   convert_vicon_to_state
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# install for simulation executables and libraries
-if(BUILD_SIMULATION)
-  install(TARGETS
-    convert_velodyne_to_ros_time
-    dynamic_forest_node
-    DESTINATION lib/${PROJECT_NAME}
-  )
-  install(TARGETS
-    move_model
-    imu_plugin
-    ARCHIVE DESTINATION lib
-    LIBRARY DESTINATION lib
-    RUNTIME DESTINATION bin
-  )
-endif()
-
-# install Python modules
-ament_python_install_package(${PROJECT_NAME})
-
 # install Python executables
 install(PROGRAMS
-  scripts/goal_sender.py
-  scripts/goal_monitor_node.py
-  scripts/generate_random_forest.py
-  benchmarking/unc_benchmark_node.py
   scripts/repub_rviz_2Dgoal.py
-  scripts/frame_align_publisher.py
-  scripts/formation_viz_node.py
   scripts/wait_for_tf.py
   DESTINATION lib/${PROJECT_NAME}
 )
@@ -179,6 +90,10 @@ install(PROGRAMS
 # -----------------------------------------------------------------------------
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+
+  # Manual solver benchmark (prints timings; not a gtest, not installed).
+  add_executable(test_lbfgs_solver src/test/test_lbfgs_solver.cpp src/mighty/lbfgs_solver.cpp src/mighty/lbfgs_solver_utils.cpp)
+  ament_target_dependencies(test_lbfgs_solver ${PLANNER_DEPS})
 
   ament_add_gtest(test_occ_grid_2d_unknown
     src/test/test_occ_grid_2d_unknown.cpp)
@@ -190,15 +105,13 @@ if(BUILD_TESTING)
   ament_add_gtest(test_map_2d_tristate
     src/test/test_map_2d_tristate.cpp)
   target_link_libraries(test_map_2d_tristate ${PCL_LIBRARIES})
-  ament_target_dependencies(test_map_2d_tristate
-    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
+  ament_target_dependencies(test_map_2d_tristate ${PLANNER_DEPS})
 
   ament_add_gtest(test_graph_search_unknown_cost
     src/test/test_graph_search_unknown_cost.cpp
     src/hgp/graph_search.cpp)
   target_link_libraries(test_graph_search_unknown_cost ${PCL_LIBRARIES})
-  ament_target_dependencies(test_graph_search_unknown_cost
-    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
+  ament_target_dependencies(test_graph_search_unknown_cost ${PLANNER_DEPS})
 
   ament_add_gtest(test_frontier_detector
     src/test/test_frontier_detector.cpp
@@ -217,19 +130,13 @@ if(BUILD_TESTING)
     src/test/test_gradient_check.cpp
     src/mighty/lbfgs_solver.cpp
     src/mighty/lbfgs_solver_utils.cpp)
-  ament_target_dependencies(test_gradient_check
-    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3
-    decomp_ros_msgs sensor_msgs std_msgs decomp_rviz_plugins decomp_test_node
-    tf2_geometry_msgs)
+  ament_target_dependencies(test_gradient_check ${PLANNER_DEPS})
 
   ament_add_gtest(test_formation_cost
     src/test/test_formation_cost.cpp
     src/mighty/lbfgs_solver.cpp
     src/mighty/lbfgs_solver_utils.cpp)
-  ament_target_dependencies(test_formation_cost
-    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3
-    decomp_ros_msgs sensor_msgs std_msgs decomp_rviz_plugins decomp_test_node
-    tf2_geometry_msgs)
+  ament_target_dependencies(test_formation_cost ${PLANNER_DEPS})
 endif()
 
 ament_package()
