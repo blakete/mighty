@@ -1,83 +1,167 @@
 #!/usr/bin/env bash
-# mighty_hw.sh — SINGLE entrypoint for the CONTAINERIZED MIGHTY hardware stack,
-# host-tmux variant (sibling of the rover drive/sensors/dlio services): the
-# hw-mighty container just idles (`sleep infinity`, see compose.hw.yaml) and
+# mighty_hw.sh — SINGLE entrypoint for the containerized MIGHTY hardware stack.
+# The hw-mighty container just idles (`sleep infinity`, see compose.hw.yaml);
 # every node runs as a `docker exec` whose controlling pane lives in a HOST tmux
 # session 'hw_mighty', built right here in bash.
 #
 #   mighty_hw.sh start [--dev]     # bring the container up + build the session
 #   mighty_hw.sh start --monitor   # same, then hold the foreground while the session
 #                                  # lives (mighty.service's main process, see mighty.service.in)
+#   mighty_hw.sh check [--dev]     # read-only preflight: env, image, router, topics, TF
 #   mighty_hw.sh attach            # tmux attach (Ctrl-b d detaches; stack keeps running)
 #   mighty_hw.sh stop              # kill session, then compose down
 #   mighty_hw.sh status            # container + pane status
 #   mighty_hw.sh logs [...]        # container PID-1 output (idle loop; panes hold the real logs)
-#   mighty_hw.sh pull [<tag>]      # fleet registry <tag> (default latest) -> mighty-hw:local
+#   mighty_hw.sh pull [<tag>]      # registry <tag> (default latest) -> mighty-hw:local
 #   mighty_hw.sh rebuild [...]     # stop + compose build + start (start flags forwarded)
+#
+# CONFIGURATION — two env files, both passed to the container (compose env_file;
+# the later file wins):
+#   $ROVER_ENV_FILE   default /etc/rover/rover.env    identity: ROBOT_NAME, RMW_IMPLEMENTATION,
+#                                                     ROS_DOMAIN_ID (the RR fleet's provisioning
+#                                                     owns this file)
+#   $MIGHTY_ENV_FILE  default /etc/mighty/mighty.env  everything MIGHTY-specific (written by
+#                                                     install_service.sh; ROBOT_NAME may go here
+#                                                     instead on a vehicle without rover.env)
+# MIGHTY_ keys (defaults in brackets):
+#   MIGHTY_PLATFORM             ground_robot | uav                       [ground_robot]
+#   MIGHTY_STATE_SOURCE         odom | mocap                             [odom]
+#   MIGHTY_ODOM_TOPIC           nav_msgs/Odometry, relative to <ns>      [odom]
+#   MIGHTY_POSE_TOPIC           MPC pose / mocap pose input              [pose (odom) | world (mocap)]
+#   MIGHTY_TWIST_TOPIC          mocap twist                              [twist]
+#   MIGHTY_TF_GATE              TARGET SOURCE pairs the planner and MPC wait for, or "none"
+#                                                                        [<ns>/map <ns>/odom on ground; none on uav]
+#   MIGHTY_PUBLISH_MAP_ODOM_TF  true: extra pane broadcasting identity <ns>/map -> <ns>/odom
+#                               (only where nothing else publishes it)   [false]
+#   MIGHTY_VEHICLE_CONFIG       parameter overlay: a file in config/vehicles/ [<ns>.yaml if present]
+# Host-side keys (read from $MIGHTY_ENV_FILE by this script before compose up):
+#   ROVER_CONFIG_DIR            directory mounted at /home/swarm/config: the zenoh session
+#                               config (zenoh_session_config.json5)      [/home/swarm/config]
+#   ZENOH_ROUTER_PORT           the host zenoh router (rmw_zenoh only)    [7447]
 #
 # PARAMETERS come from this checkout's config/ (bind-mounted over the image's
 # copy, see compose.hw.yaml): edit the YAML, Ctrl-C / Up / Enter the pane. No
-# rebuild. Code, launch files and mpc.yaml are baked and need one.
+# rebuild. Code and launch files are baked and need one.
 #
-# FOUR panes, always:
-#   MIGHTY planner | convert_odom_to_state | MPC | RViz 2D goal
-# The first three are onboard_mighty.launch.py's three nodes, one pane each via
-# its only_nodes:= filter, so Ctrl-C -> Up -> Enter restarts ONE node instead of
-# all three. The launch file still computes every parameter (mighty_node's are a
-# YAML merge plus overrides — never hand-roll them as ros2 run).
+# PANES: MIGHTY planner | <state adapter> | MPC (ground_robot) | map->odom TF (opt-in).
+# Each is mighty_hw.launch.py with only_nodes:= one node, so Ctrl-C -> Up -> Enter
+# restarts ONE node. The launch file still computes every parameter (never
+# hand-roll them as ros2 run).
 #
-# ROLLBACK of the per-node split is ASYMMETRIC: revert THIS HOST SCRIPT ONLY
-# (git checkout -- docker/mighty_hw.sh) and start again — no rebuild. Do NOT
-# revert the launch file while keeping this script: ros2 launch silently ignores
-# an argument it does not declare, so every pane would start the FULL node set
-# (three publishers on cmd_vel_auto). start() refuses to run against an image
-# whose launch file has no only_nodes:=.
+# The script is host-side while the launch file is baked into the image, so the
+# two can drift, and ros2 launch SILENTLY IGNORES an argument it does not
+# declare. start() therefore refuses an image whose launch file lacks platform:=.
 #
-# THIS STACK RUNS THE PLANNER AND CONTROLLER ONLY. The rest is owned elsewhere:
-#   drive.service    zenoh router on :7447 (hard prereq — start fails fast without it)
-#   sensors.service  livox + D455 + the base_link->lidar static TF
-#   dlio.service     DLIO odometry, the seed pose and tf map->odom (dlio_ws)
-#   OX08 Orin        elevation_mapping_cupy -> <ns>/occ_2d_topic, <ns>/esdf_2d_topic
-#                    (without it MIGHTY runs but never plans: no occupancy grid)
-# MIGHTY consumes <ns>/dlio/odom_node/odom + map->odom over zenoh and does not
-# care which container publishes them. The old --odom-type dlio / dlio_in_mocap /
-# mocap modes, which ran DLIO or mocap TFs in here, went away with the DLIO layer
-# of the image; mocap would come back as static-TF panes if ever needed.
-#
-# --dev (laptop): no /etc/rover/rover.env, no /home/swarm/config, no
-# drive.service. Uses dev/rover.env (ROBOT_NAME=RR99) + dev/zenoh_*_config.json5
-# and starts an ISOLATED zenoh router on 127.0.0.1:7448 from the same image
-# (compose profile 'dev'). It dials nothing: a dev stack must not join the fleet.
-#
-# Identity (ROBOT_NAME, RMW) comes from /etc/rover/rover.env via compose
-# env_file; nothing in this directory is rover-specific.
+# --dev (laptop): identity from dev/rover.env (RR99) + dev/mighty.env, the dev/
+# zenoh configs, and an ISOLATED zenoh router on 127.0.0.1:7448 started from the
+# same image (compose profile 'dev'). It dials nothing: a dev stack must not
+# join a fleet. A pre-set ROVER_ENV_FILE / MIGHTY_ENV_FILE wins (bag replay runs
+# the dev stack under the recording rover's name).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONTAINER=hw-mighty
 SESSION=hw_mighty
 IMAGE=mighty-hw:local
-REGISTRY=registry.gitlab.com/mit-acl/ugv/redrover/rover/mighty-hw
-ZENOH_ROUTER_PORT="${ZENOH_ROUTER_PORT:-7447}"
+REGISTRY="${MIGHTY_REGISTRY:-registry.gitlab.com/mit-acl/ugv/redrover/rover/mighty-hw}"
 COMPOSE=(docker compose -f "${SCRIPT_DIR}/compose.hw.yaml")
 
-# In-container command preludes. Pane commands are sent single-quoted, so $VARs
-# in them expand INSIDE the container (env_file provides ROBOT_NAME etc.) — and
-# therefore a pane command must never contain a single quote. Every pane
-# spin-waits on the router first; the guard shares the pane's history line so
-# Ctrl-C -> Up -> Enter re-runs it too. wait_router is a function, not a
-# constant, because --dev moves the port after the flags are parsed.
-SETUP='source /opt/ros/humble/setup.bash && source /home/swarm/code/mighty_ws/install/setup.bash'
-wait_router() {
-    echo "until (echo >/dev/tcp/127.0.0.1/${ZENOH_ROUTER_PORT}) 2>/dev/null; do echo \"waiting for zenoh router on :${ZENOH_ROUTER_PORT}...\"; sleep 2; done"
-}
-dx() { echo "docker exec -it ${CONTAINER} bash -c '${SETUP} && $(wait_router) && $1'"; }
+# In-container setup. Pane commands are sent single-quoted, so $VARs in them
+# expand INSIDE the container — and therefore a pane command must never contain
+# a single quote (settings are validated by safe_value below).
+SETUP='source /opt/ros/humble/setup.bash && source ${MIGHTY_WS:-/ws}/install/setup.bash'
 
 attach() { exec tmux attach -t "${SESSION}"; }
 
 usage() {
-    echo "usage: $0 {start [--dev|--monitor] | attach | stop | status | logs | pull [<tag>] | rebuild [start flags]}" >&2
+    echo "usage: $0 {start [--dev|--monitor] | check [--dev] | attach | stop | status | logs | pull [<tag>] | rebuild [start flags]}" >&2
     exit 2
+}
+
+# ---- env files --------------------------------------------------------------
+# Last assignment of KEY in an env file (compose env_file syntax: KEY=VALUE, no
+# interpolation, optional quotes, # comments). Empty if the file or key is absent.
+env_get() {
+    local file="$1" key="$2" v
+    [[ -r "${file}" ]] || return 0
+    v="$(sed -n -E "s/^[[:space:]]*(export[[:space:]]+)?${key}=(.*)$/\2/p" "${file}" | tail -n 1)"
+    if [[ "${v}" =~ ^\"(.*)\"$ || "${v}" =~ ^\'(.*)\'$ ]]; then
+        v="${BASH_REMATCH[1]}"
+    else
+        v="$(sed -E 's/[[:space:]]+#.*$//; s/[[:space:]]+$//' <<<"${v}")"
+    fi
+    printf '%s' "${v}"
+}
+# KEY as the container sees it: $MIGHTY_ENV_FILE wins over $ROVER_ENV_FILE.
+setting() {
+    local v
+    v="$(env_get "${MIGHTY_ENV_FILE}" "$1")"
+    [[ -n "${v}" ]] || v="$(env_get "${ROVER_ENV_FILE}" "$1")"
+    printf '%s' "${v:-${2:-}}"
+}
+# Values end up inside single-quoted pane commands and on launch command lines.
+safe_value() {
+    [[ "$2" =~ ^[A-Za-z0-9_./:-]*$ ]] || {
+        echo "[mighty_hw] $1='$2' may only contain letters, digits and _ . / : -" >&2
+        exit 1
+    }
+}
+
+# Resolve every setting into globals (shared by start and check).
+resolve() {
+    local dev="$1"
+    if [[ "${dev}" == true ]]; then
+        export ROVER_ENV_FILE="${ROVER_ENV_FILE:-${SCRIPT_DIR}/dev/rover.env}"
+        export MIGHTY_ENV_FILE="${MIGHTY_ENV_FILE:-${SCRIPT_DIR}/dev/mighty.env}"
+        export ROVER_CONFIG_DIR="${SCRIPT_DIR}/dev"
+        ZENOH_ROUTER_PORT=7448
+        COMPOSE+=(--profile dev)
+    else
+        export ROVER_ENV_FILE="${ROVER_ENV_FILE:-/etc/rover/rover.env}"
+        export MIGHTY_ENV_FILE="${MIGHTY_ENV_FILE:-/etc/mighty/mighty.env}"
+        export ROVER_CONFIG_DIR="${ROVER_CONFIG_DIR:-$(setting ROVER_CONFIG_DIR /home/swarm/config)}"
+        ZENOH_ROUTER_PORT="${ZENOH_ROUTER_PORT:-$(setting ZENOH_ROUTER_PORT 7447)}"
+    fi
+    ROBOT_NAME="$(setting ROBOT_NAME)"
+    RMW="$(setting RMW_IMPLEMENTATION)"
+    PLATFORM="$(setting MIGHTY_PLATFORM ground_robot)"
+    STATE_SOURCE="$(setting MIGHTY_STATE_SOURCE odom)"
+    ODOM_TOPIC="$(setting MIGHTY_ODOM_TOPIC odom)"
+    POSE_TOPIC="$(setting MIGHTY_POSE_TOPIC)"
+    TWIST_TOPIC="$(setting MIGHTY_TWIST_TOPIC twist)"
+    PUBLISH_MAP_ODOM_TF="$(setting MIGHTY_PUBLISH_MAP_ODOM_TF false)"
+    VEHICLE_CONFIG="$(setting MIGHTY_VEHICLE_CONFIG)"
+    TF_GATE="$(setting MIGHTY_TF_GATE)"
+    if [[ -z "${TF_GATE}" ]]; then
+        [[ "${PLATFORM}" == ground_robot ]] && TF_GATE="${ROBOT_NAME}/map ${ROBOT_NAME}/odom" || TF_GATE=none
+    fi
+    local k
+    for k in ROBOT_NAME PLATFORM STATE_SOURCE ODOM_TOPIC POSE_TOPIC TWIST_TOPIC VEHICLE_CONFIG ZENOH_ROUTER_PORT; do
+        safe_value "${k}" "${!k}"
+    done
+    for k in ${TF_GATE}; do safe_value MIGHTY_TF_GATE "${k}"; done
+    ZENOH=false
+    [[ "${RMW}" == rmw_zenoh_cpp ]] && ZENOH=true
+    return 0
+}
+
+print_settings() {
+    cat <<EOF
+[mighty_hw] identity   ROBOT_NAME=${ROBOT_NAME:-<unset>}  RMW=${RMW:-<default>}  (${ROVER_ENV_FILE}, ${MIGHTY_ENV_FILE})
+[mighty_hw] platform   ${PLATFORM}  state_source=${STATE_SOURCE}  odom_topic=${ODOM_TOPIC}  pose_topic=${POSE_TOPIC:-<derived>}  twist_topic=${TWIST_TOPIC}
+[mighty_hw] tf gate    ${TF_GATE}   map->odom pane=${PUBLISH_MAP_ODOM_TF}   vehicle_config=${VEHICLE_CONFIG:-<auto>}
+EOF
+}
+
+wait_router() {
+    echo "until (echo >/dev/tcp/127.0.0.1/${ZENOH_ROUTER_PORT}) 2>/dev/null; do echo \"waiting for zenoh router on :${ZENOH_ROUTER_PORT}...\"; sleep 2; done"
+}
+# One pane command: docker exec into the container, set up ROS, (zenoh) wait for
+# the router — the wait shares the pane's history line, so Up/Enter re-runs it.
+dx() {
+    local pre="${SETUP}"
+    [[ "${ZENOH}" == true ]] && pre="${pre} && $(wait_router)"
+    echo "docker exec -it ${CONTAINER} bash -c '${pre} && $1'"
 }
 
 start() {
@@ -90,39 +174,38 @@ start() {
         esac
         shift
     done
+    resolve "${dev}"
+    print_settings
 
-    if [[ "${dev}" == true ]]; then
-        # A pre-set ROVER_ENV_FILE wins, so a bag replay can run the dev stack
-        # under the recording rover's name (ROBOT_NAME=RR08) — see README.
-        export ROVER_ENV_FILE="${ROVER_ENV_FILE:-${SCRIPT_DIR}/dev/rover.env}"
-        export ROVER_CONFIG_DIR="${SCRIPT_DIR}/dev"
-        ZENOH_ROUTER_PORT=7448
-        COMPOSE+=(--profile dev)
-        echo "[mighty_hw] --dev: identity from dev/rover.env, isolated zenoh router on 127.0.0.1:${ZENOH_ROUTER_PORT}"
-    else
-        # Fail fast on the hard prereq, warn on the soft ones — the pane-side
-        # spin-waits still guard every node, this is just early readable
-        # feedback. grep -c, not grep -q: under pipefail an early-exiting grep -q
-        # SIGPIPEs the upstream docker ps and returns 141 ON MATCH.
-        # Under --monitor (systemd) the router is a WAIT, not an exit: at boot
-        # After=drive.service is satisfied as soon as drive_host_tmux.sh is
-        # running, which is before zenohd inside it listens, so failing here
-        # would fail the unit on every cold boot.
-        if ! (echo >/dev/tcp/127.0.0.1/${ZENOH_ROUTER_PORT}) 2>/dev/null; then
-            if [[ "${monitor}" == true ]]; then
-                echo "[mighty_hw] waiting for the zenoh router on 127.0.0.1:${ZENOH_ROUTER_PORT} (drive.service)..."
-                until (echo >/dev/tcp/127.0.0.1/${ZENOH_ROUTER_PORT}) 2>/dev/null; do sleep 2; done
-            else
-                echo "[mighty_hw] no zenoh router on 127.0.0.1:${ZENOH_ROUTER_PORT} — start drive.service first" >&2
-                exit 1
-            fi
-        fi
-        if ! docker ps --format '{{.Names}}' | grep -cx sensors >/dev/null; then
-            echo "[mighty_hw] WARNING: no 'sensors' container (sensors.service down?) — no lidar, no odometry" >&2
-        fi
-        if ! systemctl is-active --quiet dlio.service 2>/dev/null \
-           && ! docker ps --format '{{.Names}}' | grep -cx dlio >/dev/null; then
-            echo "[mighty_hw] WARNING: dlio.service is not running — MIGHTY and MPC will wait on tf map->odom" >&2
+    if [[ -z "${ROBOT_NAME}" ]]; then
+        echo "[mighty_hw] ROBOT_NAME is not set in ${ROVER_ENV_FILE} or ${MIGHTY_ENV_FILE}" \
+             "(or use --dev on a laptop)" >&2
+        exit 1
+    fi
+    case "${PLATFORM}" in ground_robot|uav) ;; *)
+        echo "[mighty_hw] MIGHTY_PLATFORM=${PLATFORM}: must be ground_robot or uav" >&2; exit 1 ;; esac
+    case "${STATE_SOURCE}" in odom|mocap) ;; *)
+        echo "[mighty_hw] MIGHTY_STATE_SOURCE=${STATE_SOURCE}: must be odom or mocap" >&2; exit 1 ;; esac
+    if [[ "${dev}" != true && ! -d "${ROVER_CONFIG_DIR}" ]]; then
+        echo "[mighty_hw] config dir ${ROVER_CONFIG_DIR} does not exist — set ROVER_CONFIG_DIR in" \
+             "${MIGHTY_ENV_FILE} (install_service.sh creates one)" >&2
+        exit 1
+    fi
+
+    # The router is the one hard prereq (rmw_zenoh only; the panes spin-wait on
+    # it too — this is early, readable feedback). Under --monitor (systemd) it is
+    # a WAIT, not an exit: at boot the unit's After= ordering is satisfied as soon
+    # as the service hosting the router starts, before zenohd listens, so failing
+    # here would fail the unit on every cold boot.
+    if [[ "${dev}" != true && "${ZENOH}" == true ]] \
+       && ! (echo >/dev/tcp/127.0.0.1/${ZENOH_ROUTER_PORT}) 2>/dev/null; then
+        if [[ "${monitor}" == true ]]; then
+            echo "[mighty_hw] waiting for the zenoh router on 127.0.0.1:${ZENOH_ROUTER_PORT}..."
+            until (echo >/dev/tcp/127.0.0.1/${ZENOH_ROUTER_PORT}) 2>/dev/null; do sleep 2; done
+        else
+            echo "[mighty_hw] no zenoh router on 127.0.0.1:${ZENOH_ROUTER_PORT} — start it first" \
+                 "(on the RR fleet: drive.service)" >&2
+            exit 1
         fi
     fi
 
@@ -138,55 +221,55 @@ start() {
         docker logs --tail 40 "${CONTAINER}" >&2 || true
         exit 1
     fi
-    local robot_name
-    robot_name="$(docker exec "${CONTAINER}" printenv ROBOT_NAME || true)"
-    if [[ -z "${robot_name}" ]]; then
-        echo "[mighty_hw] ROBOT_NAME is empty in the container — /etc/rover/rover.env missing?" \
-             "(set ROVER_ENV_FILE, or use --dev on a laptop)" >&2
+    # The container got its environment from compose, this script from its own
+    # reading of the same files: refuse to run if they disagree.
+    local seen
+    seen="$(docker exec "${CONTAINER}" printenv ROBOT_NAME || true)"
+    if [[ "${seen}" != "${ROBOT_NAME}" ]]; then
+        echo "[mighty_hw] the container sees ROBOT_NAME='${seen}', this script read '${ROBOT_NAME}'" \
+             "— check ${ROVER_ENV_FILE} and ${MIGHTY_ENV_FILE}" >&2
         "${COMPOSE[@]}" down
         exit 1
     fi
 
-    # This script is HOST-side but onboard_mighty.launch.py is BAKED INTO THE
-    # IMAGE, so the two can drift — and ros2 launch SILENTLY IGNORES an argument
-    # it does not declare. On a stale image every per-node pane would therefore
-    # launch the FULL node set (three publishers on cmd_vel_auto). Refuse to
-    # build the session instead.
+    # Refuse an image whose baked launch file predates mighty_hw.launch.py (see header).
     if ! docker exec "${CONTAINER}" bash -c \
-            "${SETUP} && ros2 launch mighty onboard_mighty.launch.py --show-args \
-             2>/dev/null | grep -c only_nodes" >/dev/null 2>&1; then
-        echo "[mighty_hw] this image's onboard_mighty.launch.py has no only_nodes:= argument," \
-             "so each per-node pane would start the FULL stack (three publishers on" \
-             "cmd_vel_auto). Rebuild or pull a newer image first." >&2
+            "${SETUP} && ros2 launch mighty mighty_hw.launch.py --show-args 2>/dev/null \
+             | grep -c \"'platform':\"" >/dev/null 2>&1; then
+        echo "[mighty_hw] this image has no mighty_hw.launch.py with a platform:= argument" \
+             "(it predates this checkout). Pull or rebuild the image first." >&2
         exit 1
     fi
 
     # ---- pane commands (mind the single-quote rule above) --------------------
-    # mighty_node and mpc both resolve <ns>/map -> <ns>/odom, so they gate on
-    # wait_for_tf.py (the /tf_static startup-race fix: the static publisher
-    # latches one transient-local sample that a too-early subscriber never
-    # sees). The state converter is a pure sub->pub relay that never touches TF
-    # — gating it too would stall a third pane for the 60 s timeout whenever the
-    # TF is missing, and wait_for_tf.py exits 0 on timeout, so silently.
-    local tf_gate='ros2 run mighty wait_for_tf.py $ROBOT_NAME/map $ROBOT_NAME/odom && '
-    local launch_base='ros2 launch mighty onboard_mighty.launch.py x:=0.0 y:=0.0 z:=0.0 yaw:=0.0 namespace:=$ROBOT_NAME use_hardware:=true use_onboard_localization:=true robot_type:=red_rover depth_camera_name:=d455'
+    # mighty_node and mpc resolve <ns>/map, so they gate on wait_for_tf.py. The
+    # state adapter is a pure sub->pub relay and never touches TF. wait_for_tf.py
+    # exits 0 on timeout (60 s): the stack degrades loudly instead of deadlocking.
+    local gate="" launch adapter
+    [[ "${TF_GATE}" != none ]] && gate="ros2 run mighty wait_for_tf.py ${TF_GATE} && "
+    launch="ros2 launch mighty mighty_hw.launch.py namespace:=${ROBOT_NAME} platform:=${PLATFORM} state_source:=${STATE_SOURCE}"
+    [[ "${STATE_SOURCE}" == odom ]] && launch+=" odom_topic:=${ODOM_TOPIC}" || launch+=" twist_topic:=${TWIST_TOPIC}"
+    [[ -n "${POSE_TOPIC}" ]] && launch+=" pose_topic:=${POSE_TOPIC}"
+    [[ -n "${VEHICLE_CONFIG}" ]] && launch+=" vehicle_config:=${VEHICLE_CONFIG}"
+    [[ "${STATE_SOURCE}" == odom ]] && adapter=convert_odom_to_state || adapter=convert_vicon_to_state
 
-    # titles[i] LABELS cmds[i] — the arrays are positional, so dropping an entry
-    # from one and not the other silently mislabels every pane after it. The
-    # length check turns any future mismatch into a startup error.
+    # titles[i] LABELS cmds[i]; the length check below keeps them in step.
     # NOTE: restarting the MPC pane is not instant — MPCNode builds an
     # IPOPT/collocation NLP before its first control tick.
     local -a titles cmds
-    titles=('MIGHTY planner' 'convert_odom_to_state' 'MPC' 'RViz 2D goal')
-    cmds=(
-        "$(dx "${tf_gate}${launch_base} only_nodes:=mighty_node")"
-        "$(dx "${launch_base} only_nodes:=convert_odom_to_state")"
-        "$(dx "${tf_gate}${launch_base} only_nodes:=mpc")"
-        "$(dx 'ros2 run mighty repub_rviz_2Dgoal.py')"
-    )
+    titles=('MIGHTY planner' "${adapter}")
+    cmds=("$(dx "${gate}${launch} only_nodes:=mighty_node")"
+          "$(dx "${launch} only_nodes:=${adapter}")")
+    if [[ "${PLATFORM}" == ground_robot ]]; then
+        titles+=('MPC')
+        cmds+=("$(dx "${gate}${launch} only_nodes:=mpc")")
+    fi
+    if [[ "${PUBLISH_MAP_ODOM_TF}" == true ]]; then
+        titles+=('map->odom TF')
+        cmds+=("$(dx "ros2 run mighty map_odom_tf.py ${ROBOT_NAME}")")
+    fi
     if (( ${#titles[@]} != ${#cmds[@]} )); then
-        echo "[mighty_hw] BUG: ${#titles[@]} pane titles but ${#cmds[@]} commands —" \
-             "panes would be mislabeled; fix the titles/cmds arrays" >&2
+        echo "[mighty_hw] BUG: ${#titles[@]} pane titles but ${#cmds[@]} commands" >&2
         exit 1
     fi
 
@@ -209,11 +292,11 @@ start() {
     done
     tmux select-pane -t "${panes[0]}"
 
-    echo "[mighty_hw] ${SESSION} session up (rover: ${robot_name}, router: 127.0.0.1:${ZENOH_ROUTER_PORT})"
+    echo "[mighty_hw] ${SESSION} session up (${ROBOT_NAME}, ${PLATFORM}, ${#cmds[@]} panes)"
     if [[ "${monitor}" == true ]]; then
-        # systemd main process (same shape as drive/sensors/dlio_host_tmux.sh):
-        # live exactly as long as the session does, so `tmux kill-session -t
-        # hw_mighty` deactivates mighty.service and its ExecStopPost runs `stop`.
+        # systemd main process: live exactly as long as the session does, so
+        # `tmux kill-session -t hw_mighty` deactivates mighty.service and its
+        # ExecStopPost runs `stop`.
         echo "[mighty_hw] --monitor: holding while the session lives — attach with: tmux attach -t ${SESSION}"
         while tmux has-session -t "${SESSION}" 2>/dev/null; do
             sleep 5
@@ -226,6 +309,114 @@ start() {
     fi
 }
 
+# ---- check: read-only preflight -------------------------------------------------
+check() {
+    local dev=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dev) dev=true ;;
+            *) echo "[mighty_hw] unknown option: $1" >&2; usage ;;
+        esac
+        shift
+    done
+    local fails=0 warns=0
+    ok()   { printf '  PASS  %s\n' "$*"; }
+    warn() { printf '  WARN  %s\n' "$*"; warns=$((warns + 1)); }
+    bad()  { printf '  FAIL  %s\n' "$*"; fails=$((fails + 1)); }
+
+    echo "== host"
+    if command -v docker >/dev/null && docker info >/dev/null 2>&1; then ok "docker $(docker version -f '{{.Server.Version}}' 2>/dev/null)"
+    else bad "docker is not installed, not running, or this user is not in the docker group"; fi
+    if docker compose version >/dev/null 2>&1; then ok "$(docker compose version | head -n 1)"
+    else bad "docker compose v2 plugin missing"; fi
+    command -v tmux >/dev/null && ok "tmux" || bad "tmux missing (the panes are a host tmux session)"
+
+    echo "== settings"
+    resolve "${dev}"
+    [[ -r "${ROVER_ENV_FILE}" ]] && ok "identity file ${ROVER_ENV_FILE}" \
+        || warn "no ${ROVER_ENV_FILE} (fine if ROBOT_NAME/RMW are in ${MIGHTY_ENV_FILE})"
+    [[ -r "${MIGHTY_ENV_FILE}" ]] && ok "settings file ${MIGHTY_ENV_FILE}" \
+        || warn "no ${MIGHTY_ENV_FILE}: every MIGHTY_ setting is at its default (install_service.sh writes it)"
+    print_settings | sed 's/^\[mighty_hw\]/       /'
+    if [[ -z "${ROBOT_NAME}" ]]; then bad "ROBOT_NAME is not set"
+    elif [[ ! "${ROBOT_NAME}" =~ [0-9]$ ]]; then
+        warn "ROBOT_NAME=${ROBOT_NAME} does not end in digits: set agent_id in its vehicle config (mighty_node: ros__parameters: agent_id: N)"
+    else ok "ROBOT_NAME=${ROBOT_NAME}"; fi
+    [[ "${PLATFORM}" =~ ^(ground_robot|uav)$ ]] && ok "platform ${PLATFORM}" || bad "MIGHTY_PLATFORM=${PLATFORM}: must be ground_robot or uav"
+    [[ "${STATE_SOURCE}" =~ ^(odom|mocap)$ ]] && ok "state source ${STATE_SOURCE}" || bad "MIGHTY_STATE_SOURCE=${STATE_SOURCE}: must be odom or mocap"
+    local vcfg="${SCRIPT_DIR}/../config/vehicles/${VEHICLE_CONFIG:-${ROBOT_NAME}.yaml}"
+    [[ "${VEHICLE_CONFIG}" == /* ]] && vcfg="${VEHICLE_CONFIG}"   # absolute = a container path
+    [[ -f "${vcfg}" ]] && ok "vehicle overlay $(basename "${vcfg}")" || ok "no vehicle overlay (platform defaults)"
+    if [[ "${dev}" != true ]]; then
+        if [[ ! -d "${ROVER_CONFIG_DIR}" ]]; then bad "config dir ${ROVER_CONFIG_DIR} missing (ROVER_CONFIG_DIR)"
+        elif [[ "${ZENOH}" == true && ! -r "${ROVER_CONFIG_DIR}/zenoh_session_config.json5" ]]; then
+            bad "rmw_zenoh without ${ROVER_CONFIG_DIR}/zenoh_session_config.json5"
+        else ok "config dir ${ROVER_CONFIG_DIR}"; fi
+    fi
+
+    echo "== image"
+    local image_ok=false
+    if docker image inspect "${IMAGE}" >/dev/null 2>&1; then
+        ok "${IMAGE} ($(docker image inspect -f '{{.Id}}' "${IMAGE}" | cut -c8-19))"
+        if docker run --rm --entrypoint bash "${IMAGE}" -c "${SETUP} && ros2 launch mighty mighty_hw.launch.py --show-args 2>/dev/null | grep -c \"'platform':\"" >/dev/null 2>&1; then
+            ok "image matches this checkout (mighty_hw.launch.py with platform:=)"; image_ok=true
+        else bad "image predates this checkout (no mighty_hw.launch.py platform:=) — pull or rebuild"; fi
+    else bad "no ${IMAGE} — mighty_hw.sh pull <tag>, or make hw-build"; fi
+
+    echo "== ROS graph"
+    if [[ "${ZENOH}" == true ]]; then
+        if (echo >/dev/tcp/127.0.0.1/${ZENOH_ROUTER_PORT}) 2>/dev/null; then ok "zenoh router on :${ZENOH_ROUTER_PORT}"
+        else bad "no zenoh router on 127.0.0.1:${ZENOH_ROUTER_PORT}"; image_ok=false; fi
+    fi
+    local stack_up=0
+    [[ -n "$(docker ps -q --filter "name=^${CONTAINER}$")" ]] && stack_up=1
+    if [[ "${image_ok}" == true && -n "${ROBOT_NAME}" ]]; then
+        local -a run
+        if (( stack_up )); then
+            run=(docker exec -i "${CONTAINER}")
+        else
+            run=(docker run --rm -i --network host
+                 -e ZENOH_SESSION_CONFIG_URI=/home/swarm/config/zenoh_session_config.json5
+                 -v "${ROVER_CONFIG_DIR}:/home/swarm/config:ro")
+            [[ -r "${ROVER_ENV_FILE}" ]] && run+=(--env-file "${ROVER_ENV_FILE}")
+            [[ -r "${MIGHTY_ENV_FILE}" ]] && run+=(--env-file "${MIGHTY_ENV_FILE}")
+            run+=("${IMAGE}")
+        fi
+        local out
+        out="$("${run[@]}" bash -c "${SETUP} && NS=${ROBOT_NAME} PLATFORM=${PLATFORM} STATE_SOURCE=${STATE_SOURCE} ODOM_TOPIC=${ODOM_TOPIC} POSE_TOPIC=${POSE_TOPIC} TWIST_TOPIC=${TWIST_TOPIC} TF_GATE='${TF_GATE}' MAP_ODOM_PANE=${PUBLISH_MAP_ODOM_TF} STACK_UP=${stack_up} python3 -" \
+               < "${SCRIPT_DIR}/check_graph.py" 2>&1)" || true
+        local line
+        while IFS= read -r line; do
+            case "${line}" in
+                PASS\ *) ok "${line#PASS }" ;;
+                WARN\ *) warn "${line#WARN }" ;;
+                FAIL\ *) bad "${line#FAIL }" ;;
+                *) [[ -n "${line}" ]] && printf '        %s\n' "${line}" ;;
+            esac
+        done <<<"${out}"
+    else
+        warn "skipped (needs the image and ROBOT_NAME)"
+    fi
+
+    # Every container on a vehicle must run the same rmw_zenoh build.
+    if [[ "${ZENOH}" == true && "${image_ok}" == true ]]; then
+        echo "== rmw_zenoh build"
+        local mine other c
+        mine="$(docker run --rm --entrypoint dpkg-query "${IMAGE}" -W -f='${Version}' ros-humble-rmw-zenoh-cpp 2>/dev/null || true)"
+        ok "${IMAGE}: ${mine:-?}"
+        for c in $(docker ps --format '{{.Names}}'); do
+            [[ "${c}" == "${CONTAINER}" ]] && continue
+            other="$(docker exec "${c}" dpkg-query -W -f='${Version}' ros-humble-rmw-zenoh-cpp 2>/dev/null || true)"
+            [[ -z "${other}" ]] && continue
+            [[ "${other}" == "${mine}" ]] && ok "${c}: ${other}" \
+                || warn "${c}: ${other} differs from ${IMAGE} — TRANSIENT_LOCAL topics may not cross"
+        done
+    fi
+
+    echo "== ${fails} FAIL, ${warns} WARN"
+    (( fails == 0 ))
+}
+
 cmd="${1:-start}"
 [[ $# -gt 0 ]] && shift
 
@@ -233,13 +424,16 @@ case "${cmd}" in
     start)
         start "$@"
         ;;
+    check)
+        check "$@"
+        ;;
     attach)
         attach
         ;;
     stop)
         # Session first: closing the panes HUPs the docker-exec'd nodes before
         # the container itself goes away. --profile dev so a laptop's router
-        # container is removed too (no-op on a rover: nothing in that profile
+        # container is removed too (no-op on a vehicle: nothing in that profile
         # ever ran).
         tmux kill-session -t "${SESSION}" 2>/dev/null || true
         exec "${COMPOSE[@]}" --profile dev down

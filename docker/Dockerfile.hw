@@ -32,9 +32,10 @@
 #   docker compose -f compose.hw.yaml build --ssh default[=~/.ssh/<key>]
 # (make hw-build does this; see Makefile). Public deps clone over https.
 #
-# In-image workspace path == the rover's host path (/home/swarm/code/mighty_ws)
-# so the pane setup line mighty_hw.sh sends is what you would type on the rover.
-ARG WS=/home/swarm/code/mighty_ws
+# In-image workspace. The runtime stage exports it as MIGHTY_WS, which the pane
+# setup line mighty_hw.sh sends reads; compose.hw.yaml repeats it once (the
+# config bind-mount target) because compose cannot read image ENV.
+ARG WS=/ws
 # Dependency repos from mighty.repos that the HARDWARE stack needs. Keys must
 # match mighty.repos entries; the filter below fails loudly on a typo.
 ARG HW_DEPS="dynus_interfaces mpc DecompROS2"
@@ -203,6 +204,7 @@ RUN gpg --dearmor < /tmp/ros-snapshot.asc > /usr/share/keyrings/ros-snapshot-arc
 RUN pip3 install --no-cache-dir casadi==3.6.7 do-mpc==5.1.1 \
  && pip3 install --no-cache-dir numpy==2.2.6 scipy==1.15.3
 COPY --from=mighty-build ${WS}/install ${WS}/install
+ENV MIGHTY_WS=${WS}
 # Interactive shells (docker exec -it ... bash) see the workspace. The panes do
 # not rely on this — mighty_hw.sh sends an explicit setup line — but a human
 # poking around inside should get the same environment.

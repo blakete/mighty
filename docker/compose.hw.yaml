@@ -1,5 +1,5 @@
-# hw-mighty — ONE idling container; the MIGHTY planner, state converter, MPC and
-# the RViz goal republisher are docker-exec'd into it from a HOST tmux session
+# hw-mighty — ONE idling container; the MIGHTY planner, the state adapter and (on
+# ground robots) the MPC are docker-exec'd into it from a HOST tmux session
 # 'hw_mighty' built by mighty_hw.sh (the single entrypoint).
 #
 #   build:   make hw-build            (docker compose build --ssh ...; see Makefile)
@@ -12,10 +12,11 @@
 # built the tmux session (pre-2026-07-30) every start produced TWO full stacks
 # double-publishing on cmd_vel_auto.
 #
-# PREREQS on a rover: drive.service (zenoh router on :7447), sensors.service
-# (livox + D455 + base_link->lidar TF), dlio.service (odometry + map->odom) and
-# the Orin mapper. This file launches none of them; the nodes attach to the host
-# router over network_mode: host.
+# PREREQS on a vehicle: localization (odometry + <ns>/map -> <ns>/odom), a map
+# source, and, with rmw_zenoh, a zenoh router on the host (RR fleet: drive.service
+# on :7447, dlio.service, the Orin mapper). This file launches none of them; the
+# nodes join the host's ROS graph over network_mode: host. See README.hw.md for
+# the interface a vehicle has to provide.
 name: hw-mighty
 services:
   hw-mighty:
@@ -24,14 +25,16 @@ services:
       dockerfile: docker/Dockerfile.hw
     image: mighty-hw:local
     container_name: hw-mighty
-    network_mode: host                 # reach the host rmw_zenohd on :7447
-    # Identity + transport from the rover's provisioned env (ROBOT_NAME, VEHTYPE/
-    # VEHNUM, ROS_DOMAIN_ID, RMW_IMPLEMENTATION), exactly like the drive/sensors/
-    # dlio siblings — nothing in this directory is rover-specific. `required:
-    # false` only so that `stop` works on a laptop without the file; `start`
-    # refuses to build the session when ROBOT_NAME comes up empty.
+    network_mode: host                 # join the host's ROS graph (zenoh router on :7447)
+    # Identity + transport (ROBOT_NAME, ROS_DOMAIN_ID, RMW_IMPLEMENTATION) from the
+    # vehicle's provisioned env, then MIGHTY's own settings (MIGHTY_PLATFORM, ...,
+    # written by install_service.sh); the later file wins. Nothing in this
+    # directory is vehicle-specific. `required: false` only so that `stop` works
+    # without the files; `start` refuses to run without ROBOT_NAME.
     env_file:
       - path: ${ROVER_ENV_FILE:-/etc/rover/rover.env}
+        required: false
+      - path: ${MIGHTY_ENV_FILE:-/etc/mighty/mighty.env}
         required: false
     environment:
       # Fleet zenoh SESSION config (the file drive/sensors/dlio all load): 5 s
@@ -43,11 +46,13 @@ services:
       # Planner parameters come from THIS CHECKOUT, not the image: the repo's
       # config/ is mounted over the installed share tree, so a YAML edit + a
       # pane restart (Ctrl-C / Up / Enter) takes effect with no rebuild, and a
-      # rover's parameter drift is one `git status` here. launch/ and rviz/ stay
-      # baked on purpose (a launch edit can reference things the image lacks —
-      # that is what start()'s only_nodes guard protects). mpc.yaml is NOT
-      # covered: it lives in the mpc repo at its mighty.repos pin.
-      - "../config:/home/swarm/code/mighty_ws/install/mighty/share/mighty/config:ro"
+      # vehicle's parameter drift is one `git status` here. launch/ stays baked on
+      # purpose (a launch edit can reference things the image lacks — that is
+      # what start()'s launch-file guard protects). MPC tunables: mpc.yaml lives
+      # in the mpc repo; override them from a vehicle overlay's mpc: section.
+      # The target is the image's workspace (Dockerfile.hw ARG WS=/ws); compose
+      # cannot read image ENV, so the path is repeated here.
+      - "../config:/ws/install/mighty/share/mighty/config:ro"
     init: true
     stop_grace_period: 15s
     restart: "no"                      # manual stack; a dead pane stays dead
@@ -56,8 +61,8 @@ services:
   # --dev only (compose profile 'dev', never started on a rover): an ISOLATED
   # zenoh router from the same image on 127.0.0.1:7448, configured by
   # dev/zenoh_router_config.json5 — listen only, multicast scouting off, no
-  # connect entries — so a laptop stack cannot join the fleet graph (the C2
-  # router on alienware-02 listens on *:7447). Sourced explicitly: bash -lc
+  # connect entries — so a laptop stack cannot join a fleet graph (a laptop may
+  # well run its own router on *:7447). Sourced explicitly: bash -lc
   # does not read /root/.bashrc for non-interactive shells.
   zenoh-router:
     profiles: [dev]

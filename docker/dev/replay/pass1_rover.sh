@@ -23,11 +23,11 @@ docker run -d --name replay --network host --init --shm-size=256m --env-file /et
   -e ZENOH_SESSION_CONFIG_URI=/home/swarm/config/zenoh_session_config.json5 \
   -v /home/swarm/config:/home/swarm/config:ro -v "$BAG:/bag:ro" -v "$OUT:/out" \
   -v "$HERE/restamp_relay.py:/relay.py:ro" mighty-hw:local sleep infinity >/dev/null
-X() { docker exec replay bash -c "source /opt/ros/humble/setup.bash && source /home/swarm/code/mighty_ws/install/setup.bash && $1"; }
+X() { docker exec replay bash -c "source /opt/ros/humble/setup.bash && source \${MIGHTY_WS:-/ws}/install/setup.bash && $1"; }
 MODE=$(X "timeout 8 ros2 topic echo --once /$R/mode 2>/dev/null | head -1")
 echo "mode: $MODE"; [[ "$MODE" == *DISARMED* ]] || { echo "ABORT: $R not DISARMED"; docker rm -f replay; exit 1; }
 REC="pass1_$(date +%Y%m%d_%H%M%S)"
-docker exec -d replay bash -c "source /opt/ros/humble/setup.bash && source /home/swarm/code/mighty_ws/install/setup.bash && exec ros2 bag record -o /out/$REC \
+docker exec -d replay bash -c "source /opt/ros/humble/setup.bash && source \${MIGHTY_WS:-/ws}/install/setup.bash && exec ros2 bag record -o /out/$REC \
   /$R/livox/lidar /$R/livox/imu /$R/dlio/odom_node/odom /$R/dlio/odom_node/pose /$R/dlio/odom_node/pointcloud/deskewed /tf /tf_static \
   /$R/occ_2d_topic /$R/esdf_2d_topic /$R/planning_occ_2d_topic /$R/state /$R/goal /$R/mpc_waypoints /$R/trajectory /$R/cmd_vel_auto \
   /$R/exploration/current_goal /$R/exploration/frontiers /$R/goal_reached /$R/mode /$R/hgp_path_marker > /out/record.log 2>&1"

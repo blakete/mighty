@@ -48,7 +48,7 @@ add_definitions(${PCL_DEFINITIONS})
 set(PLANNER_DEPS
   rclcpp dynus_interfaces decomp_ros_msgs Eigen3 pcl_conversions
   geometry_msgs nav_msgs sensor_msgs std_msgs visualization_msgs
-  tf2 tf2_ros tf2_geometry_msgs message_filters)
+  tf2 tf2_ros tf2_geometry_msgs)
 
 # add executables
 add_executable(mighty src/mighty/mighty_node.cpp src/mighty/mighty.cpp src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/mighty/utils.cpp src/mighty/lbfgs_solver.cpp src/mighty/lbfgs_solver_utils.cpp src/mighty/frontier_detector.cpp src/mighty/frontier_manager.cpp)
@@ -57,7 +57,7 @@ ament_target_dependencies(mighty ${PLANNER_DEPS})
 
 # nav_msgs/Odometry -> dynus_interfaces/State
 add_executable(convert_odom_to_state src/mighty/convert_odom_to_state.cpp)
-ament_target_dependencies(convert_odom_to_state rclcpp dynus_interfaces nav_msgs)
+ament_target_dependencies(convert_odom_to_state rclcpp dynus_interfaces geometry_msgs nav_msgs)
 
 # Mocap PoseStamped + TwistStamped -> dynus_interfaces/State
 add_executable(convert_vicon_to_state src/mighty/convert_vicon_to_state.cpp)
@@ -80,7 +80,7 @@ install(TARGETS
 
 # install Python executables
 install(PROGRAMS
-  scripts/repub_rviz_2Dgoal.py
+  scripts/map_odom_tf.py
   scripts/wait_for_tf.py
   DESTINATION lib/${PROJECT_NAME}
 )

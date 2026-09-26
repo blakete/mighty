@@ -8,8 +8,9 @@
 #
 #   pass2_laptop.sh <augmented bag dir> [rover env file, default rover.RR08.env]
 #
-# GOTCHA: MPC takes its pose from dlio/odom_node/pose (mpc.yaml pose_topic), NOT
-# from /state or TF — leave that topic out and every cmd_vel_auto is exactly 0.
+# The MPC tracks against <ns>/pose, which convert_odom_to_state derives from the
+# replayed odometry. dlio/odom_node/pose is still replayed (pass1 records it) but
+# nothing in the stack reads it any more.
 set -uo pipefail
 BAG="${1:?augmented bag dir}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; D="$(cd "$HERE/../.." && pwd)"
@@ -25,8 +26,8 @@ docker run -d --name replay2 --network host --init --shm-size=256m --env-file "$
   -e ZENOH_SESSION_CONFIG_URI=/home/swarm/config/zenoh_session_config.json5 \
   -v "$D/dev:/home/swarm/config:ro" -v "$BAG:/bag:ro" -v "$HERE/restamp_relay.py:/relay.py:ro" \
   mighty-hw:local sleep infinity >/dev/null
-X() { docker exec replay2 bash -c "source /opt/ros/humble/setup.bash && source /home/swarm/code/mighty_ws/install/setup.bash && $1"; }
-docker exec -d replay2 bash -c "source /opt/ros/humble/setup.bash && source /home/swarm/code/mighty_ws/install/setup.bash && R=$R W=$W python3 - > /tmp/count.log 2>&1 <<'PY'
+X() { docker exec replay2 bash -c "source /opt/ros/humble/setup.bash && source \${MIGHTY_WS:-/ws}/install/setup.bash && $1"; }
+docker exec -d replay2 bash -c "source /opt/ros/humble/setup.bash && source \${MIGHTY_WS:-/ws}/install/setup.bash && R=$R W=$W python3 - > /tmp/count.log 2>&1 <<'PY'
 import rclpy, time, math, os
 from rclpy.node import Node
 from geometry_msgs.msg import Twist, PoseStamped
