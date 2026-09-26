@@ -1,94 +1,59 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code (claude.ai/code) in this repository.
 
-## Project Overview
+## What this repo is
 
-MIGHTY (Hermite Spline-based Efficient Trajectory Planning) is a ROS 2 (Humble) C++ package for real-time UAV trajectory planning with obstacle avoidance. It supports multi-agent simulations, Gazebo-based single-agent simulations, and hardware deployment.
+The hardware deployment of the MIGHTY trajectory planner (ROS 2 Humble, C++): one
+ament package `mighty` plus a container image and host tooling in `docker/`. It
+targets ground robots and UAVs on real hardware. Simulation, benchmarks and paper
+material were removed on purpose (they live upstream in mit-acl/mighty); the only
+simulator is the dev-only harness in `docker/dev/sim/`, which never enters the
+hardware image. Deployment guide: `docker/README.hw.md`.
 
-## Build Commands
+## Build and test
 
-The project uses `ament_cmake` (colcon) as its build system. The workspace root is `~/code/mighty_ws`.
-
-```bash
-# Build the entire workspace (from mighty_ws root)
-cd ~/code/mighty_ws
-source /opt/ros/humble/setup.bash
-source ~/code/decomp_ws/install/setup.bash
-colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
-
-# Build only the mighty package
-colcon build --packages-select mighty --cmake-args -DCMAKE_BUILD_TYPE=Release
-
-# Source after building
-source install/setup.bash
-```
-
-Initial setup (installs all dependencies, clones repos, builds everything):
-```bash
-./setup.sh        # uses all CPUs
-./setup.sh -j 4   # limit parallel jobs
-```
-
-## Running Simulations
+There is usually no native ROS install on the dev machine: build and test in Docker.
 
 ```bash
-# Multi-agent simulation (default 10 agents)
-python3 src/mighty/scripts/run_sim.py --mode multiagent -s ~/code/mighty_ws/install/setup.bash
-
-# Single-agent Gazebo simulation
-python3 src/mighty/scripts/run_sim.py --mode gazebo -s ~/code/mighty_ws/install/setup.bash
-
-# Docker alternative (from docker/ directory)
-make run           # multiagent
-make run-gazebo    # gazebo
-make shell         # interactive debug shell
+make -C docker hw-build                 # -> mighty-hw:local (SSH_KEY=~/.ssh/<key> without an agent)
+make -C docker hw-test                  # gtests: the mighty-test stage (BUILD_TESTING=ON)
+docker/mighty_hw.sh start --dev         # laptop smoke test (RR99, isolated zenoh router :7448)
+docker/mighty_hw.sh check --dev         # read-only preflight
+docker/dev/replay/pass2_laptop.sh <bag> # ground-robot regression test (bag replay)
 ```
 
-## Architecture
+Native: `vcs import src < src/mighty/mighty.repos`, rosdep, `colcon build
+--packages-up-to mighty` (see README.md). The private `mpc` dependency needs SSH to
+gitlab.com.
 
-### Core Planning Pipeline (`src/mighty/`, `include/mighty/`)
+## Layout
 
-- **`mighty_node.hpp/cpp`** — ROS 2 node: subscribes to state, point clouds, goal, and dynamic trajectories; publishes planned trajectories and visualization markers.
-- **`mighty.hpp/cpp`** — Core planner class: Hermite spline trajectory generation, obstacle constraint formulation, corridor-based planning.
-- **`lbfgs_solver.hpp/cpp`** — L-BFGS optimization solver for trajectory refinement. `lbfgs_solver_utils` provides helper functions.
-- **`mighty_type.hpp`** — Central type definitions and parameter struct (`parameters`) used throughout.
-- **`initial_guess.hpp`** — Initial trajectory guess generation.
-- **`utils.hpp/cpp`** — Shared utilities (coordinate transforms, geometry helpers).
+- `src/mighty/`, `include/mighty/`: `mighty_node` (ROS interface, ~4k lines),
+  `mighty.cpp` (planning pipeline), `lbfgs_solver*` (trajectory optimization),
+  `frontier_*` (exploration), `convert_odom_to_state` / `convert_vicon_to_state`
+  (localization -> `dynus_interfaces/State`), `decomp_ros_utils.hpp` (vendored).
+- `src/hgp/`, `include/hgp/`: global planner (graph search, `map_util.hpp` voxel and
+  tri-state 2D maps, convex decomposition via `decomp_util`).
+- `launch/mighty_hw.launch.py`: the only launch file. Parameters are layered
+  `config/mighty.yaml` -> `config/platforms/<platform>.yaml` ->
+  `config/vehicles/<ns>.yaml`; `only_nodes:=` picks one node per tmux pane.
+- `docker/`: `Dockerfile.hw` (4 stages + optional `mighty-test`), `compose.hw.yaml`,
+  `mighty_hw.sh` (host tmux session, `check`), `check_graph.py`, `mighty.service.in` +
+  `install_service.sh`, `dev/` (laptop env, replay rig, sim harness).
 
-### Dynamic Graph Planner (`src/dgp/`, `include/dgp/`)
+## Rules that are easy to break
 
-- **`dgp_manager.hpp/cpp`** — Manages the occupancy map (voxel grid), convex decomposition, and interfaces with the planner. Handles both static and dynamic obstacles.
-- **`dgp_planner.hpp/cpp`** — Graph-based global path planner over the voxel grid.
-- **`graph_search.hpp/cpp`** — A* graph search implementation.
-- **`map_util.hpp`** / **`read_map.hpp`** — Voxel map data structure and I/O.
-
-### Simulation & Utilities (`src/sim/`, `src/mighty/`)
-
-- **`fake_sim.cpp`** — Lightweight simulation node (no Gazebo) that integrates planned trajectories.
-- **`obstacle_tracker_node.cpp`** — Tracks dynamic obstacles from sensor data.
-- **`pure_pursuit.cpp`** — Ground robot controller.
-- **`move_model.cpp`** — Gazebo plugin for moving dynamic obstacles.
-- **`convert_odom_to_state.cpp`** / **`convert_vicon_to_state.cpp`** — Sensor-to-state converters for hardware.
-
-### Key Dependencies
-
-- **Eigen3** — Linear algebra (matrices, vectors throughout)
-- **PCL** — Point cloud processing for obstacle detection
-- **DecompROS2** (`decomp_util`) — Convex decomposition for safe flight corridors (built in separate `decomp_ws`)
-- **dynus_interfaces** — Custom ROS 2 message types (State, Goal, Trajectory, DynTraj, etc.)
-- **OpenMP** — Parallel computation in the planner
-
-### Configuration
-
-- `config/mighty.yaml` — Main planner parameters (simulation)
-- `config/hw_mighty.yaml` — Hardware deployment parameters
-- `config/mighty_ground_robot.yaml` — Ground robot parameters
-- Launch files in `launch/` orchestrate multi-node setups
-
-### Data Flow
-
-1. `mighty_node` receives state (odometry), point cloud, and goal
-2. `dgp_manager` updates the voxel map and computes convex free-space corridors
-3. `mighty` generates a Hermite spline trajectory within corridors using L-BFGS optimization
-4. Trajectory is published for the controller (or `fake_sim` in simulation)
+- Pane commands in `mighty_hw.sh` are sent single-quoted into `docker exec`: no single
+  quotes inside them; settings are validated by `safe_value`.
+- Never hand-roll node parameters as `ros2 run`; they come from the launch file's YAML
+  layering.
+- `config/` is bind-mounted from the checkout at run time; `launch/` and code are baked
+  into the image. The script refuses an image whose launch file lacks `platform:=`.
+- Every container on a vehicle must run the same pinned rmw_zenoh build
+  (`Dockerfile.hw` ARGs).
+- Keep effective parameters unchanged unless that is the point of the change: compare
+  `ros2 param dump` (or the YAML layering) before and after.
+- `mighty_node` derives its agent id from the namespace's trailing digits (or the
+  `agent_id` parameter); `use_frame_alignment` makes it ignore peer trajectories until
+  `/frame_align/<ns>/<peer>` arrives.

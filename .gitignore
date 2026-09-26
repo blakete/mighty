@@ -1,8 +1,9 @@
 # Log files
 log/
 
-# Claude Code
-CLAUDE.md
-
 # Python cache
 __pycache__/
+
+# Per-vehicle parameter overlays are local to each vehicle's checkout (see
+# config/vehicles/README.md); force-add one if a vehicle's tuning should be shared.
+config/vehicles/*.yaml
