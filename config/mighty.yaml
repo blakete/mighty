@@ -131,10 +131,8 @@ mighty_node:
         static_heat_rmax_m: 2.0                         # [m] Maximum halo radius
 
         # --- Obstacle Tracking ---
-        cluster_tolerance: 1.0                          # [m] Clustering distance for obstacle detection
         prediction_horizon: 3.0                         # [s] How far ahead to predict obstacle motion
         prediction_mask_distance: 1.0                   # [m] Drop predicted trajs if an agent traj is within this distance
-        velocity_threshold: 0.8                         # [m/s] Speed threshold: below = static, above = dynamic
 
         # --- Map Window ---
         initial_wdx: 20.0                               # [m] Initial map window width
@@ -223,11 +221,6 @@ mighty_node:
         g_epsilon: 1.0e-5                               # [-] Gradient norm convergence threshold
         delta: 1.0e-6                                   # [-] Function improvement convergence threshold
 
-        # --- Dynamic Obstacle Internals ---
-        dynamic_obstacle_base_inflation: 0.5            # [m] Inflation for dynamic obstacles
-        max_dynamic_obstacle_inflation: 1.0             # [m] Max inflation for dynamic obstacles
-        freq_dynamic_obstacle_update_to_tmap: 10.0      # [Hz] Dynamic obstacle update frequency
-
         # --- K-Value Adaptation ---
         num_replanning_before_adapt: 10                 # [-] Replanning cycles before adapting k-value
         default_k_value: 50                             # [-] Default k-value at trajectory end
@@ -261,19 +254,6 @@ mighty_node:
         use_sphere_sensing: true                        # [-] If true, fake_sim sensing returns all global-cloud points within a sphere instead of camera FOV
         sphere_sensing_radius: 5.0                      # [m] Sphere radius for sphere sensing mode
 
-        # --- Obstacle Tracking Internals ---
-        use_adaptive_kf: true                           # [-] Use adaptive Kalman filter
-        adaptive_kf_alpha: 0.90                         # [-] Adaptive KF alpha (1.0 = standard KF)
-        adaptive_kf_dt: 0.1                             # [s] KF time step
-        min_cluster_size: 20                            # [-] Min cluster pointcloud size
-        max_cluster_size: 70                            # [-] Max cluster pointcloud size
-        prediction_dt: 0.1                              # [s] Prediction time step
-        time_to_delete_old_obstacles: 5.0               # [s] Remove obstacles not seen for this long
-        cluster_bbox_cutoff_size: 2.0                   # [m] Max cluster bounding box size
-        acceleration_threshold: 2.0                     # [m/s^2] Acceleration threshold for dynamic classification
-        use_life_time_for_box_visualization: true       # [-] Use lifetime for box visualization
-        box_visualization_duration: 1.0                 # [s] Box visualization duration
-
         # --- Initial Guess ---
         use_multiple_initial_guesses: false             # [-] Use multiple initial guesses
         num_perturbation_for_ig: 8                      # [-] Number of perturbations
@@ -306,9 +286,8 @@ mighty_node:
         use_path_push_for_visualization: false          # [-] Only do global planning (paper viz mode)
 
         # --- Benchmarking ---
-        use_benchmark: true                             # [-] Enable benchmarking data logging
+        use_benchmark: false                             # [-] Enable benchmarking data logging
         file_path: ""                                   # Path to save benchmark CSV
-        use_only_global_planner: false                  # [-] Use only global planner for benchmarking
 
         # --- Frontier-Based Exploration (ground robot only — ignored for UAV) ---
         # Exploration depends on the 2D occupancy pipeline (occ_2d_topic),

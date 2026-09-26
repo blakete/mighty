@@ -107,9 +107,6 @@ mighty_node:
 
         # Dynamic obstacle parameters
         traj_lifetime: 7.0                          # [s] Time to keep the trajectory
-        dynamic_obstacle_base_inflation: 0.5        # [m] Inflation for the dynamic obstacles
-        max_dynamic_obstacle_inflation: 1.0         # [m] Inflation for the dynamic obstacles
-        freq_dynamic_obstacle_update_to_tmap: 10.0  # [Hz] Frequency to update the dynamic obstacles to the tmap
 
         # Dynamic k_value parameters
         num_replanning_before_adapt: 10             # [-] Number of replanning before adapting the k_value
@@ -157,20 +154,7 @@ mighty_node:
         fov_visual_y_deg: 47.0          # [deg] FOV visual y degree
 
         # Obstacle tracking/prediction parameters
-        use_adaptive_kf: false                       # [-] Use adaptive KF
-        adaptive_kf_alpha: 0.90                     # [-] Alpha for the adaptive KF (if you set it to 1.0, it becomes a standard KF)
-        adaptive_kf_dt: 0.1                         # [s] Time step for the adaptive KF
-        cluster_tolerance: 1.0                      # [m] Tolerance for the clustering
-        min_cluster_size: 10                        # [-] Minimum cluster pointcloud size
-        max_cluster_size: 1000                       # [-] Maximum cluster pointcloud size
         prediction_horizon: 1.0                     # [s] Prediction horizon
-        prediction_dt: 0.1                          # [s] Time step for the prediction
-        time_to_delete_old_obstacles: 2.0           # [s] Time to delete old obstacles
-        cluster_bbox_cutoff_size: 2.0               # [m] Size of the bounding box for the clustering
-        use_life_time_for_box_visualization: true  # [-] Use life time for the box visualization - if false, we keep the box until the end of the simulation
-        box_visualization_duration: 1.0             # [s] Duration to visualize the bounding box
-        velocity_threshold: 0.8                     # [m/s] Velocity threshold to characterize as dynamic obstacles
-        acceleration_threshold: 2.0                 # [m/s2] Acceleration threshold to characterize as dynamic obstacles
 
         # Path push visualization parameters (if we wanna visualize the path push - just flip all the flags)
         use_state_update: true                  # [-] Use ego-agent's state update - if false, we fix the ego-agent's state (this is useful for path push visualization)
@@ -178,9 +162,8 @@ mighty_node:
         use_path_push_for_visualization: false  # [-] If true, we just do global planning and return true in replan() function. This is useful for the paper visualization.
 
         # Global planner benchmarking parameters
-        use_benchmark: true                     # [-] Use global planner benchmarking
+        use_benchmark: false                     # [-] Use global planner benchmarking
         file_path: ""                                   # path to the file to save the data
-        use_only_global_planner: false          # [-] Use only global planner for the benchmarking
 
         # Initial guess parameters
         use_multiple_initial_guesses: false          # [-] Use multiple initial guesses
