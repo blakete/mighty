@@ -1,0 +1,25 @@
+# mighty-devsim — dev-only UAV simulator (see README.md here). One container, all
+# nodes inside it, FastDDS restricted to localhost on its own domain: it cannot
+# reach a vehicle or a fleet graph, and needs no zenoh router.
+name: mighty-devsim
+services:
+  devsim:
+    build:
+      context: .
+      dockerfile: Dockerfile.devsim
+    image: mighty-devsim:local
+    container_name: mighty-devsim
+    network_mode: host                 # X11 + a local rviz2/ros2 on the host can join (domain 77)
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_LOCALHOST_ONLY: "1"
+      ROS_DOMAIN_ID: "77"
+      DISPLAY: ${DISPLAY:-:0}
+      QT_X11_NO_MITSHM: "1"
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:ro
+      # The planner's parameters come from this checkout, exactly as on hardware.
+      - "../../../config:/ws/install/mighty/share/mighty/config:ro"
+    init: true
+    restart: "no"
+    command: ["sleep", "infinity"]

@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1.7
+# mighty-devsim — the dev-only simulator harness, layered on the hardware image so
+# the planner under test is exactly the binary that ships. Build context: this
+# directory (docker/dev/sim). Nothing here ever goes into mighty-hw.
+ARG BASE=mighty-hw:local
+FROM ${BASE}
+SHELL ["/bin/bash", "-c"]
+ENV DEBIAN_FRONTEND=noninteractive
+ARG DEV_WS=/ws_dev
+WORKDIR ${DEV_WS}
+
+# uav_simulator at its pin, trimmed to the three packages the harness uses.
+COPY dev.repos /tmp/dev.repos
+RUN apt-get update && apt-get install -y --no-install-recommends git python3-vcstool \
+ && mkdir -p src && vcs import src < /tmp/dev.repos \
+ && cd src/uav_simulator \
+ && find . -mindepth 1 -maxdepth 1 ! -name local_sensing ! -name map_generator ! -name Utils -exec rm -rf {} + \
+ && find Utils -mindepth 1 -maxdepth 1 ! -name quadrotor_msgs -exec rm -rf {} + \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY mighty_dev_sim src/mighty_dev_sim
+# --skip-keys: dynamic_reconfigure is a ROS 1 key in local_sensing's manifest;
+# Eigen3/OpenCV/Boost/PCL are CMake names, not rosdep keys (their -dev packages
+# arrive through pcl_ros / cv_bridge, plus libeigen3-dev explicitly); mighty is
+# already installed in the base image.
+RUN apt-get update && rosdep update \
+ && source /opt/ros/humble/setup.bash && source ${MIGHTY_WS}/install/setup.bash \
+ && rosdep install -y --ignore-src --from-paths src \
+        --skip-keys "catkin dynamic_reconfigure Eigen3 OpenCV Boost PCL mighty" \
+ && apt-get install -y --no-install-recommends libeigen3-dev ros-humble-rviz2 \
+ && rm -rf /var/lib/apt/lists/*
+RUN source /opt/ros/humble/setup.bash && source ${MIGHTY_WS}/install/setup.bash \
+ && colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release \
+ && rm -rf build log
+ENV MIGHTY_DEV_WS=${DEV_WS}
+RUN printf 'source %s/install/setup.bash\n' "${DEV_WS}" >> /root/.bashrc

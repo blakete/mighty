@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>mighty_dev_sim</name>
+  <version>0.0.0</version>
+  <description>Dev-only simulator harness for MIGHTY (fake_sim + rendered sensor cloud). Never part of the hardware image.</description>
+  <maintainer email="kkondo@mit.edu">Kota Kondo</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>dynus_interfaces</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>visualization_msgs</depend>
+  <depend>eigen</depend>
+
+  <exec_depend>mighty</exec_depend>
+  <exec_depend>local_sensing</exec_depend>
+  <exec_depend>map_generator</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

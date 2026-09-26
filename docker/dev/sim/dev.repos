@@ -1,0 +1,7 @@
+repositories:
+  # Only local_sensing (pcl_render_node), map_generator (random_forest) and
+  # Utils/quadrotor_msgs are kept; Dockerfile.devsim deletes the rest after cloning.
+  uav_simulator:
+    type: git
+    url: https://github.com/kotakondo/uav_simulator.git
+    version: b196208d3cbf0269b8e80220f7cc1cc992b6c7f8

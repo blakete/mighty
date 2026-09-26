@@ -1,0 +1,10 @@
+# Simulator overlay on top of the planner's config/mighty.yaml (bind-mounted from
+# the checkout, like on hardware). mighty.yaml already describes a UAV in fake_sim;
+# these keys are pinned so the harness does not depend on that.
+mighty_node:
+  ros__parameters:
+    vehicle_type: "uav"
+    use_hardware: false
+    sim_env: "fake_sim"
+    map_frame_id: "map"
+    use_frame_alignment: false
