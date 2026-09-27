@@ -331,14 +331,20 @@ is `debug_bag04`, recorded on RR08.
 
 **Before you start**
 
-- Linux with Docker, and a desktop session (RViz opens a window).
-- This repository, checked out on the branch with this section (`feature/hw-standalone`
-  until it merges). Run every command below from the top of the checkout.
-- [containerized-rviz](https://github.com/blakete/containerized-rviz) cloned to
-  `~/repos/containerized-rviz` and its image downloaded (`crviz pull`); its README
-  covers the GitHub login and `docker login ghcr.io`.
-- The MIGHTY image as `mighty-hw:local`. It is on ghcr.io next to the RViz image (ask
-  for access to the `mighty-hw` package); with the same `docker login ghcr.io`:
+- Linux with a desktop session (RViz opens a window), Docker Engine with the
+  `docker compose` plugin, and `tmux` (`sudo apt install tmux`).
+- [containerized-rviz](https://github.com/blakete/containerized-rviz), set up as its
+  README says (steps 1 and 2): cloned to `~/containerized-rviz`, logged in to ghcr.io,
+  image downloaded with `crviz pull`.
+- This repository, on the branch with this section (`feature/hw-standalone` until it
+  merges). Run every command below from the top of this checkout:
+  ```bash
+  git clone -b feature/hw-standalone https://github.com/blakete/mighty.git ~/mighty
+  cd ~/mighty
+  ```
+- The MIGHTY image as `mighty-hw:local`. It is a private package on ghcr.io next to the
+  RViz image; collaborators on `blakete/mighty` can pull it (ask Blake to be added).
+  With the same `docker login ghcr.io`:
   ```bash
   MIGHTY_REGISTRY=ghcr.io/blakete/mighty-hw docker/mighty_hw.sh pull feature-hw-standalone-5cd6017
   ```
@@ -364,7 +370,7 @@ is `debug_bag04`, recorded on RR08.
    `--runtime nvidia -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=all`):
    ```bash
    BAGS=/path/to/folder/holding/bags
-   CRVIZ=$HOME/repos/containerized-rviz
+   CRVIZ=$HOME/containerized-rviz        # where you cloned containerized-rviz
    docker run -d --name mighty-rviz --network host --ipc host --init \
      --user "$(id -u):$(id -g)" --env-file docker/dev/replay/rover.RR08.env \
      -e ZENOH_SESSION_CONFIG_URI=/zenoh/session.json5 \
@@ -406,7 +412,8 @@ is `debug_bag04`, recorded on RR08.
    `/tmp/mighty_debug.log` in `hw-mighty`). Stop: Ctrl-C in terminals 3 and 4, then
    `docker rm -f mighty-rviz && docker/mighty_hw.sh stop`.
 
-`docker/dev/replay/goal_session.sh up <bag> [--loop]` does steps 1–4 in one command.
+`docker/dev/replay/goal_session.sh up <bag> [--loop]` does steps 1–4 in one command
+(with `CRVIZ_REPO=$HOME/containerized-rviz` if that is where it is).
 
 ## The RR fleet
 
