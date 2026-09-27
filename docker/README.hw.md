@@ -315,12 +315,42 @@ docker/dev/replay/goal_session.sh up /path/to/bag_dir [--loop]   # opens RViz; t
 docker/dev/replay/goal_session.sh down
 ```
 
-**The same by hand** (RR08 and `debug_bag04` as the example; run from the checkout). It
-needs `mighty-hw:local` and the containerized-rviz image (`crviz pull`). Every
-container talks only to the dev router on `127.0.0.1:7448`; keep the
-`ZENOH_SESSION_CONFIG_URI` line, or on a C2 machine RViz joins the fleet router on
-`:7447`. For another vehicle, replace `RR08` everywhere and use an env file with its
-`ROBOT_NAME`.
+To run the same thing step by step, see
+[*Plan on a replayed bag, step by step*](#plan-on-a-replayed-bag-step-by-step).
+
+**Simulator (`dev/sim/`)** — a dev-only fake_sim harness for the UAV mode; never part of
+the hardware image. See `dev/sim/README.md`.
+
+## Plan on a replayed bag, step by step
+
+Replay a recorded bag into the hardware MIGHTY on your laptop, watch it in RViz and send
+it goals. Only the bag's planner **inputs** are replayed (TF, odometry, the three 2D
+grids, the lidar cloud for context); every path, trajectory and command you see comes
+from the MIGHTY running on your machine. Nothing here connects to a robot. The example
+is `debug_bag04`, recorded on RR08.
+
+**Before you start**
+
+- Linux with Docker, and a desktop session (RViz opens a window).
+- This repository, checked out on the branch with this section (`feature/hw-standalone`
+  until it merges). Run every command below from the top of the checkout.
+- The MIGHTY image as `mighty-hw:local`: `docker/mighty_hw.sh pull <tag>` (registry
+  login needed) or `make -C docker hw-build` (needs SSH access to the private `mpc`
+  repo); see *The image*.
+- [containerized-rviz](https://github.com/blakete/containerized-rviz) cloned to
+  `~/repos/containerized-rviz`, with its image downloaded (`crviz pull`).
+- A folder holding the bag folders (each has a `metadata.yaml`).
+
+**Rules**
+
+- Keep the `ZENOH_SESSION_CONFIG_URI` line in step 2. Without it, on a machine that
+  runs the C2 stack, RViz joins the fleet's router on `:7447`. With it, every container
+  talks only to MIGHTY's private router on `127.0.0.1:7448`.
+- For a bag from another vehicle, replace `RR08` everywhere (and `rr08.rviz` with a
+  layout for it), and use an env file with that `ROBOT_NAME`
+  (copy `docker/dev/replay/rover.RR08.env`).
+
+**Steps**
 
 1. MIGHTY under the bag's vehicle name:
    ```bash
@@ -372,8 +402,7 @@ container talks only to the dev router on `127.0.0.1:7448`; keep the
    `/tmp/mighty_debug.log` in `hw-mighty`). Stop: Ctrl-C in terminals 3 and 4, then
    `docker rm -f mighty-rviz && docker/mighty_hw.sh stop`.
 
-**Simulator (`dev/sim/`)** — a dev-only fake_sim harness for the UAV mode; never part of
-the hardware image. See `dev/sim/README.md`.
+`docker/dev/replay/goal_session.sh up <bag> [--loop]` does steps 1–4 in one command.
 
 ## The RR fleet
 
