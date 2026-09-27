@@ -334,11 +334,15 @@ is `debug_bag04`, recorded on RR08.
 - Linux with Docker, and a desktop session (RViz opens a window).
 - This repository, checked out on the branch with this section (`feature/hw-standalone`
   until it merges). Run every command below from the top of the checkout.
-- The MIGHTY image as `mighty-hw:local`: `docker/mighty_hw.sh pull <tag>` (registry
-  login needed) or `make -C docker hw-build` (needs SSH access to the private `mpc`
-  repo); see *The image*.
 - [containerized-rviz](https://github.com/blakete/containerized-rviz) cloned to
-  `~/repos/containerized-rviz`, with its image downloaded (`crviz pull`).
+  `~/repos/containerized-rviz` and its image downloaded (`crviz pull`); its README
+  covers the GitHub login and `docker login ghcr.io`.
+- The MIGHTY image as `mighty-hw:local`. It is on ghcr.io next to the RViz image (ask
+  for access to the `mighty-hw` package); with the same `docker login ghcr.io`:
+  ```bash
+  MIGHTY_REGISTRY=ghcr.io/blakete/mighty-hw docker/mighty_hw.sh pull feature-hw-standalone-5cd6017
+  ```
+  Or build it: `make -C docker hw-build` (needs SSH access to the private `mpc` repo).
 - A folder holding the bag folders (each has a `metadata.yaml`).
 
 **Rules**
