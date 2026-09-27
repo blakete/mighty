@@ -2,7 +2,7 @@
 # goal_session.sh — click goals in RViz for a LOCAL MIGHTY that replans on a
 # replayed bag. Laptop only; nothing here reaches a vehicle or a fleet graph.
 #
-#   goal_session.sh up <bag dir> [--rviz-config FILE]
+#   goal_session.sh up <bag dir> [--loop] [--rviz-config FILE]
 #   goal_session.sh down
 #
 # 1. MIGHTY --dev (docker/mighty_hw.sh) under the bag's vehicle name, on its
@@ -15,9 +15,11 @@
 #    cloud for context) played inside the RViz container through
 #    restamp_relay.py --hold: re-stamped onto the wall clock (MIGHTY runs on
 #    wall time, as on the vehicles), and after the bag ends the last pose, TF
-#    and maps keep being republished, so the vehicle "parks" there. The bag's
-#    recorded planner OUTPUTS are not played; everything planner-side you see
-#    comes from the local MIGHTY.
+#    and maps keep being republished, so the vehicle "parks" there. With --loop
+#    the bag repeats instead (the relay keeps time moving forward; the vehicle
+#    jumps back to its start pose each loop). The bag's recorded planner
+#    OUTPUTS are not played; everything planner-side you see comes from the
+#    local MIGHTY.
 #
 # Then use the 2D Goal tool (it publishes /<vehicle>/term_goal) and watch MIGHTY
 # replan: tmux attach -t hw_mighty for its panes.
@@ -38,11 +40,12 @@ down() {
 }
 
 up() {
-    local bag="${1:?usage: goal_session.sh up <bag dir> [--rviz-config FILE]}"; shift
-    local rviz_cfg=""
+    local bag="${1:?usage: goal_session.sh up <bag dir> [--loop] [--rviz-config FILE]}"; shift
+    local rviz_cfg="" loop=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --rviz-config) rviz_cfg="$(realpath "$2")"; shift ;;
+            --loop) loop="--loop" ;;
             *) die "unknown option: $1" ;;
         esac
         shift
@@ -143,11 +146,11 @@ PY
     local setup='source /opt/ros/humble/setup.bash; source /opt/crviz/setup.bash'
     docker exec -d "${NAME}" bash -c "${setup}; exec python3 /relay.py --hold 10 ${pairs} > /tmp/relay.log 2>&1"
     sleep 3
-    docker exec -d "${NAME}" bash -c "${setup}; exec ros2 bag play /bags/$(basename "${bag}") --topics${topics} --remap${remap} > /tmp/play.log 2>&1"
+    docker exec -d "${NAME}" bash -c "${setup}; exec ros2 bag play /bags/$(basename "${bag}") ${loop} --topics${topics} --remap${remap} > /tmp/play.log 2>&1"
 
     cat <<EOF
 [goal_session] up. RViz is on ${display}; MIGHTY (${vehicle}) panes: tmux attach -t hw_mighty
-[goal_session] the bag plays for ${duration} s, then ${vehicle} stays parked at its last pose with its last map.
+$(if [[ -n "${loop}" ]]; then echo "[goal_session] the bag (${duration} s) loops; ${vehicle} jumps back to its start pose each loop."; else echo "[goal_session] the bag plays for ${duration} s, then ${vehicle} stays parked at its last pose with its last map."; fi)
 [goal_session] 2D Goal tool -> /${vehicle}/term_goal (coordinates in ${vehicle}/map). Stop: $0 down
 EOF
 }

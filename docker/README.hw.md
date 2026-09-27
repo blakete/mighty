@@ -307,12 +307,70 @@ under the bag's vehicle name, RViz from the containerized-rviz image bound to th
 router only (never to a `:7447` router on the machine), and the bag's planner inputs
 (TF, odometry, the three 2D grids) through `restamp_relay.py --hold`: after the bag
 ends the vehicle stays parked at its last pose with its last map, and every 2D Goal
-click makes the local planner replan.
+click makes the local planner replan. With `--loop` the bag repeats instead: the relay
+keeps time moving forward, and the vehicle jumps back to its start pose each loop.
 
 ```bash
-docker/dev/replay/goal_session.sh up /path/to/bag_dir    # opens RViz; tmux attach -t hw_mighty
+docker/dev/replay/goal_session.sh up /path/to/bag_dir [--loop]   # opens RViz; tmux attach -t hw_mighty
 docker/dev/replay/goal_session.sh down
 ```
+
+**The same by hand** (RR08 and `debug_bag04` as the example; run from the checkout). It
+needs `mighty-hw:local` and the containerized-rviz image (`crviz pull`). Every
+container talks only to the dev router on `127.0.0.1:7448`; keep the
+`ZENOH_SESSION_CONFIG_URI` line, or on a C2 machine RViz joins the fleet router on
+`:7447`. For another vehicle, replace `RR08` everywhere and use an env file with its
+`ROBOT_NAME`.
+
+1. MIGHTY under the bag's vehicle name:
+   ```bash
+   ROVER_ENV_FILE=$PWD/docker/dev/replay/rover.RR08.env docker/mighty_hw.sh start --dev
+   ```
+2. RViz, bound to the dev router (CPU rendering; on NVIDIA add
+   `--runtime nvidia -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=all`):
+   ```bash
+   BAGS=/path/to/folder/holding/bags
+   CRVIZ=$HOME/repos/containerized-rviz
+   docker run -d --name mighty-rviz --network host --ipc host --init \
+     --user "$(id -u):$(id -g)" --env-file docker/dev/replay/rover.RR08.env \
+     -e ZENOH_SESSION_CONFIG_URI=/zenoh/session.json5 \
+     -e DISPLAY -e XAUTHORITY=/tmp/.xauth -e QT_X11_NO_MITSHM=1 \
+     -v /tmp/.X11-unix:/tmp/.X11-unix -v "${XAUTHORITY:-$HOME/.Xauthority}:/tmp/.xauth:ro" \
+     -v "$PWD/docker/dev/zenoh_session_config.json5:/zenoh/session.json5:ro" \
+     -v "$PWD/docker/dev/replay/restamp_relay.py:/relay.py:ro" \
+     -v "$BAGS:/bags:ro" -v "$CRVIZ/config:/configs:ro" \
+     --entrypoint bash ghcr.io/blakete/containerized-rviz:latest \
+     -c 'source /opt/ros/humble/setup.bash && source /opt/crviz/setup.bash && rviz2 -d /configs/rr08.rviz'
+   ```
+3. Second terminal: the relay, which re-stamps the inputs onto the wall clock (MIGHTY
+   runs on wall time) and, after the bag ends, keeps the last pose, TF and maps coming:
+   ```bash
+   docker exec -it mighty-rviz bash -c 'source /opt/ros/humble/setup.bash && python3 /relay.py --hold 10 \
+     /tf=tf2_msgs/msg/TFMessage /tf_static=tf2_msgs/msg/TFMessage \
+     /RR08/dlio/odom_node/odom=nav_msgs/msg/Odometry \
+     /RR08/occ_2d_topic=nav_msgs/msg/OccupancyGrid \
+     /RR08/esdf_2d_topic=nav_msgs/msg/OccupancyGrid \
+     /RR08/planning_occ_2d_topic=nav_msgs/msg/OccupancyGrid \
+     /RR08/dlio/odom_node/pointcloud/deskewed=sensor_msgs/msg/PointCloud2'
+   ```
+4. Third terminal: play only the planner inputs, each renamed under `/replay` so it
+   reaches MIGHTY through the relay only. The bag's recorded planner outputs are never
+   played. Drop `--loop` to play once and park.
+   ```bash
+   docker exec -it mighty-rviz bash -c 'source /opt/ros/humble/setup.bash && ros2 bag play /bags/debug_bag04 --loop \
+     --topics /tf /tf_static /RR08/dlio/odom_node/odom /RR08/occ_2d_topic /RR08/esdf_2d_topic \
+              /RR08/planning_occ_2d_topic /RR08/dlio/odom_node/pointcloud/deskewed \
+     --remap /tf:=/replay/tf /tf_static:=/replay/tf_static \
+             /RR08/dlio/odom_node/odom:=/replay/RR08/dlio/odom_node/odom \
+             /RR08/occ_2d_topic:=/replay/RR08/occ_2d_topic \
+             /RR08/esdf_2d_topic:=/replay/RR08/esdf_2d_topic \
+             /RR08/planning_occ_2d_topic:=/replay/RR08/planning_occ_2d_topic \
+             /RR08/dlio/odom_node/pointcloud/deskewed:=/replay/RR08/dlio/odom_node/pointcloud/deskewed'
+   ```
+5. RViz's 2D Goal Pose tool publishes `/RR08/term_goal`; watch MIGHTY replan with
+   `tmux attach -t hw_mighty` (goals and replans are also logged to
+   `/tmp/mighty_debug.log` in `hw-mighty`). Stop: Ctrl-C in terminals 3 and 4, then
+   `docker rm -f mighty-rviz && docker/mighty_hw.sh stop`.
 
 **Simulator (`dev/sim/`)** — a dev-only fake_sim harness for the UAV mode; never part of
 the hardware image. See `dev/sim/README.md`.

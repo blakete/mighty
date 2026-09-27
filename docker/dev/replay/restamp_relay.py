@@ -21,6 +21,10 @@ sensor_msgs/PointCloud2 with a Livox per-point float64 'timestamp' field in ns
 message of every topic at HZ, stamped with the current time (for /tf, the last
 transform of every parent/child pair). The vehicle then stays at its final pose
 with its final map, so goals can be sent to a planner for as long as needed.
+
+Looped playback (ros2 bag play --loop): when the bag's time jumps back by more
+than LOOP_JUMP_S, the offset is fixed again from that message, so the relayed
+time keeps moving forward (the vehicle jumps back to its start pose each loop).
 """
 import argparse
 import sys
@@ -34,6 +38,7 @@ from rosidl_runtime_py.utilities import get_message
 
 
 NS = 1_000_000_000
+LOOP_JUMP_S = 3.0          # bag time going back this far = a new loop
 
 
 def stamp_to_ns(stamp):
@@ -48,7 +53,9 @@ def set_stamp_ns(stamp, ns):
 class RestampRelay(Node):
     def __init__(self, in_prefix, topics, hold_hz=0.0):
         super().__init__('restamp_relay')
-        self.offset_ns = None          # fixed once, from the first message seen
+        self.offset_ns = None          # fixed from the first message seen (and at each loop)
+        self.max_raw_ns = None         # latest bag stamp seen, for loop detection
+        self.loops = 0
         self.count = {}
         self.pubs = {}
         self.last = {}                 # topic -> last relayed message (for --hold)
@@ -103,12 +110,23 @@ class RestampRelay(Node):
     def relay(self, topic, msg):
         self.last_input_ns = self.get_clock().now().nanoseconds
         self.holding = False
+        raw = self.first_stamp_ns(msg)
         if self.offset_ns is None:
-            first = self.first_stamp_ns(msg)
-            if first is None:
+            if raw is None:
                 return
-            self.offset_ns = self.get_clock().now().nanoseconds - first
+            self.offset_ns = self.get_clock().now().nanoseconds - raw
+            self.max_raw_ns = raw
             self.get_logger().info(f'offset fixed from {topic}: +{self.offset_ns / NS:.3f} s')
+        elif raw is not None and not topic.endswith('tf_static'):
+            # /tf_static is stamped whenever its publisher started: never a loop signal.
+            if raw < self.max_raw_ns - LOOP_JUMP_S * NS:
+                self.loops += 1
+                back_s = (self.max_raw_ns - raw) / NS
+                self.offset_ns = self.get_clock().now().nanoseconds - raw
+                self.max_raw_ns = raw
+                self.get_logger().info(f'bag looped (#{self.loops}, bag time back {back_s:.1f} s '
+                                       f'at {topic}): offset now +{self.offset_ns / NS:.3f} s')
+            self.max_raw_ns = max(self.max_raw_ns, raw)
         self.shift(msg)
         self.pubs[topic].publish(msg)
         self.count[topic] += 1
