@@ -140,6 +140,12 @@ resolve() {
         safe_value "${k}" "${!k}"
     done
     for k in ${TF_GATE}; do safe_value MIGHTY_TF_GATE "${k}"; done
+    # wait_for_tf.py exits 2 on an odd count, and the && chain then never starts
+    # the planner or MPC pane.
+    if [[ "${TF_GATE}" != none ]] && (( $(wc -w <<<"${TF_GATE}") % 2 )); then
+        echo "[mighty_hw] MIGHTY_TF_GATE='${TF_GATE}' must be TARGET SOURCE pairs (or none)" >&2
+        exit 1
+    fi
     ZENOH=false
     [[ "${RMW}" == rmw_zenoh_cpp ]] && ZENOH=true
     return 0

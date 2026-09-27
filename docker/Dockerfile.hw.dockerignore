@@ -6,7 +6,10 @@
 .git
 .vscode
 .gitattributes
-*.md
+**/*.md
+# Per-vehicle overlays are git-ignored local tuning: a clean `git status` does not
+# show them, so without this a build machine's overlay would ship in the image.
+config/vehicles/*.yaml
 # docker/ holds the host-side tooling and the dev-only sim harness (docker/dev/sim),
 # none of which belongs in the image...
 docker
