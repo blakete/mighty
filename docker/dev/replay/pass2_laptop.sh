@@ -10,6 +10,12 @@
 #
 # GOTCHA: MPC takes its pose from dlio/odom_node/pose (mpc.yaml pose_topic), NOT
 # from /state or TF — leave that topic out and every cmd_vel_auto is exactly 0.
+#
+# KEEP_RUNNING=1 pass2_laptop.sh <bag> — skip the final `mighty_hw.sh stop`, so
+# hw-mighty (and its dev zenoh router) stay up after the bag finishes playing,
+# for interactive use (e.g. RViz "2D Goal Pose" against a manually-set term_goal
+# — see config/hw_mighty_ground_robot.yaml's exploration.enabled). Default
+# (unset) keeps the original verified-regression-test behavior: full teardown.
 set -uo pipefail
 BAG="${1:?augmented bag dir}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; D="$(cd "$HERE/../.." && pwd)"
@@ -55,4 +61,10 @@ sleep 20
 docker exec replay2 tail -1 /tmp/relay.log | cut -c1-140
 for i in $(seq 1 60); do docker exec replay2 test -s /tmp/count.log && break; sleep 3; done; docker exec replay2 cat /tmp/count.log
 docker exec hw-mighty bash -c "echo mpc CMD steps: \$(grep -c CMD /tmp/mpc_debug.log), failures: \$(grep -c failed /tmp/mpc_debug.log); grep CMD /tmp/mpc_debug.log | tail -1 | cut -c1-140"
-docker rm -f replay2 >/dev/null; ./mighty_hw.sh stop 2>&1 | tail -1
+docker rm -f replay2 >/dev/null
+if [[ "${KEEP_RUNNING:-0}" == "1" ]]; then
+  echo "[pass2] KEEP_RUNNING=1 — leaving hw-mighty (+ dev router) up for interactive use."
+  echo "[pass2] Attach: tmux attach -t hw_mighty   Stop later: ./mighty_hw.sh stop"
+else
+  ./mighty_hw.sh stop 2>&1 | tail -1
+fi

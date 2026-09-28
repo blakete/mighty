@@ -156,7 +156,7 @@ mighty_node:
         global_planner_heuristic_weight: 1.0             # [-] A* heuristic weight (higher = greedier)
         heat_weight: 5.0                                # [-] Overall heat map weight in A* cost
         max_dist_vertexes: 0.5                          # [m] Max distance between path vertices
-        w_unknown: 2.0                                  # [-] Extra cost per A* step through an UNKNOWN 2D cell, in multiples of the geometric step (2.0 => an unknown step costs 3x a free one). Live in 2D mode since the 2026-09 tri-state planning map: window cells the mapper does not cover, and mapper -1 cells, are UNKNOWN (never free). Raise to 3.0 if the path still flips between exits.
+        w_unknown: 0.0 #2.0                                  # [-] Extra cost per A* step through an UNKNOWN 2D cell, in multiples of the geometric step (2.0 => an unknown step costs 3x a free one). Live in 2D mode since the 2026-09 tri-state planning map: window cells the mapper does not cover, and mapper -1 cells, are UNKNOWN (never free). Raise to 3.0 if the path still flips between exits.
         w_align: 0.0                                    # [-] Cost weight for alignment with initial velocity
         decay_len_cells: 100.0                          # [-] Decay length for alignment cost
         w_side: 0.0                                     # [-] Cost weight for lateral tie-breaking
