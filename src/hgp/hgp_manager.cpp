@@ -189,6 +189,15 @@ bool HGPManager::checkIfPointOccupied(const Vec3f& point) {
   // map_util_for_planning_ is only created inside setupHGPPlanner/solveHGP,
   // so callers outside the planning pipeline (e.g. checkHoverAvoidance) need
   // the fallback.
+  //
+  // Locked: setupHGPPlanner() reassigns map_util_for_planning_ under
+  // mtx_map_util_ from the replan thread (cb_group_replan_); this can be
+  // called from the goal callback thread (cb_group_goal_ is Reentrant) at the
+  // same time via sanitizeTerminalGoal(). Reading the shared_ptr here without
+  // the same lock races the reassignment's destroy of the old pointee --
+  // observed as "double free or corruption" when several goals arrive close
+  // together.
+  std::lock_guard<std::mutex> lock(mtx_map_util_);
   const auto& mu = map_util_for_planning_ ? map_util_for_planning_ : map_util_;
   if (!mu) return false;  // map not yet initialized
 
@@ -197,6 +206,8 @@ bool HGPManager::checkIfPointOccupied(const Vec3f& point) {
 }
 
 bool HGPManager::checkIfPointOccupied2D(const Vec3f& point) {
+  // Locked: see checkIfPointOccupied() above -- same race applies here.
+  std::lock_guard<std::mutex> lock(mtx_map_util_);
   const auto& mu = map_util_for_planning_ ? map_util_for_planning_ : map_util_;
   if (!mu || !mu->has2DMap()) return false;
 
