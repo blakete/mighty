@@ -3,7 +3,7 @@ repositories:
   acl-mapping:
     type: git
     url: git@gitlab.com:mit-acl/lab/acl-mapping.git
-    version: c4d5d38b362a7264fde88c5dfcb9a2e9235fdebb
+    version: 9e5751065023f34123f9b9c2759e0446edd80c04
   direct_lidar_inertial_odometry:
     type: git
     url: git@github.com:blakete/direct_lidar_inertial_odometry.git
