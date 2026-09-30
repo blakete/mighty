@@ -194,8 +194,10 @@ for that, run the bag replay in *Functional test* below.
 Tag convention on the fleet registry: `<branch>-<shortsha>` of this repo's HEAD, plus
 `latest` once validated on a rover.
 
-The fleet branch is **`dev-rr-mad-eth-elevation`**: rover images are built and tagged from
-it. `dev-rr-mad` was retired on 2026-09-19 (kept as tag `archive/dev-rr-mad`, `b6e3cd9`):
+The fleet branch is **`main`**: rover images are built and tagged from it. It was named
+`dev-rr-mad-eth-elevation` until 2026-09-26, when it replaced this fork's `main`; the
+abandoned `dev-rr-mad-eth-elevation-v2` is kept as tag `archive/dev-rr-mad-eth-elevation-v2`
+(`a2182ab`). `dev-rr-mad` was retired on 2026-09-19 (kept as tag `archive/dev-rr-mad`, `b6e3cd9`):
 since `0159b1d` the planner takes its 2D planning map only from the ETH
 `elevation_mapping_cupy` mapper's `planning_occ_2d_topic`, so the mapper-agnostic branch no
 longer described a stack any rover runs.
