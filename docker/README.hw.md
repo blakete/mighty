@@ -95,7 +95,10 @@ The Orin's elevation map misses overhangs lower than the rover and is slow to cl
 people; the voxel map has the opposite weakness (a fixed ground plane). `map_fusion`
 uses the elevation height as the floor of each voxel column: an occupied voxel between
 floor + 0.15 m and floor + 0.60 m is lethal, elevation lethal always wins, and FREE
-needs both maps (rule and tests: acl-mapping `map_fusion_ros/README.md`).
+needs both maps (rule and tests: acl-mapping `map_fusion_ros/README.md`). Its parameters
+(body band `clearance` / `rover_height` / `margin`, floor fill, fallback) live in this
+checkout's `config/map_fusion_hw_ground_robot.yaml`, bind-mounted like the planner's:
+edit it and restart the `map_fusion` pane.
 
 `global_mapper` publishes only under `<ns>/voxel/*`: `mighty_node` subscribes the
 mapper's default `occupancy_grid` / `unknown_grid` names in hardware mode, so a

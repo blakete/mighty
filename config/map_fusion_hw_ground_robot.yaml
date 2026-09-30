@@ -1,0 +1,49 @@
+# map_fusion_node parameters for the hw stack (map_fusion pane in docker/mighty_hw.sh).
+# This checkout's config/ is bind-mounted into hw-mighty, so an edit here takes effect on
+# a map_fusion pane restart (Ctrl-C, Up, Enter), no rebuild. Starting point: the package
+# default acl-mapping map_fusion_ros/config/hw_ground_robot.yaml.
+#
+# map_fusion_node on the red rovers (RR04 first, 2026-09-29). Stage A defaults: the
+# elevation mapper keeps feeding MIGHTY and the fused grids go to fused/*.
+# Stage B (fusion feeds MIGHTY): map_fusion.launch.py stage:=B, after the elevation
+# mapper's grids are renamed to elev/*. The launch file sets both prefixes from the
+# stage, overriding the two values below.
+/**:
+  ros__parameters:
+    # inputs (relative to the rover namespace)
+    elevation_gridmap_topic: elevation_mapping_node/elevation_map_inpainted
+    elevation_layer: inpaint
+    elev_prefix: ""                     # elevation occ grid = <elev_prefix>occ_2d_topic
+    voxel_cloud_topic: voxel/occupancy_grid
+    voxel_occ_topic: voxel/occ_2d_topic
+    voxel_res: 0.10                     # fallback; taken from voxel/occ_2d_topic when it arrives
+    voxel_occ_origin_offset_cells: 0.5  # global_mapper publishes its 2D origin half a cell low
+
+    # outputs
+    output_prefix: fused/
+    occ_topic_name: occ_2d_topic
+    planning_topic_name: planning_occ_2d_topic
+    esdf_topic_name: esdf_2d_topic
+    publish_rate_hz: 5.0                # same rate MIGHTY gets from the elevation mapper today
+    stamp_mode: elevation               # copy the elevation grid stamp (DLIO cloud time)
+    publish_debug: true                 # debug/lethal_source, debug/floor_source (only when subscribed)
+    log_every_n: 50
+
+    # staleness / fallback
+    max_elev_age_s: 1.0
+    max_voxel_age_s: 1.0
+    degraded_mode: elevation_only       # voxel map stale -> pass the elevation grids through (= today)
+
+    # rule (see fusion.py)
+    clearance: 0.15                     # [m] voxels this close above the floor are ground
+    rover_height: 0.80                  # [m] set 2026-09-29 (was 0.50 = MIGHTY drone_bbox z)
+    margin: 0.10                        # [m] body band = floor + (0.15, 0.90)
+    floor_search_radius_cells: 5
+    floor_agree_tol: 0.30
+    voxel_floor_min_drop: 0.25          # [m] lower the floor to the voxels only for gaps this large
+    voxel_floor_max_drop: 1.50
+
+    # derived grids (same values elevation_mapping_cupy uses)
+    planning_unknown_max_traversable_cells: 4
+    planning_unknown_exempt_border_components: true
+    esdf_truncation_distance: 1.5
