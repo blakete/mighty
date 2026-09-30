@@ -193,6 +193,15 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_map_2d_tristate
     rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
+  # Hard inflation of occupied 2D cells (occ2d_inflation_m, 2026-09-29; see map_util.hpp
+  # inflateOccupied2D and hgp_manager.cpp solveHGP).
+  ament_add_gtest(test_map_2d_inflation
+    src/test/test_map_2d_inflation.cpp
+    src/hgp/graph_search.cpp)
+  target_link_libraries(test_map_2d_inflation ${PCL_LIBRARIES})
+  ament_target_dependencies(test_map_2d_inflation
+    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
+
   ament_add_gtest(test_graph_search_unknown_cost
     src/test/test_graph_search_unknown_cost.cpp
     src/hgp/graph_search.cpp)

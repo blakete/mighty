@@ -96,6 +96,7 @@ class MapUtil {
         // 2D ground robot map data
         map_2d_(other.map_2d_),
         heat_2d_(other.heat_2d_),
+        inflated_2d_(other.inflated_2d_),
         terrain_cost_(other.terrain_cost_),
         col_min_height_(other.col_min_height_),
         col_max_height_(other.col_max_height_),
@@ -1651,6 +1652,7 @@ class MapUtil {
 
   std::vector<int8_t> map_2d_;         // 2D occupancy grid (dimX * dimY)
   std::vector<float> heat_2d_;         // 2D static heat (dimX * dimY)
+  std::vector<uint8_t> inflated_2d_;   // 1 = OCCUPIED only because of inflateOccupied2D()
   std::vector<float> terrain_cost_;    // 2D terrain gradient cost (dimX * dimY)
   std::vector<float> col_min_height_;  // Per-column min occupied z in world coords
   std::vector<float> col_max_height_;  // Per-column max occupied z in world coords
@@ -1679,6 +1681,7 @@ class MapUtil {
 
     // Allocate arrays
     map_2d_.assign(size_2d, val_free_);
+    inflated_2d_.assign(size_2d, 0);
     col_min_height_.assign(size_2d, std::numeric_limits<float>::infinity());
     col_max_height_.assign(size_2d, -std::numeric_limits<float>::infinity());
     terrain_cost_.assign(size_2d, 0.0f);
@@ -1877,6 +1880,67 @@ class MapUtil {
     if (x < 0 || x >= dimX || y < 0 || y >= dimY) return true;
     return map_2d_[static_cast<size_t>(x) + static_cast<size_t>(dimX) * y] == val_unknown_;
   }
+  /** @brief True if the 2D cell is OCCUPIED only because of inflateOccupied2D() (not a raw
+   *  obstacle from the mapper). False out of bounds or before any inflation ran. */
+  bool is2DInflated(int x, int y) const {
+    if (!has_2d_map_) return false;
+    const int dimX = dim_(0);
+    const int dimY = dim_(1);
+    if (x < 0 || x >= dimX || y < 0 || y >= dimY) return false;
+    const size_t idx = static_cast<size_t>(x) + static_cast<size_t>(dimX) * y;
+    return idx < inflated_2d_.size() && inflated_2d_[idx] != 0;
+  }
+
+  /** @brief Hard-inflate the OCCUPIED cells of the 2D map by radius r_m (round footprint).
+   *
+   *  A cell becomes OCCUPIED when its centre is within r_m of the centre of a cell that was
+   *  OCCUPIED before this call (0.1 m at 0.1 m resolution = the 4 neighbours, 0.15 m = 3x3).
+   *  Dilation starts from that raw set only, so it never cascades. It overwrites FREE and
+   *  UNKNOWN alike and marks those cells in inflated_2d_. heat_2d_ is left alone (measured
+   *  from the raw obstacles; inflated cells are blocked anyway). r_m <= 0 only resets the mask.
+   *
+   *  Note buildMap2DFromOcc2D's inclusive source-cell range already makes raw obstacles one
+   *  cell larger on their -x/-y sides when the planner and mapper lattices align. */
+  void inflateOccupied2D(double r_m) {
+    if (!has_2d_map_) return;
+    const int dimX = dim_(0);
+    const int dimY = dim_(1);
+    const size_t n2d = static_cast<size_t>(dimX) * dimY;
+    inflated_2d_.assign(n2d, 0);
+    if (r_m <= 0.0 || map_2d_.size() != n2d) return;
+
+    const double r_cells = r_m / res_;
+    const int R = static_cast<int>(std::floor(r_cells + 1e-6));
+    if (R < 1) return;  // radius smaller than one cell: nothing to add
+    const double r2 = r_cells * r_cells + 1e-6;
+    std::vector<std::pair<int, int>> offsets;
+    for (int dy = -R; dy <= R; ++dy) {
+      for (int dx = -R; dx <= R; ++dx) {
+        if ((dx != 0 || dy != 0) && static_cast<double>(dx * dx + dy * dy) <= r2) {
+          offsets.emplace_back(dx, dy);
+        }
+      }
+    }
+
+    std::vector<size_t> raw_occ;
+    for (size_t i = 0; i < n2d; ++i) {
+      if (map_2d_[i] == val_occ_) raw_occ.push_back(i);
+    }
+    for (const size_t i : raw_occ) {
+      const int x = static_cast<int>(i % dimX);
+      const int y = static_cast<int>(i / dimX);
+      for (const auto& off : offsets) {
+        const int nx = x + off.first;
+        const int ny = y + off.second;
+        if (nx < 0 || nx >= dimX || ny < 0 || ny >= dimY) continue;
+        const size_t j = static_cast<size_t>(nx) + static_cast<size_t>(dimX) * ny;
+        if (map_2d_[j] != val_occ_) {
+          map_2d_[j] = val_occ_;
+          inflated_2d_[j] = 1;
+        }
+      }
+    }
+  }
 
   /** @brief Get terrain gradient cost at grid coordinates. */
   float getTerrainCost(int x, int y) const {
@@ -1916,8 +1980,9 @@ class MapUtil {
   /** @brief Get raw pointer to the 2D heat data for GraphSearch. */
   const float* get2DHeatData() const { return has_2d_map_ ? heat_2d_.data() : nullptr; }
 
-  /** @brief Free a cell and its surroundings in the 2D map. */
-  void free2DCell(int cx, int cy, float radius_m) {
+  /** @brief Free a cell and its surroundings in the 2D map. With keep_inflated, cells that
+   *  are OCCUPIED only through inflateOccupied2D() stay occupied. */
+  void free2DCell(int cx, int cy, float radius_m, bool keep_inflated = false) {
     if (!has_2d_map_) return;
     const int dimX = dim_(0);
     const int dimY = dim_(1);
@@ -1927,7 +1992,9 @@ class MapUtil {
         const int nx = cx + dx;
         const int ny = cy + dy;
         if (nx >= 0 && nx < dimX && ny >= 0 && ny < dimY) {
-          map_2d_[static_cast<size_t>(nx) + static_cast<size_t>(dimX) * ny] = val_free_;
+          const size_t idx = static_cast<size_t>(nx) + static_cast<size_t>(dimX) * ny;
+          if (keep_inflated && idx < inflated_2d_.size() && inflated_2d_[idx] != 0) continue;
+          map_2d_[idx] = val_free_;
         }
       }
     }
@@ -1985,6 +2052,7 @@ class MapUtil {
 
     // Start UNKNOWN: only cells the ESDF actually covers become free/occupied.
     map_2d_.assign(n2d, val_unknown_);
+    inflated_2d_.assign(n2d, 0);
     heat_2d_.assign(n2d, 0.0f);
 
     // A MIGHTY cell of width res_ centered at (wx, wy) intersects an obstacle
@@ -2043,6 +2111,7 @@ class MapUtil {
     // not cover it at all (MIGHTY's robot-centred window is larger than the
     // mapper's grid). Precedence: occupied > unknown > free.
     map_2d_.assign(n2d, val_unknown_);
+    inflated_2d_.assign(n2d, 0);
     heat_2d_.assign(n2d, 0.0f);
 
     // Compute distance field from the binary occupancy grid (truncated at d_safe)

@@ -187,6 +187,8 @@ mighty_node:
         smooth_iterations: 50                           # [-] Number of heat-aware Laplacian smoothing passes
         smooth_alpha: 0.3                               # [-] Smoothing relaxation factor (0=none, 1=aggressive)
         heat_cutoff_ratio: 0.0                          # [-] Cells with heat > ratio * Hmax are impassable (0=disabled)
+        occ2d_inflation_m: 0.0                          # [m] HARD inflation of occupied cells in the 2D planning map (round; 0.1 = 4 neighbours, 0.15 = 3x3; rover circumscribed radius ~0.39 m). Never cleared at start/goal: goal inside -> 'not reachable', start inside -> no plan. inflation_hgp does nothing in 2D mode. 0 = off
+        hgp_map_2d_viz_hz: 1.0                          # [Hz] Debug publish of the inflated HGP 2D map on <ns>/hgp_map_2d, only while subscribed (0 = off)
         los_cells: 3                                    # [cells] Line-of-sight inflation
         min_len: 0.0                                    # [m] Min segment length
         min_turn: 0.0                                   # [deg] Min turn angle

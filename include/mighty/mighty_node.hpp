@@ -133,6 +133,8 @@ class MIGHTY_NODE : public rclcpp::Node {
   // ONLY the HGP/A* planner via setOccGrid2D + updateMap2DOnly; never the frontier /
   // visited-map pipeline (which stays on the raw occ_2d_topic in occ2DCallback).
   void planningOcc2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
+  // Debug: publish the 2D map A* actually planned on (planning grid + occ2d_inflation_m).
+  void publishHgpMap2D();
   void goalReachedCheckCallback();
   void convertDynTrajMsg2DynTraj(const dynus_interfaces::msg::DynTraj& msg,
                                  std::shared_ptr<dynTraj>& traj, double current_time);
@@ -281,6 +283,10 @@ class MIGHTY_NODE : public rclcpp::Node {
   // planning_occ_2d_topic -> planning_occ_grid_2d_ : HGP/A* planner only.
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr sub_planning_occ_2d_;
   std::shared_ptr<const class OccGrid2D> planning_occ_grid_2d_;
+  std::string planning_occ_frame_id_;  // frame of the planning grid = frame of the HGP 2D map
+  // hgp_map_2d: debug view of the inflated HGP 2D map (hgp_map_2d_viz_hz, only while subscribed).
+  rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr pub_hgp_map_2d_;
+  rclcpp::TimerBase::SharedPtr timer_hgp_map_2d_;
 
   // Frontier exploration (ground robot only). Detector + persistent global
   // frontier database. See plan: /home/kkondo/.claude/plans/snazzy-moseying-donut.md

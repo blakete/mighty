@@ -330,6 +330,17 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
     RCLCPP_INFO(this->get_logger(),
                 "Occ2D planning: subscribed to planning_occ_2d_topic for HGP/A*");
 
+    // Debug view of the map A* actually plans on: the planning grid rasterised into the
+    // planner window, plus occ2d_inflation_m. Relative topic -> <ns>/hgp_map_2d. The snapshot
+    // is only taken while someone subscribes.
+    if (par_.hgp_map_2d_viz_hz > 0.0) {
+      pub_hgp_map_2d_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("hgp_map_2d", 1);
+      const auto viz_period = std::chrono::duration<double>(1.0 / par_.hgp_map_2d_viz_hz);
+      timer_hgp_map_2d_ = this->create_wall_timer(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(viz_period),
+          std::bind(&MIGHTY_NODE::publishHgpMap2D, this), this->cb_group_map_);
+    }
+
     // Frontier-based exploration. The detector + persistent manager run inside
     // occ2DCallback; the explore-select timer issues exploration goals through
     // the same pathway as a manual term_goal.
@@ -565,6 +576,8 @@ void MIGHTY_NODE::declareParameters() {
                           0.5);  // [m] minimum length between two waypoints after post processing
   this->declare_parameter("min_turn", 10.0);  // [deg] minimum turn angle after post processing
   this->declare_parameter("heat_cutoff_ratio", 0.5);
+  this->declare_parameter("occ2d_inflation_m", 0.0);  // [m] hard inflation of occupied 2D cells
+  this->declare_parameter("hgp_map_2d_viz_hz", 1.0);  // [Hz] debug publish of the HGP 2D map
   this->declare_parameter("disable_all_smoothing", false);
   this->declare_parameter("skip_path_smoothing", false);
   this->declare_parameter("smooth_iterations", 50);
@@ -915,6 +928,8 @@ void MIGHTY_NODE::setParameters() {
   par_.min_len = this->get_parameter("min_len").as_double();
   par_.min_turn = this->get_parameter("min_turn").as_double();
   par_.heat_cutoff_ratio = this->get_parameter("heat_cutoff_ratio").as_double();
+  par_.occ2d_inflation_m = this->get_parameter("occ2d_inflation_m").as_double();
+  par_.hgp_map_2d_viz_hz = this->get_parameter("hgp_map_2d_viz_hz").as_double();
   par_.disable_all_smoothing = this->get_parameter("disable_all_smoothing").as_bool();
   par_.skip_path_smoothing = this->get_parameter("skip_path_smoothing").as_bool();
   par_.smooth_iterations = this->get_parameter("smooth_iterations").as_int();
@@ -1233,6 +1248,8 @@ void MIGHTY_NODE::printParameters() {
               par_.global_planner_heuristic_weight);
   RCLCPP_INFO(this->get_logger(), "Factor HGP: %f", par_.factor_hgp);
   RCLCPP_INFO(this->get_logger(), "Inflation HGP: %f", par_.inflation_hgp);
+  RCLCPP_INFO(this->get_logger(), "Occ2D inflation: %f m", par_.occ2d_inflation_m);
+  RCLCPP_INFO(this->get_logger(), "HGP map 2D viz: %f Hz", par_.hgp_map_2d_viz_hz);
   RCLCPP_INFO(this->get_logger(), "X Min: %f", par_.x_min);
   RCLCPP_INFO(this->get_logger(), "X Max: %f", par_.x_max);
   RCLCPP_INFO(this->get_logger(), "Y Min: %f", par_.y_min);
@@ -3289,11 +3306,41 @@ void MIGHTY_NODE::planningOcc2DCallback(const nav_msgs::msg::OccupancyGrid::Shar
       }
     }
   }
+  planning_occ_frame_id_ = msg->header.frame_id;
   planning_occ_grid_2d_ = OccGrid2D::fromOccupancyGrid(*msg);
   mighty_ptr_->setOccGrid2D(planning_occ_grid_2d_);
   if (par_.use_hardware && par_.use_2d_planning && par_.vehicle_type == "ground_robot") {
     mighty_ptr_->updateMap2DOnly();
   }
+}
+
+void MIGHTY_NODE::publishHgpMap2D() {
+  if (!pub_hgp_map_2d_ || !mighty_ptr_) return;
+  const bool wanted = pub_hgp_map_2d_->get_subscription_count() > 0;
+  mighty_ptr_->setHgpMap2DSnapshotWanted(wanted);
+  if (!wanted) return;
+
+  HGPManager::Map2DSnapshot snap;
+  if (!mighty_ptr_->getHgpMap2DSnapshot(snap) || snap.dim_x <= 0 || snap.dim_y <= 0) return;
+
+  nav_msgs::msg::OccupancyGrid out;
+  out.header.stamp = this->now();
+  out.header.frame_id = planning_occ_frame_id_;
+  out.info.resolution = static_cast<float>(snap.res);
+  out.info.width = static_cast<uint32_t>(snap.dim_x);
+  out.info.height = static_cast<uint32_t>(snap.dim_y);
+  out.info.origin.position.x = snap.origin_x;
+  out.info.origin.position.y = snap.origin_y;
+  out.info.origin.position.z = occ2d_origin_z_.value_or(par_.expl_default_goal_z);
+  out.info.origin.orientation.w = 1.0;
+  // Same row-major x + dimX*y layout as nav_msgs/OccupancyGrid. Inflated cells get 60 so the
+  // band shows as its own shade next to raw obstacles (100) in RViz.
+  out.data.resize(snap.occ.size());
+  for (size_t i = 0; i < snap.occ.size(); ++i) {
+    const bool inflated = i < snap.inflated.size() && snap.inflated[i] != 0;
+    out.data[i] = inflated ? static_cast<int8_t>(60) : snap.occ[i];
+  }
+  pub_hgp_map_2d_->publish(out);
 }
 
 void MIGHTY_NODE::occ2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {

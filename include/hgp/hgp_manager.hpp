@@ -26,6 +26,7 @@
 #include <hgp/utils.hpp>
 
 // Other includes
+#include <atomic>
 #include <mutex>
 
 #include <Eigen/Dense>
@@ -387,6 +388,34 @@ class HGPManager {
     esdf_d_safe_astar_ = d_safe;
   }
 
+  /** @brief Copy of the 2D map A* planned on (after occ2d_inflation_m), for debug publishing. */
+  struct Map2DSnapshot {
+    int dim_x = 0;
+    int dim_y = 0;
+    double res = 0.0;
+    double origin_x = 0.0;  // world position of cell (0,0)'s corner
+    double origin_y = 0.0;
+    std::vector<int8_t> occ;        // -1 unknown, 0 free, 100 occupied (raw or inflated)
+    std::vector<uint8_t> inflated;  // 1 = occupied only because of inflation
+  };
+
+  /** @brief Ask solveHGP to (not) keep a snapshot of its 2D planning map. Cheap no-op when off. */
+  void setMap2DSnapshotWanted(bool wanted) { map2d_snapshot_wanted_.store(wanted); }
+
+  /** @brief Latest 2D planning-map snapshot. @return false if none has been taken yet. */
+  bool getMap2DSnapshot(Map2DSnapshot& out) {
+    std::lock_guard<std::mutex> lock(mtx_map2d_snapshot_);
+    if (map2d_snapshot_.occ.empty()) return false;
+    out = map2d_snapshot_;
+    return true;
+  }
+
+ private:
+  std::atomic<bool> map2d_snapshot_wanted_{false};
+  std::mutex mtx_map2d_snapshot_;
+  Map2DSnapshot map2d_snapshot_;
+
+ public:
   /** @brief Get terrain height at world coordinates (delegates to map_util).
    *  Thread-safe: uses planning map if available.
    */

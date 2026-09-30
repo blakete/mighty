@@ -361,7 +361,19 @@ bool HGPPlanner::plan(const Vecf<3>& start, const Vecf<3>& start_vel, const Vecf
       return false;
     }
     if (!map_util_->useSoftCostObstacles() && map_util_->is2DOccupied(sx, sy)) {
-      std::cout << bold << red << "Start is occupied in 2D map" << reset << std::endl;
+      // ERROR, not WARN: mighty_node runs with --log-level error. Throttled: this repeats on
+      // every replan cycle for as long as the rover stays there.
+      static rclcpp::Clock start_occ_log_clock(RCL_STEADY_TIME);
+      if (map_util_->is2DInflated(sx, sy)) {
+        RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("mighty.hgp"), start_occ_log_clock, 2000,
+                              "Cannot plan: start (%.2f,%.2f) is within occ2d_inflation_m=%.2f m "
+                              "of an obstacle. Move the rover or lower occ2d_inflation_m.",
+                              start(0), start(1), occ2d_inflation_m_);
+      } else {
+        RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("mighty.hgp"), start_occ_log_clock, 2000,
+                              "Cannot plan: start (%.2f,%.2f) is inside an obstacle in the 2D map",
+                              start(0), start(1));
+      }
       status_ = 1;
       return false;
     }
@@ -405,11 +417,22 @@ bool HGPPlanner::plan(const Vecf<3>& start, const Vecf<3>& start_vel, const Vecf
     // and A* prices the unknown leg via w_unknown. Throttled: this runs on every
     // replan cycle for as long as such a goal stands, and std::cout bypasses the
     // ROS logger (it flooded a pane with 6.5k copies on 2026-09-18).
+    // The goal is no longer freed before this check (hgp_manager.cpp solveHGP), so a goal in an
+    // obstacle or inside the inflation band fails here. ERROR, not WARN: mighty_node runs with
+    // --log-level error, which hid the old WARN.
     if (!map_util_->useSoftCostObstacles() && map_util_->is2DOccupied(gx, gy)) {
       static rclcpp::Clock goal_occ_log_clock(RCL_STEADY_TIME);
-      RCLCPP_WARN_THROTTLE(rclcpp::get_logger("mighty.hgp"), goal_occ_log_clock, 2000,
-                           "Goal is occupied in 2D map (goal=%.2f,%.2f cell=%d,%d)", goal(0),
-                           goal(1), gx, gy);
+      if (map_util_->is2DInflated(gx, gy)) {
+        RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("mighty.hgp"), goal_occ_log_clock, 2000,
+                              "Goal (%.2f,%.2f) is not reachable: within occ2d_inflation_m=%.2f m "
+                              "of an obstacle (cell=%d,%d)",
+                              goal(0), goal(1), occ2d_inflation_m_, gx, gy);
+      } else {
+        RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("mighty.hgp"), goal_occ_log_clock, 2000,
+                              "Goal (%.2f,%.2f) is not reachable: inside an obstacle in the 2D map "
+                              "(cell=%d,%d)",
+                              goal(0), goal(1), gx, gy);
+      }
       status_ = 2;
       return false;
     }

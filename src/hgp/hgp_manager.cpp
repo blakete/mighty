@@ -127,6 +127,7 @@ void HGPManager::setupHGPPlanner(const std::string& global_planner, bool global_
 
   // Enable 2D A* mode only when use_2d_planning is on
   planner_ptr_->set2DMode(is_ground_robot_ && par_.use_2d_planning);
+  planner_ptr_->setOcc2DInflation(par_.occ2d_inflation_m);  // for the start/goal messages
 
   // Pass ESDF grid for ground robot A* cost
   if (is_ground_robot_ && esdf_grid_) {
@@ -169,7 +170,8 @@ void HGPManager::freeStart(Vec3f& start, double factor) {
 
   // Also free in 2D map if ground robot mode
   if (is_ground_robot_ && map_util_for_planning_->has2DMap()) {
-    map_util_for_planning_->free2DCell(start_int(0), start_int(1), factor * res_);
+    map_util_for_planning_->free2DCell(start_int(0), start_int(1), factor * res_,
+                                       /*keep_inflated=*/true);
   }
 }
 
@@ -180,7 +182,8 @@ void HGPManager::freeGoal(Vec3f& goal, double factor) {
 
   // Also free in 2D map if ground robot mode
   if (is_ground_robot_ && map_util_for_planning_->has2DMap()) {
-    map_util_for_planning_->free2DCell(goal_int(0), goal_int(1), factor * res_);
+    map_util_for_planning_->free2DCell(goal_int(0), goal_int(1), factor * res_,
+                                       /*keep_inflated=*/true);
   }
 }
 
@@ -269,14 +272,33 @@ bool HGPManager::solveHGP(const Vec3f& start_sent, const Vec3f& start_vel, const
     start_for_search(2) = static_cast<float>(par_.default_goal_z);
     goal_for_search(2) = static_cast<float>(par_.default_goal_z);
 
-    // Free start/goal in the 2D map — ground points would otherwise block them.
     if (map_util_for_planning_->has2DMap()) {
+      // Free the start in the 2D map -- guards against mapper artefacts under the rover itself.
+      // Runs BEFORE inflation, so it only ever clears raw cells and cleared cells never inflate.
       Veci<3> si = map_util_for_planning_->floatToInt(start_for_search);
-      map_util_for_planning_->free2DCell(si(0), si(1), 2.0f * res_);
+      map_util_for_planning_->free2DCell(si(0), si(1), 2.0f * res_, /*keep_inflated=*/true);
       map_util_for_planning_->setFreeVoxelAndSurroundings(si, 2.0f * res_);
-      Veci<3> gi = map_util_for_planning_->floatToInt(goal_for_search);
-      map_util_for_planning_->free2DCell(gi(0), gi(1), 2.0f * res_);
-      map_util_for_planning_->setFreeVoxelAndSurroundings(gi, 2.0f * res_);
+      // The goal is deliberately NOT freed (2026-09-29): a goal inside an obstacle, or within
+      // occ2d_inflation_m of one, must fail as unreachable (HGPPlanner reports which) instead of
+      // having the obstacle carved away around it.
+
+      // Hard inflation of occupied space (occ2d_inflation_m; 0 = off, only resets the mask).
+      map_util_for_planning_->inflateOccupied2D(par_.occ2d_inflation_m);
+
+      if (map2d_snapshot_wanted_.load()) {
+        Map2DSnapshot snap;
+        const Veci<3> dim = map_util_for_planning_->getDim();
+        const Vecf<3> origin = map_util_for_planning_->getOrigin();
+        snap.dim_x = dim(0);
+        snap.dim_y = dim(1);
+        snap.res = map_util_for_planning_->getRes();
+        snap.origin_x = origin(0);
+        snap.origin_y = origin(1);
+        snap.occ = map_util_for_planning_->map_2d_;
+        snap.inflated = map_util_for_planning_->inflated_2d_;
+        std::lock_guard<std::mutex> lock(mtx_map2d_snapshot_);
+        map2d_snapshot_ = std::move(snap);
+      }
     }
   }
 

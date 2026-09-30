@@ -256,11 +256,14 @@ class HGPPlanner {
  public:
   /// Whether 2D ground robot planning mode is active.
   bool is_2d_mode_{false};
+  double occ2d_inflation_m_{0.0};
 
   /** @brief Enable or disable 2D ground robot planning mode.
    *  @param enabled True to restrict planning to 2D.
    */
   void set2DMode(bool enabled) { is_2d_mode_ = enabled; }
+  /** @brief occ2d_inflation_m in use (only for the start/goal failure messages). */
+  void setOcc2DInflation(double r_m) { occ2d_inflation_m_ = r_m; }
 
   /** @brief Set ESDF grid for distance-based A* cost (ground robot only). */
   void setEsdfGrid(std::shared_ptr<const EsdfGrid2D> grid, double weight, double d_safe) {

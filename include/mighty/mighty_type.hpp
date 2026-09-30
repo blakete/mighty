@@ -101,6 +101,13 @@ struct parameters {
   double min_turn;  // [deg] minimum turn angle after post processing
   double heat_cutoff_ratio{
       0.5};  // [-] Cells with heat > ratio * Hmax are impassable (0=disabled, 1=all blocked)
+  // [m] Hard inflation of OCCUPIED cells in the 2D planning map (ground robot, occ_2d mode).
+  // Round footprint: a cell is blocked when its centre is within this distance of an occupied
+  // cell's centre (0.1 = 4 neighbours, 0.15 = 3x3). Applied to the planning copy each replan,
+  // after the start clearing; never cleared at start or goal. 0 = off. inflation_hgp does NOT
+  // apply in 2D mode (it only inflates point-cloud voxels of the 3D map).
+  double occ2d_inflation_m{0.0};
+  double hgp_map_2d_viz_hz{1.0};  // [Hz] Debug publish rate of the inflated HGP 2D map (0 = off)
   bool disable_all_smoothing{false};  // [-] Disable all path smoothing (use raw A* output)
   bool skip_path_smoothing{false};    // [-] Skip LoS shortcutting, use Laplacian smoothing instead
   int smooth_iterations{50};          // [-] Number of heat-aware Laplacian smoothing passes

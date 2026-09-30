@@ -451,6 +451,9 @@ class MIGHTY {
    *  @return Shared pointer to VoxelMapUtil.
    */
   std::shared_ptr<mighty::VoxelMapUtil> getMapUtil() const { return hgp_manager_.map_util_; }
+  /** @brief Debug access to the 2D map A* last planned on (after occ2d_inflation_m). */
+  void setHgpMap2DSnapshotWanted(bool wanted) { hgp_manager_.setMap2DSnapshotWanted(wanted); }
+  bool getHgpMap2DSnapshot(HGPManager::Map2DSnapshot& out) { return hgp_manager_.getMap2DSnapshot(out); }
 
  private:
   // Parameters
