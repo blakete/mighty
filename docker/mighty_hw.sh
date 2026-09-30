@@ -182,10 +182,10 @@ start() {
     # race); the gate only waits for DLIO's odom->base_link.
     # map_fusion fuses it with the Orin's elevation map. Stage A (default): it
     # publishes fused/* next to the elevation grids MIGHTY uses. Stage B: set
-    # MAP_FUSION_OUTPUT_PREFIX= and ELEV_TOPIC_PREFIX=elev/ in /etc/rover/rover.env
-    # (and launch the Orin mapper with the elev/ rename) so MIGHTY gets fused grids.
+    # MAP_FUSION_STAGE=B in /etc/rover/rover.env (and launch the Orin mapper with
+    # ELEV_TOPIC_PREFIX=elev/) so MIGHTY gets the fused grids.
     local mapper_cmd='ros2 run mighty wait_for_tf.py $ROBOT_NAME/odom $ROBOT_NAME/base_link && ros2 launch global_mapper_ros global_mapper_node.launch.py hardware:=true ground_robot:=true quad:=$ROBOT_NAME global_frame:=$ROBOT_NAME/odom param_file:=hw_red_rover_fusion.yaml use_obstacle_tracker:=false depth_pointcloud_topic:=dlio/odom_node/pointcloud/deskewed pose_topic:=dlio/odom_node/pose occupancy_grid_topic:=voxel/occupancy_grid unknown_grid_topic:=voxel/unknown_grid frontier_grid_topic:=voxel/frontier_grid occ_2d_topic:=voxel/occ_2d_topic esdf_2d_topic:=voxel/esdf_2d_topic'
-    local fusion_cmd='ros2 launch map_fusion_ros map_fusion.launch.py quad:=$ROBOT_NAME output_prefix:=${MAP_FUSION_OUTPUT_PREFIX-fused/} elev_prefix:=${ELEV_TOPIC_PREFIX-}'
+    local fusion_cmd='ros2 launch map_fusion_ros map_fusion.launch.py quad:=$ROBOT_NAME stage:=${MAP_FUSION_STAGE:-A}'
 
     # titles[i] LABELS cmds[i] — the arrays are positional, so dropping an entry
     # from one and not the other silently mislabels every pane after it. The
