@@ -33,7 +33,9 @@
 ARG WS=/home/swarm/code/mighty_ws
 # Dependency repos from mighty.repos that the HARDWARE stack needs. Keys must
 # match mighty.repos entries; the filter below fails loudly on a typo.
-ARG HW_DEPS="dynus_interfaces mpc DecompROS2"
+# acl-mapping (2026-09-29): global_mapper (voxel map) + map_fusion_ros, the two
+# panes that fuse the voxel map with the Orin's elevation map (see mighty_hw.sh).
+ARG HW_DEPS="dynus_interfaces mpc DecompROS2 acl-mapping"
 
 # ---------- deps-src: pinned dependency sources ----------------------------------
 FROM ros:humble-ros-base AS deps-src
@@ -81,10 +83,14 @@ RUN apt-get update && rosdep update \
 # decomp_util first, on its own: decomp_rviz_plugins find_package()s it
 # without declaring the dependency in package.xml, so colcon cannot order
 # them in one invocation.
+# -DUSE_CUDA=OFF: global_mapper falls back to CPU when there is no nvcc, but
+# global_mapper_ros defines GLOBAL_MAPPER_HAVE_CUDA whenever USE_CUDA is ON,
+# which changes GlobalMapper's class layout between the library and the node.
+# The other packages ignore the variable.
 RUN source /opt/ros/humble/setup.bash \
  && colcon build --packages-select decomp_util --cmake-args -DCMAKE_BUILD_TYPE=Release \
  && source install/setup.bash \
- && colcon build --packages-skip decomp_util --cmake-args -DCMAKE_BUILD_TYPE=Release \
+ && colcon build --packages-skip decomp_util --cmake-args -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=OFF \
  && rm -rf build log
 
 # ---------- mighty-build: this checkout on top of the deps -----------------------

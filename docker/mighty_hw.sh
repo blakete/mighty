@@ -19,8 +19,10 @@
 # copy, see compose.hw.yaml): edit the YAML, Ctrl-C / Up / Enter the pane. No
 # rebuild. Code, launch files and mpc.yaml are baked and need one.
 #
-# FOUR panes, always:
-#   MIGHTY planner | convert_odom_to_state | MPC | RViz 2D goal
+# SIX panes, always:
+#   MIGHTY planner | convert_odom_to_state | MPC | RViz 2D goal | global_mapper | map_fusion
+# The last two build the 2D grids MIGHTY plans on (voxel map + fusion with the Orin's
+# elevation map; see the mapper_cmd / fusion_cmd comment below).
 # The first three are onboard_mighty.launch.py's three nodes, one pane each via
 # its only_nodes:= filter, so Ctrl-C -> Up -> Enter restarts ONE node instead of
 # all three. The launch file still computes every parameter (mighty_node's are a
@@ -37,8 +39,9 @@
 #   drive.service    zenoh router on :7447 (hard prereq — start fails fast without it)
 #   sensors.service  livox + D455 + the base_link->lidar static TF
 #   dlio.service     DLIO odometry, the seed pose and tf map->odom (dlio_ws)
-#   OX08 Orin        elevation_mapping_cupy -> <ns>/occ_2d_topic, <ns>/esdf_2d_topic
-#                    (without it MIGHTY runs but never plans: no occupancy grid)
+#   OX0N Orin        elevation_mapping_cupy -> <ns>/occ_2d_topic (+ planning/esdf), or
+#                    <ns>/elev/* in map-fusion Stage B (without it MIGHTY runs but never
+#                    plans: no occupancy grid; map_fusion publishes nothing without it)
 # MIGHTY consumes <ns>/dlio/odom_node/odom + map->odom over zenoh and does not
 # care which container publishes them. The old --odom-type dlio / dlio_in_mocap /
 # mocap modes, which ran DLIO or mocap TFs in here, went away with the DLIO layer
@@ -171,18 +174,33 @@ start() {
     local tf_gate='ros2 run mighty wait_for_tf.py $ROBOT_NAME/map $ROBOT_NAME/odom && '
     local launch_base='ros2 launch mighty onboard_mighty.launch.py x:=0.0 y:=0.0 z:=0.0 yaw:=0.0 namespace:=$ROBOT_NAME use_hardware:=true use_onboard_localization:=true robot_type:=red_rover depth_camera_name:=d455'
 
+    # Map fusion (2026-09-29, acl-mapping feature/map-fusion): global_mapper builds a
+    # 0.10 m voxel map from the DLIO deskewed cloud, published ONLY under voxel/* —
+    # mighty_node subscribes the default occupancy_grid / unknown_grid / occ_2d_topic
+    # names in hardware mode, so none of them may be left at their defaults.
+    # global_frame is <ns>/odom (the elevation map's frame; no map->odom static-TF
+    # race); the gate only waits for DLIO's odom->base_link.
+    # map_fusion fuses it with the Orin's elevation map. Stage A (default): it
+    # publishes fused/* next to the elevation grids MIGHTY uses. Stage B: set
+    # MAP_FUSION_OUTPUT_PREFIX= and ELEV_TOPIC_PREFIX=elev/ in /etc/rover/rover.env
+    # (and launch the Orin mapper with the elev/ rename) so MIGHTY gets fused grids.
+    local mapper_cmd='ros2 run mighty wait_for_tf.py $ROBOT_NAME/odom $ROBOT_NAME/base_link && ros2 launch global_mapper_ros global_mapper_node.launch.py hardware:=true ground_robot:=true quad:=$ROBOT_NAME global_frame:=$ROBOT_NAME/odom param_file:=hw_red_rover_fusion.yaml use_obstacle_tracker:=false depth_pointcloud_topic:=dlio/odom_node/pointcloud/deskewed pose_topic:=dlio/odom_node/pose occupancy_grid_topic:=voxel/occupancy_grid unknown_grid_topic:=voxel/unknown_grid frontier_grid_topic:=voxel/frontier_grid occ_2d_topic:=voxel/occ_2d_topic esdf_2d_topic:=voxel/esdf_2d_topic'
+    local fusion_cmd='ros2 launch map_fusion_ros map_fusion.launch.py quad:=$ROBOT_NAME output_prefix:=${MAP_FUSION_OUTPUT_PREFIX-fused/} elev_prefix:=${ELEV_TOPIC_PREFIX-}'
+
     # titles[i] LABELS cmds[i] — the arrays are positional, so dropping an entry
     # from one and not the other silently mislabels every pane after it. The
     # length check turns any future mismatch into a startup error.
     # NOTE: restarting the MPC pane is not instant — MPCNode builds an
     # IPOPT/collocation NLP before its first control tick.
     local -a titles cmds
-    titles=('MIGHTY planner' 'convert_odom_to_state' 'MPC' 'RViz 2D goal')
+    titles=('MIGHTY planner' 'convert_odom_to_state' 'MPC' 'RViz 2D goal' 'global_mapper (voxel/*)' 'map_fusion')
     cmds=(
         "$(dx "${tf_gate}${launch_base} only_nodes:=mighty_node")"
         "$(dx "${launch_base} only_nodes:=convert_odom_to_state")"
         "$(dx "${tf_gate}${launch_base} only_nodes:=mpc")"
         "$(dx 'ros2 run mighty repub_rviz_2Dgoal.py')"
+        "$(dx "${mapper_cmd}")"
+        "$(dx "${fusion_cmd}")"
     )
     if (( ${#titles[@]} != ${#cmds[@]} )); then
         echo "[mighty_hw] BUG: ${#titles[@]} pane titles but ${#cmds[@]} commands —" \
