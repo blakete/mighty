@@ -75,6 +75,16 @@ inline bool GraphSearch::isUnknown(int x, int y, int z) const {
          cMap_[coordToId(x, y, z)] == val_unknown_;
 }
 
+// Real obstacles are never exempt, and a goal inside the band is still rejected
+// by HGPPlanner::plan() before the search runs, so this only lets the path
+// leave the band -- it cannot end in it.
+inline bool GraphSearch::isStartEscapeCell(int x, int y) const {
+  if (start_escape_r2_ <= 0.0 || !map_util_ || !map_util_->is2DInflatedOnly(x, y)) return false;
+  const double dx = x - xStart_;
+  const double dy = y - yStart_;
+  return dx * dx + dy * dy <= start_escape_r2_;
+}
+
 inline double GraphSearch::getHeur(int x, int y, int z) const {
   return eps_ * std::sqrt((x - xGoal_) * (x - xGoal_) + (y - yGoal_) * (y - yGoal_) +
                           (z - zGoal_) * (z - zGoal_));
@@ -97,6 +107,16 @@ bool GraphSearch::plan(int xStart, int yStart, int zStart, int xGoal, int yGoal,
   xGoal_ = xGoal;
   yGoal_ = yGoal;
   zGoal_ = zGoal;
+
+  // Start exemption radius = the 2D inflation radius (2D mode only).
+  xStart_ = xStart;
+  yStart_ = yStart;
+  start_escape_r2_ = 0.0;
+  if (zDim_ == 1 && map_util_ && map_util_->has2DMap() && map_util_->getRes() > 0.0) {
+    const double r_cells = map_util_->getInflation2D() / map_util_->getRes();
+    if (r_cells > 0.0) start_escape_r2_ = r_cells * r_cells + 1e-6;
+  }
+
   // Set start node
 
   int start_id = coordToId(xStart, yStart, zStart);
@@ -607,17 +627,19 @@ void GraphSearch::getSucc(const StatePtr& curr, std::vector<int>& succ_ids,
     // Occupancy check
     if (map_util_ && map_util_->has2DMap() && zDim_ == 1 && esdf_grid_) {
       // ESDF mode: only check the 2D ESDF-derived map (skip inflated 3D grid)
-      if (map_util_->is2DOccupied(new_x, new_y)) {  // unknown passes, priced below
+      // (unknown passes, priced below)
+      if (map_util_->is2DOccupied(new_x, new_y) && !isStartEscapeCell(new_x, new_y)) {
         continue;
       }
     } else {
       // Standard mode: check 3D grid + 2D projection
-      if (isOccupied(new_x, new_y, new_z)) {
+      if (isOccupied(new_x, new_y, new_z) && !isStartEscapeCell(new_x, new_y)) {
         if (!map_util_ || !map_util_->useSoftCostObstacles()) {
           continue;
         }
       }
-      if (map_util_ && map_util_->has2DMap() && map_util_->is2DOccupied(new_x, new_y)) {
+      if (map_util_ && map_util_->has2DMap() && map_util_->is2DOccupied(new_x, new_y) &&
+          !isStartEscapeCell(new_x, new_y)) {
         continue;
       }
     }
@@ -632,8 +654,8 @@ void GraphSearch::getSucc(const StatePtr& curr, std::vector<int>& succ_ids,
       const int side2_x = curr->x;
       const int side2_y = curr->y + d[1];
       if (map_util_ && map_util_->has2DMap()) {
-        if (map_util_->is2DOccupied(side1_x, side1_y) ||
-            map_util_->is2DOccupied(side2_x, side2_y)) {
+        if ((map_util_->is2DOccupied(side1_x, side1_y) && !isStartEscapeCell(side1_x, side1_y)) ||
+            (map_util_->is2DOccupied(side2_x, side2_y) && !isStartEscapeCell(side2_x, side2_y))) {
           continue;
         }
       }

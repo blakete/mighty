@@ -151,6 +151,26 @@ class HGPManager {
    */
   bool checkIfPointOccupied2D(const Vec3f& point);
 
+  /** @brief True if no OCCUPIED 2D cell lies within `clearance_m` of `point`.
+   *  Unlike checkIfPointOccupied2D(), this checks a disk around the point, not
+   *  just the cell it falls in -- used by goal relocation (sanitizeTerminalGoal2D)
+   *  to guarantee real standoff instead of merely "not inside an obstacle".
+   *  @param point Query position in world coordinates.
+   *  @param clearance_m Required clearance in meters.
+   *  @return True if clear (or no 2D map yet / clearance_m <= 0).
+   */
+  bool isClearOfOccupied2D(const Vec3f& point, double clearance_m);
+
+  /** @brief Copy of the 2D planning map (the base map A* copies each cycle, before
+   *  the per-plan start/goal boxes are cleared), taken under the map lock.
+   *  @param values Cell values, row-major x + dimX * y: 0 free, 100 occupied, -1 unknown.
+   *  @param inflated 1 where the cell is occupied only because of inflation.
+   *  @param origin World position of the window's lower-left cell corner.
+   *  @return false if no 2D map has been built yet.
+   */
+  bool get2DPlanningMapSnapshot(std::vector<int8_t>& values, std::vector<uint8_t>& inflated,
+                                int& dimX, int& dimY, double& res, Vec3f& origin);
+
   /** @brief Run the HGP global planner from start to goal.
    *  @param start_sent Start position in world coordinates.
    *  @param start_vel Current velocity at start.

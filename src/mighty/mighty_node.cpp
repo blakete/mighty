@@ -125,6 +125,10 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
       this->create_publisher<sensor_msgs::msg::PointCloud2>("heat_cloud", viz_qos);
   pub_ground_2d_occ_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
       "ground_2d_occupied", viz_qos);
+  // Reliable + transient local so RViz's Map display (whose default QoS asks for
+  // transient local) connects and gets the latest map as soon as it subscribes.
+  pub_planning_map_2d_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>(
+      "planning_map_2d", rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local());
   pub_ground_2d_heat_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
       "ground_2d_heat", viz_qos);
   pub_free_map_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
@@ -547,12 +551,15 @@ void MIGHTY_NODE::declareParameters() {
   this->declare_parameter("hgp_timeout_duration_ms", 1000);
   this->declare_parameter("max_expand", 10000);
   this->declare_parameter("hgp_stop_distance_m", 0.0);
+  this->declare_parameter("inflation_2d_m", 0.0);
+  this->declare_parameter("unknown_clearance_2d_m", 0.0);
   this->declare_parameter("trim_min_unknown_run_cells", 3);
   this->declare_parameter("use_free_start", false);
   this->declare_parameter("free_start_factor", 1.0);
   this->declare_parameter("use_free_goal", false);
   this->declare_parameter("free_goal_factor", 1.0);
   this->declare_parameter("relocate_occupied_goal", true);
+  this->declare_parameter("goal_relocation_clearance_m", 1.0);
   this->declare_parameter("max_dist_vertexes", 5.0);
   this->declare_parameter("w_unknown", 1.0);
   this->declare_parameter("w_align", 60.0);
@@ -895,6 +902,8 @@ void MIGHTY_NODE::setParameters() {
   par_.hgp_timeout_duration_ms = this->get_parameter("hgp_timeout_duration_ms").as_int();
   par_.max_expand = this->get_parameter("max_expand").as_int();
   par_.hgp_stop_distance_m = this->get_parameter("hgp_stop_distance_m").as_double();
+  par_.inflation_2d_m = this->get_parameter("inflation_2d_m").as_double();
+  par_.unknown_clearance_2d_m = this->get_parameter("unknown_clearance_2d_m").as_double();
   par_.trim_min_unknown_run_cells =
       static_cast<int>(this->get_parameter("trim_min_unknown_run_cells").as_int());
   par_.max_num_expansion = par_.max_expand;
@@ -904,6 +913,8 @@ void MIGHTY_NODE::setParameters() {
   par_.use_free_goal = this->get_parameter("use_free_goal").as_bool();
   par_.free_goal_factor = this->get_parameter("free_goal_factor").as_double();
   par_.relocate_occupied_goal = this->get_parameter("relocate_occupied_goal").as_bool();
+  par_.goal_relocation_clearance_m =
+      this->get_parameter("goal_relocation_clearance_m").as_double();
   par_.max_dist_vertexes = this->get_parameter("max_dist_vertexes").as_double();
   par_.w_unknown = this->get_parameter("w_unknown").as_double();
   par_.w_align = this->get_parameter("w_align").as_double();
@@ -1245,6 +1256,10 @@ void MIGHTY_NODE::printParameters() {
   RCLCPP_INFO(this->get_logger(), "Use Free Goal?: %d", par_.use_free_goal);
   RCLCPP_INFO(this->get_logger(), "Free Goal Factor: %f", par_.free_goal_factor);
   RCLCPP_INFO(this->get_logger(), "Relocate Occupied Goal?: %d", par_.relocate_occupied_goal);
+  RCLCPP_INFO(this->get_logger(), "Goal Relocation Clearance: %f m",
+              par_.goal_relocation_clearance_m);
+  RCLCPP_INFO(this->get_logger(), "2D Inflation: %f m, Unknown Clearance 2D: %f m",
+              par_.inflation_2d_m, par_.unknown_clearance_2d_m);
   RCLCPP_INFO(this->get_logger(), "max_dist_vertexes: %f", par_.max_dist_vertexes);
   RCLCPP_INFO(this->get_logger(), "w_unknown: %f", par_.w_unknown);
   RCLCPP_INFO(this->get_logger(), "trim_min_unknown_run_cells: %d", par_.trim_min_unknown_run_cells);
@@ -3300,7 +3315,36 @@ void MIGHTY_NODE::planningOcc2DCallback(const nav_msgs::msg::OccupancyGrid::Shar
   mighty_ptr_->setOccGrid2D(planning_occ_grid_2d_);
   if (par_.use_hardware && par_.use_2d_planning && par_.vehicle_type == "ground_robot") {
     mighty_ptr_->updateMap2DOnly();
+    publishPlanningMap2D(msg->header, msg->info.origin.position.z);
   }
+}
+
+void MIGHTY_NODE::publishPlanningMap2D(const std_msgs::msg::Header& source_header, double z) {
+  std::vector<int8_t> values;
+  std::vector<uint8_t> inflated;
+  int dimX = 0, dimY = 0;
+  double res = 0.0;
+  Vec3f origin;
+  if (!mighty_ptr_->get2DPlanningMapSnapshot(values, inflated, dimX, dimY, res, origin)) return;
+
+  nav_msgs::msg::OccupancyGrid grid;
+  grid.header = source_header;
+  if (grid.header.frame_id.empty()) grid.header.frame_id = par_.map_frame_id;
+  grid.info.map_load_time = source_header.stamp;
+  grid.info.resolution = static_cast<float>(res);
+  grid.info.width = static_cast<uint32_t>(dimX);
+  grid.info.height = static_cast<uint32_t>(dimY);
+  grid.info.origin.position.x = origin(0);
+  grid.info.origin.position.y = origin(1);
+  grid.info.origin.position.z = z;
+  grid.info.origin.orientation.w = 1.0;
+  grid.data.resize(values.size());
+  // 99 (not 100) marks the inflation band so RViz's "costmap" color scheme
+  // shows it apart from real obstacles; with the "map" scheme both look black.
+  for (size_t i = 0; i < values.size(); ++i) {
+    grid.data[i] = inflated[i] ? int8_t(99) : values[i];
+  }
+  pub_planning_map_2d_->publish(grid);
 }
 
 void MIGHTY_NODE::occ2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {

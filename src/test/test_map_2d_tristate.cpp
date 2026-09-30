@@ -108,3 +108,76 @@ TEST(Map2DTristate, PrecedenceOnMixedOverlap) {
   EXPECT_EQ(mu->get2DOccupancy(24, 25), 0) << "neighbour of the unknown block stays free";
   EXPECT_EQ(mu->get2DOccupancy(30, 30), 100) << "any occupied -> occupied";
 }
+
+namespace {
+
+// 40 x 40 source grid covering planner cells [30, 70) with one occupied cell at
+// planner (45,45) and a 3x3 unknown pocket at planner (39..41, 39..41).
+std::shared_ptr<const OccGrid2D> OneObstacleGrid(mighty::VoxelMapUtil& mu) {
+  const auto o = mu.getOrigin();
+  const int W = 40, H = 40, OFF = 30;
+  std::vector<int8_t> data(W * H, 0);
+  data[15 * W + 15] = 100;
+  for (int iy = 9; iy <= 11; ++iy)
+    for (int ix = 9; ix <= 11; ++ix) data[iy * W + ix] = -1;
+  return OccGrid2D::fromTristate(W, H, RES, o(0) + OFF * RES, o(1) + OFF * RES, data);
+}
+
+}  // namespace
+
+TEST(Map2DInflation, ZeroRadiusLeavesMapUnchanged) {
+  auto mu = MakeWindow();
+  mu->setInflation2D(0.0f);
+  mu->buildMap2DFromOcc2D(*OneObstacleGrid(*mu), 0.5, 100.0);
+  EXPECT_TRUE(mu->is2DOccupied(45, 45));
+  EXPECT_FALSE(mu->is2DOccupied(46, 45));
+  EXPECT_FALSE(mu->is2DInflatedOnly(46, 45));
+}
+
+TEST(Map2DInflation, DiskIsExactAndMarkedInflatedOnly) {
+  auto mu = MakeWindow();
+  mu->setInflation2D(0.3f);  // 3 cells
+  mu->buildMap2DFromOcc2D(*OneObstacleGrid(*mu), 0.5, 100.0);
+
+  // On aligned lattices the builder turns the one source obstacle into the 2x2
+  // planner block (44..45, 44..45); inflation is measured from that block.
+  for (const auto& c : std::vector<std::pair<int, int>>{{44, 44}, {45, 45}}) {
+    EXPECT_TRUE(mu->is2DOccupied(c.first, c.second)) << c.first << "," << c.second;
+    EXPECT_FALSE(mu->is2DInflatedOnly(c.first, c.second)) << c.first << "," << c.second;
+  }
+  // centre distance <= 3 cells from the block: inflated
+  for (const auto& c : std::vector<std::pair<int, int>>{{46, 45}, {48, 45}, {45, 48}, {47, 47}, {41, 44}}) {
+    EXPECT_TRUE(mu->is2DOccupied(c.first, c.second)) << c.first << "," << c.second;
+    EXPECT_TRUE(mu->is2DInflatedOnly(c.first, c.second)) << c.first << "," << c.second;
+  }
+  // centre distance > 3 cells: untouched ((48,46) is sqrt(10) from (45,45))
+  for (const auto& c : std::vector<std::pair<int, int>>{{49, 45}, {48, 46}, {48, 48}, {40, 44}}) {
+    EXPECT_FALSE(mu->is2DOccupied(c.first, c.second)) << c.first << "," << c.second;
+    EXPECT_FALSE(mu->is2DInflatedOnly(c.first, c.second)) << c.first << "," << c.second;
+  }
+  // the unknown pocket is more than 3 cells away and is not a seed itself
+  EXPECT_TRUE(mu->is2DUnknown(40, 40));
+  EXPECT_FALSE(mu->is2DOccupied(38, 40));
+}
+
+TEST(Map2DInflation, RecordsMapperCoverage) {
+  auto mu = MakeWindow();
+  mu->buildMap2DFromOcc2D(*OneObstacleGrid(*mu), 0.5, 100.0);
+  const auto o = mu->getOrigin();
+  double x0, y0, x1, y1;
+  ASSERT_TRUE(mu->get2DCoverage(x0, y0, x1, y1));
+  EXPECT_NEAR(x0, o(0) + 30 * RES, 1e-6);
+  EXPECT_NEAR(y0, o(1) + 30 * RES, 1e-6);
+  EXPECT_NEAR(x1, o(0) + 70 * RES, 1e-6);
+  EXPECT_NEAR(y1, o(1) + 70 * RES, 1e-6);
+}
+
+TEST(Map2DInflation, GoalBoxKeepsInflation) {
+  auto mu = MakeWindow();
+  mu->setInflation2D(0.3f);
+  mu->buildMap2DFromOcc2D(*OneObstacleGrid(*mu), 0.5, 100.0);
+  mu->free2DCell(47, 45, 0.1f, /*keep_inflation=*/true);
+  EXPECT_TRUE(mu->is2DOccupied(47, 45)) << "inflation must survive the goal box";
+  mu->free2DCell(47, 45, 0.1f);
+  EXPECT_FALSE(mu->is2DOccupied(47, 45)) << "default free2DCell still clears everything";
+}

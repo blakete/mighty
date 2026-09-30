@@ -183,6 +183,11 @@ class MIGHTY_NODE : public rclcpp::Node {
   void publishCps();
   void publishHeatCloud();
   void publishGround2DOccupied();
+  /** @brief Publish MIGHTY's inflated 2D planning map as an OccupancyGrid on
+   *  planning_map_2d, stamped and framed like the planning_occ_2d_topic message it
+   *  was built from so the two overlay 1:1. Values: 100 real obstacle,
+   *  99 inflation band, 0 free, -1 unknown. */
+  void publishPlanningMap2D(const std_msgs::msg::Header& source_header, double z);
   void publishGround2DHeat();
   void publishStaticPushPoints();
   void publishLocalGlobalPath();
@@ -225,6 +230,7 @@ class MIGHTY_NODE : public rclcpp::Node {
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_unknown_map_marker_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_heat_cloud_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_ground_2d_occ_;
+  rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr pub_planning_map_2d_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_ground_2d_heat_;
   rclcpp::Publisher<decomp_ros_msgs::msg::PolyhedronArray>::SharedPtr pub_poly_whole_;
   rclcpp::Publisher<decomp_ros_msgs::msg::PolyhedronArray>::SharedPtr pub_poly_safe_;

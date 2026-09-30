@@ -91,8 +91,10 @@ mighty_node:
         inflation_hgp: 0.3                              # [m] Static obstacle inflation (0 when using ESDF/occ_2d)
         hgp_timeout_duration_ms: 10000                  # [ms] Global planner timeout
         max_expand: 1000000                               # [-] Max A* node expansions
-        hgp_stop_distance_m: 0.6                          # [m] Safety stand-off on A* FALLBACK (best_node) paths: back off the path tail so the last WAYPOINT (robot center target) keeps this clearance from the nearest occupied cell (cell-center to cell-center, quantized up by ceil(dist/res)). Excludes footprint -> body clearance ~= this - robot_radius. 0 = disabled.
+        hgp_stop_distance_m: 0.0                          # [m] (0 while inflation_2d_m > 0: its check sees inflated cells too, so it would back off a second time from the band edge; was 0.6) Safety stand-off on A* FALLBACK (best_node) paths: back off the path tail so the last WAYPOINT (robot center target) keeps this clearance from the nearest occupied cell (cell-center to cell-center, quantized up by ceil(dist/res)). Excludes footprint -> body clearance ~= this - robot_radius. 0 = disabled.
         trim_min_unknown_run_cells: 3                   # [cells] The EXECUTED path is cut where it enters a run of this many consecutive UNKNOWN cells (edge of observed space); shorter unknown pockets (the mapper leaves <=4-cell holes as -1 on purpose) are driven through. The global path still reaches the goal through unknown, priced by w_unknown.
+        inflation_2d_m: 0.5                             # [m] Inflate the 2D planning map (built from planning_occ_2d_topic, where the mapper already marks large unexplored regions OCCUPIED): every cell within this distance of an occupied cell (cell-centre to cell-centre) is blocked for A*, the start/goal checks, goal relocation and the path trims. Inflation cells within this radius of the robot stay passable so it can plan its way out of the band. 0 = off. View it on /RR08/planning_map_2d (Map display, costmap color scheme: band = 99 cyan, obstacles = 100 magenta).
+        unknown_clearance_2d_m: 0.5                     # [m] Option B for the unknown ring outside the mapper's grid: A* may still plan through the ring, but the path handed to L-BFGS stops this far inside the mapper grid's edge (original_hgp_path_marker still shows the full route). 0 = off.
 
         # --- Local Planning ---
         horizon: 30.0                                   # [m] Planning horizon
@@ -153,10 +155,12 @@ mighty_node:
         free_start_factor: 1.0                          # [-] Radius factor for start freeing
         use_free_goal: false                            # [-] Free the goal voxel if occupied
         free_goal_factor: 2.0                           # [-] Radius factor for goal freeing
+        relocate_occupied_goal: true                    # [-] If a clicked/commanded goal lands in an occupied or inflated 2D cell, relocate it to the nearest cell outside the band (see sanitizeTerminalGoal2D)
+        goal_relocation_clearance_m: 0.0                # [m] Extra standoff beyond the inflation band for a relocated goal (disk check). 0 = the goal lands on the nearest cell outside the band, which already has inflation_2d_m clearance.
         global_planner_heuristic_weight: 1.0             # [-] A* heuristic weight (higher = greedier)
-        heat_weight: 5.0                                # [-] Overall heat map weight in A* cost
+        heat_weight: 500.0 #5.0                                # [-] Overall heat map weight in A* cost
         max_dist_vertexes: 0.5                          # [m] Max distance between path vertices
-        w_unknown: 0.0 #2.0                                  # [-] Extra cost per A* step through an UNKNOWN 2D cell, in multiples of the geometric step (2.0 => an unknown step costs 3x a free one). Live in 2D mode since the 2026-09 tri-state planning map: window cells the mapper does not cover, and mapper -1 cells, are UNKNOWN (never free). Raise to 3.0 if the path still flips between exits.
+        w_unknown: 2.0                                  # [-] Extra cost per A* step through an UNKNOWN 2D cell, in multiples of the geometric step (2.0 => an unknown step costs 3x a free one). Live in 2D mode since the 2026-09 tri-state planning map: window cells the mapper does not cover, and mapper -1 cells, are UNKNOWN (never free). Raise to 3.0 if the path still flips between exits.
         w_align: 0.0                                    # [-] Cost weight for alignment with initial velocity
         decay_len_cells: 100.0                          # [-] Decay length for alignment cost
         w_side: 0.0                                     # [-] Cost weight for lateral tie-breaking

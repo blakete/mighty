@@ -490,6 +490,12 @@ class MIGHTY {
    */
   std::shared_ptr<mighty::VoxelMapUtil> getMapUtil() const { return hgp_manager_.map_util_; }
 
+  /** @brief Locked copy of the 2D planning map; see HGPManager::get2DPlanningMapSnapshot. */
+  bool get2DPlanningMapSnapshot(std::vector<int8_t>& values, std::vector<uint8_t>& inflated,
+                                int& dimX, int& dimY, double& res, Vec3f& origin) {
+    return hgp_manager_.get2DPlanningMapSnapshot(values, inflated, dimX, dimY, res, origin);
+  }
+
  private:
   // Parameters
   parameters par_;          // Parameters of the planner

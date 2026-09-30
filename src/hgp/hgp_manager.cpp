@@ -85,6 +85,9 @@ void HGPManager::setParameters(const parameters& par) {
 
   // Soft-cost obstacle mode
   map_util_->setSoftCostObstacles(par.use_soft_cost_obstacles, par.obstacle_soft_cost);
+
+  // 2D planning-map inflation (ground robot); 0 disables it.
+  map_util_->setInflation2D(static_cast<float>(par.inflation_2d_m));
 }
 
 // ----------------------------------------------------------------------------
@@ -222,6 +225,56 @@ bool HGPManager::checkIfPointOccupied2D(const Vec3f& point) {
   return mu->is2DOccupied(x, y);
 }
 
+bool HGPManager::isClearOfOccupied2D(const Vec3f& point, double clearance_m) {
+  // Locked: see checkIfPointOccupied() above -- same race applies here.
+  std::lock_guard<std::mutex> lock(mtx_map_util_);
+  const auto& mu = map_util_for_planning_ ? map_util_for_planning_ : map_util_;
+  if (!mu || !mu->has2DMap()) return true;
+
+  const double res = mu->getRes();
+  if (res <= 0.0 || clearance_m <= 0.0) return true;
+
+  const auto origin = mu->getOrigin();
+  const int cx = static_cast<int>(std::floor((point.x() - origin(0)) / res));
+  const int cy = static_cast<int>(std::floor((point.y() - origin(1)) / res));
+
+  // Disk scan in cell units (matches the pattern already used for
+  // hgp_stop_distance_m's tooCloseToObstacle in solveHGP() below), but via
+  // is2DOccupied() specifically -- NOT get2DOccupancy(...) != 0, which also
+  // catches UNKNOWN (val_unknown_ == -1) and would make this reject goals
+  // that are merely near unmapped space rather than a real obstacle.
+  const int r = std::max(1, static_cast<int>(std::ceil(clearance_m / res)));
+  const int r2 = r * r;
+  for (int dy = -r; dy <= r; ++dy) {
+    for (int dx = -r; dx <= r; ++dx) {
+      if (dx * dx + dy * dy > r2) continue;
+      if (mu->is2DOccupied(cx + dx, cy + dy)) return false;
+    }
+  }
+  return true;
+}
+
+bool HGPManager::get2DPlanningMapSnapshot(std::vector<int8_t>& values,
+                                          std::vector<uint8_t>& inflated, int& dimX, int& dimY,
+                                          double& res, Vec3f& origin) {
+  std::lock_guard<std::mutex> lock(mtx_map_util_);
+  if (!map_util_ || !map_util_->has2DMap()) return false;
+  map_util_->get2DDimensions(dimX, dimY);
+  res = map_util_->getRes();
+  origin = map_util_->getOrigin();
+  const size_t n = static_cast<size_t>(dimX) * dimY;
+  values.resize(n);
+  inflated.resize(n);
+  for (int y = 0; y < dimY; ++y) {
+    for (int x = 0; x < dimX; ++x) {
+      const size_t i = static_cast<size_t>(x) + static_cast<size_t>(dimX) * y;
+      values[i] = map_util_->get2DOccupancy(x, y);
+      inflated[i] = map_util_->is2DInflatedOnly(x, y) ? 1 : 0;
+    }
+  }
+  return true;
+}
+
 // Sample along [p0, p1] at a safe step to ensure we don't skip thin obstacles.
 // Uses the occupancy from the (already inflated) planning map.
 inline bool isSegmentFree(const mighty::VoxelMapUtil& map, const Vec3f& p0, const Vec3f& p1,
@@ -296,12 +349,16 @@ bool HGPManager::solveHGP(const Vec3f& start_sent, const Vec3f& start_vel, const
     goal_for_search(2) = static_cast<float>(par_.default_goal_z);
 
     // Free start/goal in the 2D map — ground points would otherwise block them.
+    // The goal box keeps inflation cells: a goal inside the clearance band must
+    // stay blocked, both so plan() rejects it and so the next cycle's
+    // sanitizeTerminalGoal (which reads this copy) still sees it and relocates it.
+    // Leaving the start inside the band is handled by A*'s start exemption instead.
     if (map_util_for_planning_->has2DMap()) {
       Veci<3> si = map_util_for_planning_->floatToInt(start_for_search);
       map_util_for_planning_->free2DCell(si(0), si(1), 2.0f * res_);
       map_util_for_planning_->setFreeVoxelAndSurroundings(si, 2.0f * res_);
       Veci<3> gi = map_util_for_planning_->floatToInt(goal_for_search);
-      map_util_for_planning_->free2DCell(gi(0), gi(1), 2.0f * res_);
+      map_util_for_planning_->free2DCell(gi(0), gi(1), 2.0f * res_, /*keep_inflation=*/true);
       map_util_for_planning_->setFreeVoxelAndSurroundings(gi, 2.0f * res_);
     }
   }
@@ -347,7 +404,9 @@ bool HGPManager::solveHGP(const Vec3f& start_sent, const Vec3f& start_vel, const
     bool cut = false;
     for (size_t i = 1; i < path.size() && !cut; i++) {
       const Veci<3> wi = mu->floatToInt(path[i]);
-      if (mu->is2DOccupied(wi(0), wi(1))) break;  // stop at first occupied waypoint
+      // Stop at the first waypoint on a real obstacle. Inflation-only cells are
+      // skipped: A* only crosses them via the start exemption, leaving the band.
+      if (mu->is2DOccupied(wi(0), wi(1)) && !mu->is2DInflatedOnly(wi(0), wi(1))) break;
       // Sample the segment for an unknown run of >= min_run cells.
       const Vecf<3> a = path[i - 1];
       const Vecf<3> b = path[i];
@@ -377,6 +436,45 @@ bool HGPManager::solveHGP(const Vec3f& start_sent, const Vec3f& start_vel, const
     }
     if (free_path.size() >= 2) {
       path = free_path;
+    }
+  }
+
+  // Unknown ring (option B): A* may plan through the window cells outside the
+  // mapper's grid (priced by w_unknown), but the path handed on to L-BFGS stops
+  // unknown_clearance_2d_m inside that grid's edge. raw_path is untouched, so
+  // original_hgp_path_marker still shows the full route into the ring.
+  double cov_x0, cov_y0, cov_x1, cov_y1;
+  if (is_ground_robot_ && par_.unknown_clearance_2d_m > 0.0 && path.size() > 1 &&
+      map_util_for_planning_->get2DCoverage(cov_x0, cov_y0, cov_x1, cov_y1)) {
+    const double c = par_.unknown_clearance_2d_m;
+    cov_x0 += c;
+    cov_y0 += c;
+    cov_x1 -= c;
+    cov_y1 -= c;
+    auto inside = [&](const Vecf<3>& p) {
+      return p.x() >= cov_x0 && p.x() <= cov_x1 && p.y() >= cov_y0 && p.y() <= cov_y1;
+    };
+    if (cov_x0 < cov_x1 && cov_y0 < cov_y1 && inside(path.front())) {
+      vec_Vecf<3> clipped;
+      clipped.push_back(path.front());
+      for (size_t i = 1; i < path.size(); ++i) {
+        if (inside(path[i])) {
+          clipped.push_back(path[i]);
+          continue;
+        }
+        // Segment a->b leaves the box: keep the point where it crosses the edge.
+        const Vecf<3> a = path[i - 1];
+        const Vecf<3> d = path[i] - a;
+        decimal_t t = 1.0;
+        if (d.x() > 0) t = std::min(t, (cov_x1 - a.x()) / d.x());
+        if (d.x() < 0) t = std::min(t, (cov_x0 - a.x()) / d.x());
+        if (d.y() > 0) t = std::min(t, (cov_y1 - a.y()) / d.y());
+        if (d.y() < 0) t = std::min(t, (cov_y0 - a.y()) / d.y());
+        const Vecf<3> exit = a + d * std::max<decimal_t>(0.0, t);
+        if ((exit - clipped.back()).norm() > 1e-6) clipped.push_back(exit);
+        break;
+      }
+      if (clipped.size() >= 2) path = clipped;
     }
   }
 

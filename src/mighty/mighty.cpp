@@ -1822,33 +1822,39 @@ bool MIGHTY::sanitizeTerminalGoal2D(state& goal) {
   // Direction outward from the occupied goal toward free/unknown space.
   const Vec3f dir = (closest - goal.pos).normalized();
 
-  // Required clearance from the original occupied point: ||drone_bbox||.
-  double clearance = 0.0;
-  if (par_.drone_bbox.size() >= 3) {
-    clearance = std::sqrt(par_.drone_bbox[0] * par_.drone_bbox[0] +
-                          par_.drone_bbox[1] * par_.drone_bbox[1] +
-                          par_.drone_bbox[2] * par_.drone_bbox[2]);
-  }
+  // `closest` is the nearest cell that is not occupied in the (inflated) planning
+  // map, so it already has the inflation_2d_m clearance. goal_relocation_clearance_m
+  // adds standoff beyond that; with 0 the goal lands on `closest`.
+  const double clearance = par_.goal_relocation_clearance_m;
+  Vec3f new_pos = closest + dir * clearance;
 
-  Vec3f new_pos = goal.pos + dir * clearance;
-
-  // Safety loop: if pushing by `clearance` lands back inside an obstacle
-  // (thin wall, etc.), keep walking outward by one resolution at a time.
+  // Safety loop: if pushing by `clearance` still lands somewhere without
+  // `clearance` of real standoff from occupied cells (thin wall, deep
+  // obstacle, concave geometry), keep walking outward by one resolution at a
+  // time until a point that is ACTUALLY clear is found. isClearOfOccupied2D
+  // checks a disk of radius `clearance`, not just the single landing cell --
+  // stopping at the first non-occupied cell (the old behavior) could leave
+  // the goal sitting right on the boundary with zero real margin.
   const double step = par_.res > 0.0 ? par_.res : 0.1;
-  for (int i = 0; i < 20 && hgp_manager_.checkIfPointOccupied2D(new_pos); ++i) {
+  const int max_iters = std::max(20, static_cast<int>(std::ceil(3.0 * clearance / step)) + 10);
+  int i = 0;
+  for (; i < max_iters && (hgp_manager_.checkIfPointOccupied2D(new_pos) ||
+                          !hgp_manager_.isClearOfOccupied2D(new_pos, clearance));
+       ++i) {
     new_pos += dir * step;
   }
 
-  if (hgp_manager_.checkIfPointOccupied2D(new_pos)) {
-    printf("[MIGHTY] sanitizeTerminalGoal2D: could not escape occupied region (2D map) "
-           "after %d steps; dropping goal.\n", 20);
+  if (hgp_manager_.checkIfPointOccupied2D(new_pos) ||
+      !hgp_manager_.isClearOfOccupied2D(new_pos, clearance)) {
+    printf("[MIGHTY] sanitizeTerminalGoal2D: could not find a point with %.2f m clearance "
+           "(2D map) after %d steps; dropping goal.\n", clearance, max_iters);
     return false;
   }
 
   const Vec3f original = goal.pos;
   goal.pos = new_pos;
   printf("[MIGHTY] Goal relocated (2D map) from (%.2f,%.2f,%.2f) to (%.2f,%.2f,%.2f) "
-         "(was inside occupied cell, clearance=%.2f m)\n",
+         "(was in an occupied or inflated cell, extra clearance=%.2f m)\n",
          original.x(), original.y(), original.z(),
          new_pos.x(), new_pos.y(), new_pos.z(), clearance);
   return true;

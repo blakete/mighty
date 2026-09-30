@@ -132,6 +132,33 @@ TEST(GraphSearchUnknownCost, GoalInsideUnknownIsReachable) {
   EXPECT_TRUE(Visits(r, 27, 15));
 }
 
+// Planning-map inflation: a start inside the band can still leave it, but only
+// through inflation cells within the inflation radius of the start, never
+// through a real obstacle and never along the band further away.
+TEST(GraphSearchInflation, StartInsideBandCanLeave) {
+  World w;
+  w.mu->setInflation2D(0.3f);                      // 3 cells: band is x = 7..13
+  for (int y = 0; y < N; ++y) w.at(10, y) = 100;   // full-height wall
+  auto r = Plan(w, 12, 15, 25, 15, 2.0);           // start 2 cells from the wall
+  ASSERT_TRUE(r.reached);
+  for (const auto& c : r.cells) {
+    EXPECT_NE(c.first, 10) << "path crossed the real wall";
+    if (w.mu->is2DInflatedOnly(c.first, c.second)) {
+      const int dx = c.first - 12, dy = c.second - 15;
+      EXPECT_LE(dx * dx + dy * dy, 9) << "band cell used outside the start radius at " << c.first
+                                      << "," << c.second;
+    }
+  }
+}
+
+TEST(GraphSearchInflation, BandFarFromStartStaysBlocked) {
+  World w;
+  w.mu->setInflation2D(0.3f);
+  for (int y = 0; y < N; ++y) w.at(10, y) = 100;
+  auto r = Plan(w, 12, 5, 12, 25, 2.0);  // goal is in the band, 20 cells up the wall
+  EXPECT_FALSE(r.reached) << "a goal in the band away from the start must not be reachable";
+}
+
 TEST(GraphSearchUnknownCost, CornerCutBlockedByOccupiedNotByUnknown) {
   // Two offset walls whose only crossing is the diagonal (15,16)->(16,15), whose side
   // cells (15,15) and (16,16) are wall. Occupied walls: no path (fallback, goal not
