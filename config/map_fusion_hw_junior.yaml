@@ -30,8 +30,9 @@
 
     # rule (see fusion.py)
     clearance: 0.15                     # [m] voxels this close above the floor are ground
-    rover_height: 0.50                  # [m] junior body height (red rovers: 0.80)
-    margin: 0.10                        # [m] body band = floor + (0.15, 0.60)
+    rover_height: 0.45                  # [m] junior body height: lidar ~0.36 m above the floor on JR02 (elevation
+                                        #     floor -0.28, lidar +0.08 in fast_lio_odom, 2026-10-01) + headroom. Red rovers: 0.80
+    margin: 0.10                        # [m] body band = floor + (0.15, 0.55)
     floor_search_radius_cells: 5
     floor_agree_tol: 0.30
     voxel_floor_min_drop: 0.25          # [m] lower the floor to the voxels only for gaps this large
