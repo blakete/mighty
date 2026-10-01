@@ -105,6 +105,18 @@ mapper's default `occupancy_grid` / `unknown_grid` names in hardware mode, so a
 default-named voxel mapper would feed MIGHTY's 3D map path. It runs in `<ns>/odom`
 (the elevation map's frame) and gates only on DLIO's `odom->base_link`.
 
+The juniors run FAST_LIO instead of DLIO, and their elevation map is in
+`<ns>/fast_lio_odom`. The fusion node needs the voxel cloud in the elevation map's
+frame, so a junior's `/etc/rover/rover.env` switches the mapper to FAST_LIO's dense scan
+and the junior configs:
+
+```
+MAPPER_FRAME=JR02/fast_lio_odom
+MAPPER_CLOUD_TOPIC=fast_lio/cloud_registered
+MAPPER_PARAM_FILE=hw_junior_fusion.yaml          # acl-mapping global_mapper_ros/cfg (in the image)
+MAP_FUSION_PARAM_FILE=map_fusion_hw_junior.yaml  # this checkout's config/ (bind-mounted)
+```
+
 Two stages, chosen by one optional line in `/etc/rover/rover.env` (compose passes it
 into the container; unset = Stage A):
 

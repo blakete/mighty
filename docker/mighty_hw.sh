@@ -184,10 +184,14 @@ start() {
     # publishes fused/* next to the elevation grids MIGHTY uses. Stage B: set
     # MAP_FUSION_STAGE=B in /etc/rover/rover.env (and launch the Orin mapper with
     # ELEV_TOPIC_PREFIX=elev/) so MIGHTY gets the fused grids.
-    local mapper_cmd='ros2 run mighty wait_for_tf.py $ROBOT_NAME/odom $ROBOT_NAME/base_link && ros2 launch global_mapper_ros global_mapper_node.launch.py hardware:=true ground_robot:=true quad:=$ROBOT_NAME global_frame:=$ROBOT_NAME/odom param_file:=hw_red_rover_fusion.yaml use_obstacle_tracker:=false depth_pointcloud_topic:=dlio/odom_node/pointcloud/deskewed pose_topic:=dlio/odom_node/pose occupancy_grid_topic:=voxel/occupancy_grid unknown_grid_topic:=voxel/unknown_grid frontier_grid_topic:=voxel/frontier_grid occ_2d_topic:=voxel/occ_2d_topic esdf_2d_topic:=voxel/esdf_2d_topic'
-    # Fusion parameters come from this checkout's config/map_fusion_hw_ground_robot.yaml
+    # A FAST_LIO rover (the juniors) overrides the DLIO defaults in rover.env, since its
+    # elevation map lives in FAST_LIO's world frame and fusion needs both maps in one frame:
+    #   MAPPER_FRAME=<ns>/fast_lio_odom  MAPPER_CLOUD_TOPIC=fast_lio/cloud_registered
+    #   MAPPER_PARAM_FILE=hw_junior_fusion.yaml  MAP_FUSION_PARAM_FILE=map_fusion_hw_junior.yaml
+    local mapper_cmd='ros2 run mighty wait_for_tf.py ${MAPPER_FRAME:-$ROBOT_NAME/odom} $ROBOT_NAME/base_link && ros2 launch global_mapper_ros global_mapper_node.launch.py hardware:=true ground_robot:=true quad:=$ROBOT_NAME global_frame:=${MAPPER_FRAME:-$ROBOT_NAME/odom} param_file:=${MAPPER_PARAM_FILE:-hw_red_rover_fusion.yaml} use_obstacle_tracker:=false depth_pointcloud_topic:=${MAPPER_CLOUD_TOPIC:-dlio/odom_node/pointcloud/deskewed} pose_topic:=dlio/odom_node/pose occupancy_grid_topic:=voxel/occupancy_grid unknown_grid_topic:=voxel/unknown_grid frontier_grid_topic:=voxel/frontier_grid occ_2d_topic:=voxel/occ_2d_topic esdf_2d_topic:=voxel/esdf_2d_topic'
+    # Fusion parameters come from this checkout's config/map_fusion_hw_ground_robot.yaml (or MAP_FUSION_PARAM_FILE)
     # (bind-mounted like the planner's): edit, then restart the map_fusion pane.
-    local fusion_cmd='ros2 launch map_fusion_ros map_fusion.launch.py quad:=$ROBOT_NAME stage:=${MAP_FUSION_STAGE:-A} param_file:=/home/swarm/code/mighty_ws/install/mighty/share/mighty/config/map_fusion_hw_ground_robot.yaml'
+    local fusion_cmd='ros2 launch map_fusion_ros map_fusion.launch.py quad:=$ROBOT_NAME stage:=${MAP_FUSION_STAGE:-A} param_file:=/home/swarm/code/mighty_ws/install/mighty/share/mighty/config/${MAP_FUSION_PARAM_FILE:-map_fusion_hw_ground_robot.yaml}'
 
     # titles[i] LABELS cmds[i] — the arrays are positional, so dropping an entry
     # from one and not the other silently mislabels every pane after it. The

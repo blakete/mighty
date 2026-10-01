@@ -1,0 +1,43 @@
+# map_fusion_node parameters for the junior rovers (JR02 first, 2026-10-01), selected with
+# MAP_FUSION_PARAM_FILE=map_fusion_hw_junior.yaml in /etc/rover/rover.env. Same as
+# map_fusion_hw_ground_robot.yaml (the red rovers) except for the junior's body height;
+# see that file for staging and how to apply an edit (bind-mounted, pane restart).
+/**:
+  ros__parameters:
+    # inputs (relative to the rover namespace)
+    elevation_gridmap_topic: elevation_mapping_node/elevation_map_inpainted
+    elevation_layer: inpaint
+    elev_prefix: ""                     # elevation occ grid = <elev_prefix>occ_2d_topic
+    voxel_cloud_topic: voxel/occupancy_grid
+    voxel_occ_topic: voxel/occ_2d_topic
+    voxel_res: 0.10                     # fallback; taken from voxel/occ_2d_topic when it arrives
+    voxel_occ_origin_offset_cells: 0.5  # global_mapper publishes its 2D origin half a cell low
+
+    # outputs
+    output_prefix: fused/
+    occ_topic_name: occ_2d_topic
+    planning_topic_name: planning_occ_2d_topic
+    esdf_topic_name: esdf_2d_topic
+    publish_rate_hz: 5.0                # same rate MIGHTY gets from the elevation mapper today
+    stamp_mode: elevation               # copy the elevation grid stamp (lidar scan time)
+    publish_debug: true                 # debug/lethal_source, debug/floor_source (only when subscribed)
+    log_every_n: 50
+
+    # staleness / fallback
+    max_elev_age_s: 1.0
+    max_voxel_age_s: 1.0
+    degraded_mode: elevation_only       # voxel map stale -> pass the elevation grids through (= today)
+
+    # rule (see fusion.py)
+    clearance: 0.15                     # [m] voxels this close above the floor are ground
+    rover_height: 0.50                  # [m] junior body height (red rovers: 0.80)
+    margin: 0.10                        # [m] body band = floor + (0.15, 0.60)
+    floor_search_radius_cells: 5
+    floor_agree_tol: 0.30
+    voxel_floor_min_drop: 0.25          # [m] lower the floor to the voxels only for gaps this large
+    voxel_floor_max_drop: 1.50
+
+    # derived grids (same values elevation_mapping_cupy uses)
+    planning_unknown_max_traversable_cells: 4
+    planning_unknown_exempt_border_components: true
+    esdf_truncation_distance: 1.5
