@@ -168,7 +168,8 @@ start() {
     # sees). The state converter is a pure sub->pub relay that never touches TF
     # — gating it too would stall a third pane for the 60 s timeout whenever the
     # TF is missing, and wait_for_tf.py exits 0 on timeout, so silently.
-    local tf_gate='ros2 run mighty wait_for_tf.py $ROBOT_NAME/map $ROBOT_NAME/odom && '
+    # Explicit Python also accepts helpers baked from a Windows CRLF checkout.
+    local tf_gate='ros2 run --prefix python3 mighty wait_for_tf.py $ROBOT_NAME/map $ROBOT_NAME/odom && '
     local launch_base='ros2 launch mighty onboard_mighty.launch.py x:=0.0 y:=0.0 z:=0.0 yaw:=0.0 namespace:=$ROBOT_NAME use_hardware:=true use_onboard_localization:=true robot_type:=red_rover depth_camera_name:=d455'
 
     # titles[i] LABELS cmds[i] — the arrays are positional, so dropping an entry
@@ -182,7 +183,7 @@ start() {
         "$(dx "${tf_gate}${launch_base} only_nodes:=mighty_node")"
         "$(dx "${launch_base} only_nodes:=convert_odom_to_state")"
         "$(dx "${tf_gate}${launch_base} only_nodes:=mpc")"
-        "$(dx 'ros2 run mighty repub_rviz_2Dgoal.py')"
+        "$(dx 'ros2 run --prefix python3 mighty repub_rviz_2Dgoal.py')"
     )
     if (( ${#titles[@]} != ${#cmds[@]} )); then
         echo "[mighty_hw] BUG: ${#titles[@]} pane titles but ${#cmds[@]} commands —" \

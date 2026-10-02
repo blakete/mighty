@@ -176,9 +176,20 @@ bool GraphSearch::static_jps_plan(StatePtr& currNode_ptr, int max_expand, int st
   // empty cloud) is entirely val_unknown_: every step paid w_unknown and the
   // tri-state 2D map was invisible to A*.
 
-  // Track the best (closest-to-goal) node for partial path recovery
+  // Escape is only usable once it reaches a cell outside the hard heat band.
+  // Apply this to partial paths too, so a failed escape cannot return a route
+  // that stays entirely inside the band.
+  const bool heat_cutoff_on = use_heat_ && map_util_ && map_util_->staticHeatEnabled() &&
+                              zDim_ == 1 && map_util_->heat_cutoff_ratio_ > 0.0f;
+  const auto can_finish = [&](const StatePtr& node) {
+    return !heat_cutoff_on || map_util_->getHeat2D(node->x, node->y) <=
+                                 map_util_->heat_cutoff_ratio_ * map_util_->static_heat_Hmax_;
+  };
+
+  // Until an allowed endpoint is found, the start cannot yield a partial escape.
   StatePtr best_node = currNode_ptr;
-  double best_h = currNode_ptr->h;
+  double best_h = can_finish(currNode_ptr) ? currNode_ptr->h :
+                                          std::numeric_limits<double>::infinity();
   reached_goal_ = false;  // set true only if the exact goal node is popped below
 
   if (verbose_) {
@@ -202,7 +213,7 @@ bool GraphSearch::static_jps_plan(StatePtr& currNode_ptr, int max_expand, int st
       RCLCPP_WARN_THROTTLE(rclcpp::get_logger("mighty.hgp"), astar_timeout_log_clock, 2000,
                            "astar_heat: timeout after %d expansions, recovering partial path",
                            expand_iteration);
-      path_ = recoverPath(best_node, start_id);
+      path_ = can_finish(best_node) ? recoverPath(best_node, start_id) : std::vector<StatePtr>{};
       return !path_.empty() && path_.size() > 1;
     }
 
@@ -215,7 +226,7 @@ bool GraphSearch::static_jps_plan(StatePtr& currNode_ptr, int max_expand, int st
                            "astar_heat: priority queue empty after %d expansions, "
                            "recovering partial path",
                            expand_iteration);
-      path_ = recoverPath(best_node, start_id);
+      path_ = can_finish(best_node) ? recoverPath(best_node, start_id) : std::vector<StatePtr>{};
       return !path_.empty() && path_.size() > 1;
     }
 
@@ -225,12 +236,12 @@ bool GraphSearch::static_jps_plan(StatePtr& currNode_ptr, int max_expand, int st
     currNode_ptr->closed = true;  // Add to closed list
 
     // Update best node (closest to goal by heuristic)
-    if (currNode_ptr->h < best_h) {
+    if (can_finish(currNode_ptr) && currNode_ptr->h < best_h) {
       best_h = currNode_ptr->h;
       best_node = currNode_ptr;
     }
 
-    if (currNode_ptr->id == goal_id) {
+    if (currNode_ptr->id == goal_id && can_finish(currNode_ptr)) {
       if (verbose_) printf("Goal Reached!\n");
       reached_goal_ = true;
       break;
@@ -285,7 +296,7 @@ bool GraphSearch::static_jps_plan(StatePtr& currNode_ptr, int max_expand, int st
     if (max_expand > 0 && expand_iteration >= max_expand) {
       std::cerr << "astar_heat: max_expand [" << max_expand
                 << "] reached, recovering partial path\n";
-      path_ = recoverPath(best_node, start_id);
+      path_ = can_finish(best_node) ? recoverPath(best_node, start_id) : std::vector<StatePtr>{};
       return !path_.empty() && path_.size() > 1;
     }
   }
@@ -585,6 +596,18 @@ void GraphSearch::getSucc(const StatePtr& curr, std::vector<int>& succ_ids,
   }
   const double vref_n = vref.norm();
 
+  // Hard heat cutoff (2D): cells with heat > cutoff_ratio * Hmax are impassable.
+  // A node can only sit above the cutoff if it is the start or was reached by the
+  // escape rule below, so a robot already inside the band may step to cells of
+  // equal or lower heat until it is out. It can never climb back into the band,
+  // so a gap narrower than the cutoff is still never entered from outside.
+  const bool heat_cutoff_on = use_heat && map_util_ && map_util_->staticHeatEnabled() &&
+                              zDim_ == 1 && map_util_->heat_cutoff_ratio_ > 0.0f;
+  const float heat_cutoff =
+      heat_cutoff_on ? map_util_->heat_cutoff_ratio_ * map_util_->static_heat_Hmax_ : 0.0f;
+  const float curr_heat = heat_cutoff_on ? map_util_->getHeat2D(curr->x, curr->y) : 0.0f;
+  const bool escaping_cutoff = heat_cutoff_on && curr_heat > heat_cutoff;
+
   for (const auto& d : ns_) {
     int new_x = curr->x + d[0];
     int new_y = curr->y + d[1];
@@ -639,11 +662,9 @@ void GraphSearch::getSucc(const StatePtr& curr, std::vector<int>& succ_ids,
       }
     }
 
-    // Hard heat cutoff: treat cells with heat > cutoff_ratio * Hmax as impassable
-    if (use_heat && map_util_ && map_util_->staticHeatEnabled() && zDim_ == 1 &&
-        map_util_->heat_cutoff_ratio_ > 0.0f) {
-      float h = map_util_->getHeat2D(new_x, new_y);
-      if (h > map_util_->heat_cutoff_ratio_ * map_util_->static_heat_Hmax_) {
+    if (heat_cutoff_on) {
+      const float h = map_util_->getHeat2D(new_x, new_y);
+      if (h > heat_cutoff && !(escaping_cutoff && h <= curr_heat)) {
         continue;
       }
     }

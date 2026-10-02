@@ -333,3 +333,22 @@ from `/state` or TF — leave that topic out of the replay and every command is 
   drop-toward-router QoS rule).
 - In-image workspace path is the rover's host path (`/home/swarm/code/mighty_ws`), so
   the pane setup line is what you would type on the rover.
+
+## Live planning on a recorded bag (Windows/WSL)
+
+From this branch's checkout in Ubuntu/WSL, with its current code built into
+`mighty-hw:local`:
+
+```bash
+cd /mnt/c/Users/jaydenl/Documents/GitHub/mighty
+CRVIZ_REPO=~/containerized-rviz bash docker/dev/replay/goal_session.sh up /mnt/c/Users/jaydenl/Downloads/debug_bag04 \
+  --hold-at 30 --rviz-config ~/containerized-rviz/config/rr08-live-planning.rviz
+# Stop both MIGHTY and RViz:
+bash docker/dev/replay/goal_session.sh down
+```
+
+The launcher uses the isolated dev router and replays only planner inputs.
+Bags are mounted read-only. Select RR08 and use **2D Goal Pose** to request a new
+plan. The robot's pose comes from the recording; this is not a motion simulator.
+`--hold-at 30` holds the inputs from 30 s into the recording, avoiding this bag's
+inconsistent final map/pose.

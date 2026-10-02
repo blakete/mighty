@@ -6,3 +6,7 @@
 *.ipynb linguist-vendored
 *.ipynb -linguist-detectable
 
+
+# These host entrypoints run under Linux/WSL even from a Windows checkout.
+docker/mighty_hw.sh text eol=lf
+docker/dev/replay/goal_session.sh text eol=lf

@@ -52,7 +52,7 @@ struct Result {
   std::vector<std::pair<int, int>> cells;  // start -> goal
 };
 
-Result Plan(World& w, int xs, int ys, int xg, int yg, double w_unknown) {
+Result Plan(World& w, int xs, int ys, int xg, int yg, double w_unknown, int max_expand = -1) {
   w.build();
   if (std::getenv("DUMP_MAP")) {
     for (int y = 23; y >= 7; --y) {
@@ -68,7 +68,7 @@ Result Plan(World& w, int xs, int ys, int xg, int yg, double w_unknown) {
                                                   false, "astar_heat", w_unknown, 0.0, 100.0, 0.0);
   gs->setStartAndGoal(w.mu->intToFloat(Veci<3>(xs, ys, 0)), w.mu->intToFloat(Veci<3>(xg, yg, 0)));
   double t1 = 0, t2 = 0, t3 = 0, t4 = 0, t5 = 0;
-  gs->plan(xs, ys, 0, xg, yg, 0, 0.0, t1, t2, t3, t4, t5, 0.0, Vec3f(0, 0, 0), -1, 2000);
+  gs->plan(xs, ys, 0, xg, yg, 0, 0.0, t1, t2, t3, t4, t5, 0.0, Vec3f(0, 0, 0), max_expand, 2000);
   Result r;
   r.reached = gs->reachedGoal();
   auto path = gs->getPath();  // goal -> start
@@ -146,5 +146,72 @@ TEST(GraphSearchUnknownCost, CornerCutBlockedByOccupiedNotByUnknown) {
     } else {
       EXPECT_TRUE(r.reached) << "unknown side cells must not reject the diagonal";
     }
+  }
+}
+
+// Hard heat cutoff (heat_cutoff_ratio). World::build() uses d_safe 0.5 m and
+// Hmax 100, so heat = 100 * (1 - d / 0.5) and ratio 0.3 blocks every cell closer
+// than 0.35 m to an obstacle.
+void EnableCutoff(World& w, float ratio) {
+  w.mu->setStaticHeatEnabled(true);
+  w.mu->setStaticHeatParams(1.0f, 1, 100.0f, 1.0f);
+  w.mu->heat_cutoff_ratio_ = ratio;
+}
+
+TEST(GraphSearchHeatCutoff, NarrowGapIsAWall) {
+  World w;
+  for (int y = 0; y < N; ++y)
+    if (y < 13 || y > 16) w.at(15, y) = 100;  // 0.4 m gap: every gap cell is < 0.35 m from a wall
+  auto open = Plan(w, 5, 15, 25, 15, 2.0);
+  ASSERT_TRUE(open.reached) << "without the cutoff the gap is passable";
+
+  EnableCutoff(w, 0.3f);
+  auto r = Plan(w, 5, 15, 25, 15, 2.0);
+  EXPECT_FALSE(r.reached) << "a gap narrower than the cutoff must not be crossed";
+}
+
+TEST(GraphSearchHeatCutoff, StartInsideBandEscapes) {
+  // Start 0.2 m from a wall: the start cell and all eight neighbours are above
+  // the cutoff, so without the escape rule A* cannot leave the start cell.
+  World w;
+  for (int y = 0; y < N; ++y) w.at(8, y) = 100;
+  EnableCutoff(w, 0.3f);
+  auto r = Plan(w, 10, 15, 25, 15, 2.0);
+  EXPECT_TRUE(r.reached) << "a start inside the cutoff band must be able to step out of it";
+}
+
+TEST(GraphSearchHeatCutoff, EscapeDoesNotOpenNarrowGaps) {
+  // Same start inside the band, but the only way to the goal is a gap narrower
+  // than the cutoff: escaping the start band must not let A* climb into it.
+  World w;
+  for (int y = 0; y < N; ++y) w.at(8, y) = 100;
+  for (int y = 0; y < N; ++y)
+    if (y < 13 || y > 16) w.at(20, y) = 100;
+  EnableCutoff(w, 0.3f);
+  auto r = Plan(w, 10, 15, 25, 15, 2.0);
+  EXPECT_FALSE(r.reached) << "the escape rule must not reach the goal through a blocked gap";
+}
+
+TEST(GraphSearchHeatCutoff, BlockedGoalRequiresAnEscapeEndpoint) {
+  World w;
+  for (int y = 0; y < N; ++y) w.at(8, y) = 100;
+  EnableCutoff(w, 0.3f);
+  for (const int goal_y : {5, 25}) {
+    auto r = Plan(w, 10, 5, 10, goal_y, 2.0);
+    ASSERT_GT(w.mu->getHeat2D(10, goal_y), 30.0f);
+    EXPECT_FALSE(r.reached);  // Includes start == goal inside the blocked band.
+    ASSERT_GT(r.cells.size(), 1u) << "a partial escape is still available";
+    EXPECT_LE(w.mu->getHeat2D(r.cells.back().first, r.cells.back().second), 30.0f);
+  }
+}
+
+TEST(GraphSearchHeatCutoff, NoExitDoesNotReturnABlockedPartialPath) {
+  World w;
+  for (int y = 0; y < N; ++y) w.at(8, y) = w.at(13, y) = 100;
+  EnableCutoff(w, 0.3f);  // The entire corridor lies inside the cutoff band.
+  for (const int limit : {-1, 5}) {  // Exhausted queue and expansion-limit recovery.
+    auto r = Plan(w, 10, 5, 10, 25, 2.0, limit);
+    EXPECT_FALSE(r.reached);
+    EXPECT_TRUE(r.cells.empty()) << "no usable path exists until escape completes";
   }
 }
