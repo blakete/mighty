@@ -346,9 +346,18 @@ void MIGHTY::computeG_corridorHop(const state& A, const state& G_term,
 
 bool MIGHTY::needReplan(const state& local_state, const state& local_G_term,
                         const state& last_plan_state) {
-  // Compute the distance to the terminal goal
-  double dist_to_term_G = (local_state.pos - local_G_term.pos).norm();
-  double dist_from_last_plan_state_to_term_G = (last_plan_state.pos - local_G_term.pos).norm();
+  // Compute the distance to the terminal goal. Non-UAV vehicles measure it in
+  // xy only: the goal z is pinned to default_goal_z while the state z is raw
+  // odometry, so a z offset >= goal_radius would make GOAL_REACHED unreachable
+  // (and the MPC's own goal check is xy-only).
+
+  const bool planar = par_.vehicle_type != "uav";
+  auto dist = [planar](const Eigen::Vector3d& a, const Eigen::Vector3d& b) {
+    return planar ? (a - b).head<2>().norm() : (a - b).norm(); // planar: 2D distance, non-planar: 3D distance
+  };
+
+  double dist_to_term_G = dist(local_state.pos, local_G_term.pos);
+  double dist_from_last_plan_state_to_term_G = dist(last_plan_state.pos, local_G_term.pos);
 
   if (dist_to_term_G < par_.goal_radius) {
     changeDroneStatus(DroneStatus::GOAL_REACHED);
