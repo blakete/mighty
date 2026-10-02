@@ -168,8 +168,9 @@ docker run --rm mighty-hw:local bash -c '
 
 Expect, in order:
 
-1. six packages — `mighty`, `mpc`, `dynus_interfaces`, `decomp_ros_msgs`,
-   `decomp_rviz_plugins`, `decomp_test_node`. `decomp_util` is a plain CMake package and
+1. five packages — `mighty`, `mpc`, `dynus_interfaces`, `decomp_ros_msgs`,
+   `decomp_rviz_plugins` (DecompROS2's `decomp_test_node` demo is not built: nothing
+   uses it, and it does not compile on Jazzy). `decomp_util` is a plain CMake package and
    never appears in `ros2 pkg list` — run
    `ls /home/swarm/code/mighty_ws/install/decomp_util` inside the image instead.
 2. both zenoh packages at exactly the pinned versions (see *The RMW pin* below). The

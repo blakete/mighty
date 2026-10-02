@@ -22,6 +22,12 @@ services:
     build:
       context: ..                      # the mighty repo root; deps are cloned in-image
       dockerfile: docker/Dockerfile.hw
+      args:
+        # humble = Red Rover fleet (default); jazzy = the scout (pascal):
+        #   MIGHTY_ROS_DISTRO=jazzy make hw-build
+        # Not the host's ROS_DISTRO on purpose: a build box with Jazzy sourced
+        # must not silently produce a rover image the Humble fleet cannot talk to.
+        ROS_DISTRO: ${MIGHTY_ROS_DISTRO:-humble}
     image: mighty-hw:local
     container_name: hw-mighty
     network_mode: host                 # reach the host rmw_zenohd on :7447
@@ -71,4 +77,4 @@ services:
       - "${ROVER_CONFIG_DIR:-/home/swarm/config}:/home/swarm/config:ro"
     init: true
     restart: "no"
-    command: ["bash", "-c", "source /opt/ros/humble/setup.bash && exec ros2 run rmw_zenoh_cpp rmw_zenohd"]
+    command: ["bash", "-c", "source /opt/ros/$${ROS_DISTRO}/setup.bash && exec ros2 run rmw_zenoh_cpp rmw_zenohd"]

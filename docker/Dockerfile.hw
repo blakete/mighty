@@ -31,12 +31,17 @@
 # In-image workspace path == the rover's host path (/home/swarm/code/mighty_ws)
 # so the pane setup line mighty_hw.sh sends is what you would type on the rover.
 ARG WS=/home/swarm/code/mighty_ws
+# ROS distro of every stage. humble = the Red Rover fleet (their drive/sensors/
+# dlio images are Humble, and rmw_zenoh does not bridge distros); jazzy = the
+# scout (pascal), whose host stack is Jazzy. compose passes MIGHTY_ROS_DISTRO.
+# Stages read the base image's own ENV ROS_DISTRO, so this ARG only picks it.
+ARG ROS_DISTRO=humble
 # Dependency repos from mighty.repos that the HARDWARE stack needs. Keys must
 # match mighty.repos entries; the filter below fails loudly on a typo.
 ARG HW_DEPS="dynus_interfaces mpc DecompROS2"
 
 # ---------- deps-src: pinned dependency sources ----------------------------------
-FROM ros:humble-ros-base AS deps-src
+FROM ros:${ROS_DISTRO}-ros-base AS deps-src
 ARG WS
 ARG HW_DEPS
 SHELL ["/bin/bash", "-c"]
@@ -63,7 +68,7 @@ yaml.safe_dump({'repositories': {k: repos[k] for k in keep}}, sys.stdout)
 PY
 
 # ---------- deps-build: rosdep + colcon the dependency workspace ----------------
-FROM ros:humble-ros-base AS deps-build
+FROM ros:${ROS_DISTRO}-ros-base AS deps-build
 ARG WS
 SHELL ["/bin/bash", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
@@ -80,11 +85,12 @@ RUN apt-get update && rosdep update \
  && rm -rf /var/lib/apt/lists/*
 # decomp_util first, on its own: decomp_rviz_plugins find_package()s it
 # without declaring the dependency in package.xml, so colcon cannot order
-# them in one invocation.
-RUN source /opt/ros/humble/setup.bash \
+# them in one invocation. decomp_test_node is DecompROS2's demo node: nothing
+# in mighty uses it, and it includes tf2_geometry_msgs.h, which Jazzy removed.
+RUN source /opt/ros/${ROS_DISTRO}/setup.bash \
  && colcon build --packages-select decomp_util --cmake-args -DCMAKE_BUILD_TYPE=Release \
  && source install/setup.bash \
- && colcon build --packages-skip decomp_util --cmake-args -DCMAKE_BUILD_TYPE=Release \
+ && colcon build --packages-skip decomp_util decomp_test_node --cmake-args -DCMAKE_BUILD_TYPE=Release \
  && rm -rf build log
 
 # ---------- mighty-build: this checkout on top of the deps -----------------------
@@ -106,7 +112,7 @@ RUN apt-get update && rosdep update \
 # Build context = the mighty repo root (compose: context ..). What ships is
 # filtered by Dockerfile.hw.dockerignore next to this file.
 COPY . ${WS}/src/mighty
-RUN source /opt/ros/humble/setup.bash && source install/setup.bash \
+RUN source /opt/ros/${ROS_DISTRO}/setup.bash && source install/setup.bash \
  && colcon build --packages-select mighty \
         --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_SIMULATION=OFF -DBUILD_TESTING=OFF \
  && rm -rf build log
@@ -117,7 +123,7 @@ RUN mkdir -p /manifests && cd src \
  && find /manifests -exec touch -d @0 {} +
 
 # ---------- runtime: exec deps + the baked workspace -----------------------------
-FROM ros:humble-ros-base
+FROM ros:${ROS_DISTRO}-ros-base
 ARG WS
 SHELL ["/bin/bash", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
@@ -155,41 +161,69 @@ COPY --from=mighty-build /manifests /tmp/manifests
 # build per version, so this exact pin stops resolving once ROS rebuilds 0.1.9 --
 # the dpkg-query tripwire below fails the build loudly when that happens; move
 # every fleet image together (or re-pin to a snapshot once one carries 20260907).
-ARG ROS_SNAPSHOT=2026-08-07
-ARG RMW_ZENOH_CPP_VER=0.1.9-1jammy.20260907.200640
-ARG ZENOH_CPP_VENDOR_VER=0.1.9-1jammy.20260723.020902
+#
+# JAZZY (the scout, pascal): pascal's host runs rmw_zenoh 0.2.8-1noble.20251007,
+# a build no repo serves any more (snapshots jump from 0.2.5 to 0.2.9; stock is
+# 0.2.10), so this image cannot carry the host's exact build. Pinned instead to
+# the 2026-09-11 snapshot (0.2.10, == stock packages.ros.org on that date) for a
+# reproducible image. Cross-build interop with pascal's host must be checked
+# with a TRANSIENT_LOCAL /tf_static round trip whenever either side moves.
+#
+# Empty = the per-distro default chosen in the RUN below; set all three together
+# to override.
+ARG ROS_SNAPSHOT=
+ARG RMW_ZENOH_CPP_VER=
+ARG ZENOH_CPP_VENDOR_VER=
 # snapshots.ros.org is signed by "ROS Snapshot builder" (AD19BAB3CBF125EA), NOT by the
 # Open Robotics key in ros2-archive-keyring.gpg that packages.ros.org uses. Vendored
 # here rather than pulled from a keyserver so the build needs no keyserver and cannot
 # silently pick up a different key; the fingerprint assert below is the tripwire.
 ARG ROS_SNAPSHOT_KEY_FPR=4B63CF8FDE49746E98FA01DDAD19BAB3CBF125EA
 COPY docker/keys/ros-snapshot-archive-keyring.asc /tmp/ros-snapshot.asc
-RUN gpg --dearmor < /tmp/ros-snapshot.asc > /usr/share/keyrings/ros-snapshot-archive-keyring.gpg \
+RUN case "${ROS_DISTRO}" in \
+      humble) : "${ROS_SNAPSHOT:=2026-08-07}" "${RMW_ZENOH_CPP_VER:=0.1.9-1jammy.20260907.200640}" \
+                "${ZENOH_CPP_VENDOR_VER:=0.1.9-1jammy.20260723.020902}" ;; \
+      jazzy)  : "${ROS_SNAPSHOT:=2026-09-11}" "${RMW_ZENOH_CPP_VER:=0.2.10-1noble.20260902.013525}" \
+                "${ZENOH_CPP_VENDOR_VER:=0.2.10-1noble.20260722.215006}" ;; \
+      *) echo "no rmw_zenoh pin for ROS_DISTRO=${ROS_DISTRO}" >&2; exit 1 ;; \
+    esac \
+ && . /etc/os-release \
+ && gpg --dearmor < /tmp/ros-snapshot.asc > /usr/share/keyrings/ros-snapshot-archive-keyring.gpg \
  && gpg --show-keys --with-colons /tmp/ros-snapshot.asc | awk -F: '/^fpr/{print $10; exit}' \
       | grep -qx "${ROS_SNAPSHOT_KEY_FPR}" \
  && rm -f /tmp/ros-snapshot.asc \
- && echo "deb [signed-by=/usr/share/keyrings/ros-snapshot-archive-keyring.gpg] http://snapshots.ros.org/humble/${ROS_SNAPSHOT}/ubuntu jammy main" \
+ && echo "deb [signed-by=/usr/share/keyrings/ros-snapshot-archive-keyring.gpg] http://snapshots.ros.org/${ROS_DISTRO}/${ROS_SNAPSHOT}/ubuntu ${VERSION_CODENAME} main" \
         > /etc/apt/sources.list.d/ros2-snapshot.list \
- && printf 'Package: ros-humble-rmw-zenoh-cpp ros-humble-zenoh-cpp-vendor\nPin: origin snapshots.ros.org\nPin-Priority: 1001\n' \
+ && printf 'Package: ros-%s-rmw-zenoh-cpp ros-%s-zenoh-cpp-vendor\nPin: origin snapshots.ros.org\nPin-Priority: 1001\n' "${ROS_DISTRO}" "${ROS_DISTRO}" \
         > /etc/apt/preferences.d/99-rmw-zenoh-pin \
  && apt-get update && rosdep update \
  && rosdep install -y --ignore-src --dependency-types exec --from-paths /tmp/manifests \
         --skip-keys "catkin ament_python gazebo_ros gazebo_plugins" \
  && apt-get install -y --no-install-recommends \
-        ros-humble-rmw-zenoh-cpp=${RMW_ZENOH_CPP_VER} \
-        ros-humble-zenoh-cpp-vendor=${ZENOH_CPP_VENDOR_VER} \
+        ros-${ROS_DISTRO}-rmw-zenoh-cpp=${RMW_ZENOH_CPP_VER} \
+        ros-${ROS_DISTRO}-zenoh-cpp-vendor=${ZENOH_CPP_VENDOR_VER} \
         tmux python3-pip \
- && apt-mark hold ros-humble-rmw-zenoh-cpp ros-humble-zenoh-cpp-vendor \
- && test "$(dpkg-query -W -f='${Version}' ros-humble-rmw-zenoh-cpp)" = "${RMW_ZENOH_CPP_VER}" \
- && test "$(dpkg-query -W -f='${Version}' ros-humble-zenoh-cpp-vendor)" = "${ZENOH_CPP_VENDOR_VER}" \
+ && apt-mark hold ros-${ROS_DISTRO}-rmw-zenoh-cpp ros-${ROS_DISTRO}-zenoh-cpp-vendor \
+ && test "$(dpkg-query -W -f='${Version}' ros-${ROS_DISTRO}-rmw-zenoh-cpp)" = "${RMW_ZENOH_CPP_VER}" \
+ && test "$(dpkg-query -W -f='${Version}' ros-${ROS_DISTRO}-zenoh-cpp-vendor)" = "${ZENOH_CPP_VENDOR_VER}" \
  && rm -rf /var/lib/apt/lists/* /tmp/manifests
 # mpc_node imports casadi/do_mpc. Pinned to what the rovers ran natively;
 # numpy/scipy second so their pins win over do-mpc's resolver.
-RUN pip3 install --no-cache-dir casadi==3.6.7 do-mpc==5.1.1 \
- && pip3 install --no-cache-dir numpy==2.2.6 scipy==1.15.3
+# Noble's pip refuses system-wide installs without PIP_BREAK_SYSTEM_PACKAGES
+# (PEP 668); jammy's older pip ignores the variable.
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+# Jazzy keeps noble's apt numpy 1.26: its rosidl Python extensions are built
+# against numpy 1.x, and pip cannot replace a Debian-installed numpy anyway
+# ("RECORD file not found"). numpy<2 makes pip keep it instead of upgrading.
+RUN if [ "${ROS_DISTRO}" = humble ]; then \
+        pip3 install --no-cache-dir casadi==3.6.7 do-mpc==5.1.1 \
+     && pip3 install --no-cache-dir numpy==2.2.6 scipy==1.15.3; \
+    else \
+        pip3 install --no-cache-dir casadi==3.6.7 do-mpc==5.1.1 scipy==1.15.3 'numpy<2'; \
+    fi
 COPY --from=mighty-build ${WS}/install ${WS}/install
 # Interactive shells (docker exec -it ... bash) see the workspace. The panes do
 # not rely on this — mighty_hw.sh sends an explicit setup line — but a human
 # poking around inside should get the same environment.
-RUN printf 'source /opt/ros/humble/setup.bash\nsource %s/install/setup.bash\n' "${WS}" >> /root/.bashrc
+RUN printf 'source /opt/ros/${ROS_DISTRO}/setup.bash\nsource %s/install/setup.bash\n' "${WS}" >> /root/.bashrc
 # Command comes from compose: the container only idles (`sleep infinity`).
