@@ -375,6 +375,7 @@ class MIGHTY_NODE : public rclcpp::Node {
   int id_;
   std::string ns_;
   std::string id_str_;
+  bool has_numeric_id_ = false;
   parameters par_;
   uint32_t trajectory_id_ = 0;             // Trajectory ID for replan detection
   double final_g_ = 0.0;                   // only for debugging

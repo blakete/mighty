@@ -77,6 +77,13 @@ dx() { echo "docker exec -it ${CONTAINER} bash -c '${SETUP} && $(wait_router) &&
 
 attach() { exec tmux attach -t "${SESSION}"; }
 
+# env_value <file> <key>: the last KEY=value in an env file, quotes stripped;
+# empty when the file or key is missing. Parsed, never sourced.
+env_value() {
+    [[ -r "$1" ]] || return 0
+    { grep -E "^$2=" "$1" || true; } | tail -n 1 | cut -d= -f2- | tr -d "\"'"
+}
+
 usage() {
     echo "usage: $0 {start [--dev|--monitor] | attach | stop | status | logs | pull [<tag>] | rebuild [start flags]}" >&2
     exit 2
@@ -101,7 +108,27 @@ start() {
         ZENOH_ROUTER_PORT=7448
         COMPOSE+=(--profile dev)
         echo "[mighty_hw] --dev: identity from dev/rover.env, isolated zenoh router on 127.0.0.1:${ZENOH_ROUTER_PORT}"
-    else
+    fi
+
+    # ROBOT_TYPE in rover.env picks the launch file's robot_type (and so the
+    # per-robot config overlay and nodes). Unset = red_rover, so a fleet
+    # rover.env that predates the key behaves exactly as before. Read on the
+    # host because it also decides host-side things (config dir, prereq checks).
+    local robot_type
+    robot_type="$(env_value "${ROVER_ENV_FILE:-/etc/rover/rover.env}" ROBOT_TYPE)"
+    robot_type="${robot_type:-red_rover}"
+    case "${robot_type}" in
+        red_rover) ;;
+        # The scout has no fleet /home/swarm/config: its zenoh session config
+        # ships in docker/scout/ (an explicit ROVER_CONFIG_DIR, e.g. --dev's, wins).
+        scout) export ROVER_CONFIG_DIR="${ROVER_CONFIG_DIR:-${SCRIPT_DIR}/scout}" ;;
+        *)
+            echo "[mighty_hw] unknown ROBOT_TYPE '${robot_type}' in rover.env (expected red_rover or scout)" >&2
+            exit 1
+            ;;
+    esac
+
+    if [[ "${dev}" != true ]]; then
         # Fail fast on the hard prereq, warn on the soft ones — the pane-side
         # spin-waits still guard every node, this is just early readable
         # feedback. grep -c, not grep -q: under pipefail an early-exiting grep -q
@@ -119,12 +146,16 @@ start() {
                 exit 1
             fi
         fi
-        if ! docker ps --format '{{.Names}}' | grep -cx sensors >/dev/null; then
-            echo "[mighty_hw] WARNING: no 'sensors' container (sensors.service down?) — no lidar, no odometry" >&2
-        fi
-        if ! systemctl is-active --quiet dlio.service 2>/dev/null \
-           && ! docker ps --format '{{.Names}}' | grep -cx dlio >/dev/null; then
-            echo "[mighty_hw] WARNING: dlio.service is not running — MIGHTY and MPC will wait on tf map->odom" >&2
+        # The sensors/dlio services are the Red Rover layout; other robots bring
+        # their own sensors and odometry up some other way.
+        if [[ "${robot_type}" == red_rover ]]; then
+            if ! docker ps --format '{{.Names}}' | grep -cx sensors >/dev/null; then
+                echo "[mighty_hw] WARNING: no 'sensors' container (sensors.service down?) — no lidar, no odometry" >&2
+            fi
+            if ! systemctl is-active --quiet dlio.service 2>/dev/null \
+               && ! docker ps --format '{{.Names}}' | grep -cx dlio >/dev/null; then
+                echo "[mighty_hw] WARNING: dlio.service is not running — MIGHTY and MPC will wait on tf map->odom" >&2
+            fi
         fi
     fi
 
@@ -171,7 +202,7 @@ start() {
     # — gating it too would stall a third pane for the 60 s timeout whenever the
     # TF is missing, and wait_for_tf.py exits 0 on timeout, so silently.
     local tf_gate='ros2 run mighty wait_for_tf.py $ROBOT_NAME/map $ROBOT_NAME/odom && '
-    local launch_base='ros2 launch mighty onboard_mighty.launch.py x:=0.0 y:=0.0 z:=0.0 yaw:=0.0 namespace:=$ROBOT_NAME use_hardware:=true use_onboard_localization:=true robot_type:=red_rover depth_camera_name:=d455'
+    local launch_base='ros2 launch mighty onboard_mighty.launch.py x:=0.0 y:=0.0 z:=0.0 yaw:=0.0 namespace:=$ROBOT_NAME use_hardware:=true use_onboard_localization:=true robot_type:='"${robot_type}"' depth_camera_name:=d455'
 
     # titles[i] LABELS cmds[i] — the arrays are positional, so dropping an entry
     # from one and not the other silently mislabels every pane after it. The
@@ -186,6 +217,13 @@ start() {
         "$(dx "${tf_gate}${launch_base} only_nodes:=mpc")"
         "$(dx 'ros2 run mighty repub_rviz_2Dgoal.py')"
     )
+    # The scout's DLIO publishes no map->odom, so the launch file supplies an
+    # identity one (see onboard_mighty.launch.py). Ungated: the planner and MPC
+    # panes are waiting on exactly this transform.
+    if [[ "${robot_type}" == scout ]]; then
+        titles+=('map->odom TF')
+        cmds+=("$(dx "${launch_base} only_nodes:=static_tf_map_to_odom")")
+    fi
     if (( ${#titles[@]} != ${#cmds[@]} )); then
         echo "[mighty_hw] BUG: ${#titles[@]} pane titles but ${#cmds[@]} commands —" \
              "panes would be mislabeled; fix the titles/cmds arrays" >&2
@@ -211,7 +249,7 @@ start() {
     done
     tmux select-pane -t "${panes[0]}"
 
-    echo "[mighty_hw] ${SESSION} session up (rover: ${robot_name}, router: 127.0.0.1:${ZENOH_ROUTER_PORT})"
+    echo "[mighty_hw] ${SESSION} session up (rover: ${robot_name}, type: ${robot_type}, router: 127.0.0.1:${ZENOH_ROUTER_PORT})"
     if [[ "${monitor}" == true ]]; then
         # systemd main process (same shape as drive/sensors/dlio_host_tmux.sh):
         # live exactly as long as the session does, so `tmux kill-session -t

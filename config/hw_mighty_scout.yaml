@@ -1,0 +1,22 @@
+# --------------------------------------------------------------------------
+# Copyright 2025, Kota Kondo, Aerospace Controls Laboratory
+# Massachusetts Institute of Technology
+# All Rights Reserved
+# Authors: Kota Kondo, et al.
+# See LICENSE file for the license information
+# --------------------------------------------------------------------------
+
+# =============================================================================
+# MIGHTY Configuration — AgileX Scout Mini overlay (robot_type:=scout, pascal)
+# =============================================================================
+# Loaded by onboard_mighty.launch.py ON TOP OF hw_mighty_ground_robot.yaml, so
+# list only the keys where the scout differs from the Red Rovers. Anything not
+# here is the fleet value.
+# =============================================================================
+
+mighty_node:
+
+    ros__parameters:
+
+        # --- Vehicle Dynamic Limits ---
+        drone_bbox: [0.7, 0.7, 0.5]                     # [m] Vehicle bounding box (Red Rover 0.6 x 0.6 + 10 cm)

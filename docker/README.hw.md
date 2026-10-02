@@ -75,6 +75,7 @@ build the same session, and a hand-started one is not tracked by the unit.
 | `convert_odom_to_state` | odom → `state` relay | `convert_odom_to_state` |
 | `MPC` | tracks `mpc_waypoints`, publishes `cmd_vel_auto` | `mpc` |
 | `RViz 2D goal` | `repub_rviz_2Dgoal.py` | — |
+| `map->odom TF` | identity `<ns>/map -> <ns>/odom` (**scout only**, see below) | `static_tf_map_to_odom` |
 
 The first three all run `onboard_mighty.launch.py`; `only_nodes:=` selects which of
 that file's nodes a pane starts, so the launch file stays the single source of truth for
@@ -291,6 +292,52 @@ never join the fleet graph — including the C2 router on the same machine.
 With no sensors or odometry the planner and MPC panes sit in `wait_for_tf.py` until
 its 60 s timeout, then start; that is the expected shape of a dev run. `stop` removes
 the router too.
+
+## Running on the scout (pascal, Jazzy)
+
+Pascal is an AgileX Scout Mini whose drive, sensors (Ouster, Microstrain, ZED) and
+DLIO run natively on the host, on **ROS Jazzy**, from its own tmux session
+(`launch_pascal`), which also hosts the zenoh router on `:7447`. This stack runs
+there as on a rover; three things differ, all selected by one key in rover.env:
+
+| | Red Rover | scout (`ROBOT_TYPE=scout`) |
+|---|---|---|
+| image | `humble` (default) | `MIGHTY_ROS_DISTRO=jazzy make hw-build` |
+| `map -> odom` | from DLIO (`dlio.service`) | identity, from the `map->odom TF` pane — pascal's DLIO publishes only `odom -> base_link` |
+| planner params | `hw_mighty_ground_robot.yaml` | the same, plus the overlay `hw_mighty_scout.yaml` (footprint only) |
+| zenoh session config | `/home/swarm/config` (fleet) | `docker/scout/` |
+
+`ROBOT_TYPE` unset means `red_rover`, so fleet rover.env files need no change.
+Commands still flow through `acl_ctrl_safety`: MPC publishes `/pascal/cmd_vel_auto`,
+and the safety node forwards it to `cmd_vel` only in AUTO (Y on the gamepad).
+
+```bash
+sudo install -D -m 644 docker/scout/pascal.env /etc/rover/rover.env   # once
+cd docker && MIGHTY_ROS_DISTRO=jazzy make hw-build                     # or after a code change
+launch_pascal                         # pascal's own stack: router, sensors, DLIO, drive
+./mighty_hw.sh start                  # 5 panes, namespace pascal
+```
+
+Things to know:
+
+- **Never start the `map->odom TF` pane next to a DLIO that publishes `map -> odom`**;
+  two publishers of one transform make TF flip between them. If pascal's
+  localization ever starts publishing it, drop the scout case from the launch file.
+- **The RMW is not the host's exact build.** Pascal's host runs rmw_zenoh
+  `0.2.8-1noble.20251007`, which no repo serves any more; the image pins `0.2.10` from
+  the 2026-09-11 snapshot. Verified 2026-10-01 against pascal's host through a private
+  router: `/tf_static` (TRANSIENT_LOCAL, late joiner) in both directions plus volatile
+  odom/`cmd_vel_auto` all delivered. Re-check whenever either side's rmw_zenoh moves:
+  this is the same seam that silently zeroed RR08's commands (*The RMW pin*).
+- **A name without a two-digit number** (`pascal`) gets agent id 0 and no inter-agent
+  frame alignment, so the fleet's `use_frame_alignment`/`share_traj` values are
+  harmless for a solo scout.
+- **No mapper yet.** The planner plans only on `planning_occ_2d_topic` (plus
+  `esdf_2d_topic`, `occ_2d_topic`), which nothing on pascal publishes. Until one does,
+  every node starts and the planner never plans.
+- `mpc.yaml` (speed limits, weights) is the Red Rover tuning, baked from the `mpc` pin.
+
+To smoke-test without pascal's stack: `ROVER_ENV_FILE=$PWD/scout/pascal.env ./mighty_hw.sh start --dev`.
 
 ## Functional test by bag replay (`dev/replay/`)
 

@@ -21,6 +21,8 @@ from math import radians
 QUADROTOR = 'quadrotor'
 RED_ROVER = 'red_rover'
 STAR_ROBOT = 'star_robot'
+SCOUT = 'scout'          # AgileX Scout Mini (pascal)
+GROUND_ROBOTS = [RED_ROVER, STAR_ROBOT, SCOUT]
 
 def convert_str_to_bool(str):
     return True if (str == 'true' or str == 'True' or str == 1 or str == '1') else False
@@ -46,7 +48,7 @@ def generate_launch_description():
     use_ground_robot_arg = DeclareLaunchArgument('use_ground_robot', default_value='false', description='Enable ground robot mode (spawns p3at, uses cmd_vel control)')
     use_onboard_localization_arg = DeclareLaunchArgument('use_onboard_localization', default_value='false', description='Use onboard localization (DLIO) vs Vicon')
     depth_camera_name_arg = DeclareLaunchArgument('depth_camera_name', default_value='d435', description='Depth camera name for topic remapping')
-    robot_type_arg = DeclareLaunchArgument('robot_type', default_value='quadrotor', description='Robot type: quadrotor, red_rover, star_robot')
+    robot_type_arg = DeclareLaunchArgument('robot_type', default_value='quadrotor', description='Robot type: quadrotor, red_rover, star_robot, scout')
     num_agents_arg = DeclareLaunchArgument('num_agents', default_value='10', description='Number of agents (for frame alignment subscriptions)')
     map_frame_id_arg = DeclareLaunchArgument('map_frame_id', default_value='',
         description='Override map frame ID (empty = auto from use_hardware)')
@@ -79,7 +81,8 @@ def generate_launch_description():
     only_nodes_arg = DeclareLaunchArgument('only_nodes', default_value='',
         description='HARDWARE ONLY. Comma-separated subset of this file\'s nodes '
                     'to start; empty = all. Keys are the nodes\' real ROS names: '
-                    'mighty_node, convert_odom_to_state, convert_vicon_to_state, mpc')
+                    'mighty_node, convert_odom_to_state, convert_vicon_to_state, mpc, '
+                    'static_tf_map_to_odom')
 
     # Opaque function to launch nodes
     def launch_setup(context, *args, **kwargs):
@@ -135,14 +138,20 @@ def generate_launch_description():
 
         # Override with HW config if using hardware
         if use_hardware:
-            if robot_type in [RED_ROVER, STAR_ROBOT]:
-                hw_config_filename = 'hw_mighty_ground_robot.yaml'
+            if robot_type in GROUND_ROBOTS:
+                hw_config_filenames = ['hw_mighty_ground_robot.yaml']
             else:  # quadrotor
-                hw_config_filename = 'hw_mighty.yaml'
-            hw_parameters_path = os.path.join(get_package_share_directory('mighty'), 'config', hw_config_filename)
-            with open(hw_parameters_path, 'r') as f:
-                hw_params = yaml.safe_load(f)['mighty_node']['ros__parameters']
-            parameters.update(hw_params)
+                hw_config_filenames = ['hw_mighty.yaml']
+            # Per-robot overlay on top of the shared ground-robot file: only the
+            # keys where that vehicle differs (footprint, ...), so the fleet file
+            # stays the single source for everything else.
+            if robot_type == SCOUT:
+                hw_config_filenames.append('hw_mighty_scout.yaml')
+            for hw_config_filename in hw_config_filenames:
+                hw_parameters_path = os.path.join(get_package_share_directory('mighty'), 'config', hw_config_filename)
+                with open(hw_parameters_path, 'r') as f:
+                    hw_params = yaml.safe_load(f)['mighty_node']['ros__parameters']
+                parameters.update(hw_params)
 
         # Update parameters for benchmarking
         parameters['file_path'] = data_file
@@ -332,7 +341,10 @@ def generate_launch_description():
             remappings=[('odom', 'dlio/odom_node/odom'), ('state', 'state')],
             output='screen', emulate_tty=True)
 
-        # HW: Static TF (map->odom identity, for robots using external localization)
+        # HW: Static TF (map->odom identity). The rovers' DLIO publishes map->odom
+        # itself; the scout's DLIO publishes only odom->base_link, so for it this
+        # node supplies the identity. Never start it next to a DLIO that publishes
+        # map->odom: two publishers of one transform make TF flip between them.
         static_tf_node = Node(
             package='tf2_ros', executable='static_transform_publisher',
             name='static_tf_map_to_odom', output='screen',
@@ -344,11 +356,13 @@ def generate_launch_description():
             if use_onboard_localization:
                 if robot_type == QUADROTOR:
                     nodes_to_start.append(hw_odom_to_state_node)
-                elif robot_type in [STAR_ROBOT, RED_ROVER]:
-                    nodes_to_start.extend([hw_odom_to_state_node, mpc_node]) #static_tf_node
+                elif robot_type in GROUND_ROBOTS:
+                    nodes_to_start.extend([hw_odom_to_state_node, mpc_node])
+                    if robot_type == SCOUT:
+                        nodes_to_start.append(static_tf_node)
             else:
                 nodes_to_start.append(pose_twist_to_state_node)  # Vicon
-                if robot_type in [STAR_ROBOT, RED_ROVER]:
+                if robot_type in GROUND_ROBOTS:
                     nodes_to_start.append(mpc_node)
         else:
             # === EXISTING SIM CODE — COMPLETELY UNCHANGED ===
@@ -377,6 +391,7 @@ def generate_launch_description():
                 'convert_odom_to_state':  hw_odom_to_state_node,
                 'convert_vicon_to_state': pose_twist_to_state_node,
                 'mpc':                    mpc_node,
+                'static_tf_map_to_odom':  static_tf_node,
             }
             wanted = [k.strip() for k in only_nodes.split(',') if k.strip()]
             unknown = [k for k in wanted if k not in keyed]

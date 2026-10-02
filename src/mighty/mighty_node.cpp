@@ -7,6 +7,7 @@
  * -------------------------------------------------------------------------- */
 
 #include <algorithm>
+#include <cctype>
 #include <mighty/mighty_node.hpp>
 #include <mighty/esdf_grid_2d.hpp>
 #include <mighty/occ_grid_2d.hpp>
@@ -61,9 +62,13 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
   // Get id from ns
   ns_ = this->get_namespace();
   ns_ = ns_.substr(ns_.find_last_of("/") + 1);
-  id_str_ = ns_.substr(ns_.size() -
-                       2);  // ns is like NX01, so we get the last two characters and convert to int
-  id_ = std::stoi(id_str_);
+  // Fleet names end in a two-digit vehicle number (NX01, RR08) and the id is that
+  // number. A name without one (e.g. "pascal") gets id 0: it is a solo robot, and
+  // the peer topics below are built from the same NAME## pattern, so it has none.
+  id_str_ = ns_.size() >= 2 ? ns_.substr(ns_.size() - 2) : "";
+  has_numeric_id_ = id_str_.size() == 2 && std::isdigit(static_cast<unsigned char>(id_str_[0])) &&
+                    std::isdigit(static_cast<unsigned char>(id_str_[1]));
+  id_ = has_numeric_id_ ? std::stoi(id_str_) : 0;
 
   // Declare, set, and print parameters
   this->declareParameters();
@@ -213,7 +218,12 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
                 par_.formation_self_offset[2]);
   }
   // Frame alignment subscriptions (inter-agent transforms)
-  if (par_.use_frame_alignment) {
+  if (par_.use_frame_alignment && !has_numeric_id_) {
+    RCLCPP_WARN(this->get_logger(),
+                "Frame align: namespace '%s' has no two-digit vehicle number, so it has no "
+                "peers to align with; skipping the /frame_align subscriptions",
+                ns_.c_str());
+  } else if (par_.use_frame_alignment) {
     for (int i = 1; i <= par_.num_agents; i++) {
       if (i == id_) continue;
       std::string prefix = ns_.substr(0, ns_.size() - 2);
