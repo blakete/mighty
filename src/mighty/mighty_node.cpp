@@ -3293,6 +3293,8 @@ void MIGHTY_NODE::planningOcc2DCallback(const nav_msgs::msg::OccupancyGrid::Shar
   mighty_ptr_->setOccGrid2D(planning_occ_grid_2d_);
   if (par_.use_hardware && par_.use_2d_planning && par_.vehicle_type == "ground_robot") {
     mighty_ptr_->updateMap2DOnly();
+    // PoC only: uncomment locally to visualize A* heat; leave disabled in the PR.
+    // publishGround2DHeat();
   }
 }
 
@@ -4116,19 +4118,18 @@ void MIGHTY_NODE::publishGround2DHeat() {
   const auto origin = map_util->getOrigin();
   const float res = static_cast<float>(map_util->getRes());
 
-  // Collect 2D heat (dynamic + static + terrain) as colored point cloud
+  // Publish exactly the heat queried by 2D A*. The Occ2D pipeline has no
+  // separate terrain array; getHeat2D already includes merged dynamic heat.
   pcl::PointCloud<pcl::PointXYZI> cloud;
   for (int x = 0; x < dimX; ++x) {
     for (int y = 0; y < dimY; ++y) {
       const float h = map_util->getHeat2D(x, y);
-      const float tc = map_util->getTerrainCost(x, y);
-      const float total = std::max(h, tc);
-      if (total > 0.001f) {
+      if (h > 0.001f) {
         pcl::PointXYZI pt;
         pt.x = origin(0) + (x + 0.5f) * res;
         pt.y = origin(1) + (y + 0.5f) * res;
         pt.z = 0.05f;  // slightly above ground for visibility
-        pt.intensity = total;
+        pt.intensity = h;
         cloud.push_back(pt);
       }
     }

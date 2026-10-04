@@ -333,3 +333,5 @@ from `/state` or TF — leave that topic out of the replay and every command is 
   drop-toward-router QoS rule).
 - In-image workspace path is the rover's host path (`/home/swarm/code/mighty_ws`), so
   the pane setup line is what you would type on the rover.
+
+For interactive planning on a recorded bag, see Blake's [step-by-step replay instructions](https://github.com/blakete/mighty/blob/feature/hw-standalone/docker/README.hw.md#plan-on-a-replayed-bag-step-by-step).

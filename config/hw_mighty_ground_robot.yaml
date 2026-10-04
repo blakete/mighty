@@ -187,7 +187,7 @@ mighty_node:
         disable_all_smoothing: false                    # [-] Disable all path smoothing (use raw A* output)
         smooth_iterations: 50                           # [-] Number of heat-aware Laplacian smoothing passes
         smooth_alpha: 0.3                               # [-] Smoothing relaxation factor (0=none, 1=aggressive)
-        heat_cutoff_ratio: 0.0                          # [-] Cells with heat > ratio * Hmax are impassable (0=disabled)
+        heat_cutoff_ratio: 0.857142                     # [-] Nominal 0.10 m cutoff: 1 - 0.10/esdf_d_safe (0.7); 0 disables
         los_cells: 3                                    # [cells] Line-of-sight inflation
         min_len: 0.0                                    # [m] Min segment length
         min_turn: 0.0                                   # [deg] Min turn angle
