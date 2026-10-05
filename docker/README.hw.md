@@ -76,6 +76,7 @@ build the same session, and a hand-started one is not tracked by the unit.
 | `MPC` | tracks `mpc_waypoints`, publishes `cmd_vel_auto` | `mpc` |
 | `RViz 2D goal` | `repub_rviz_2Dgoal.py` | — |
 | `map->odom TF` | identity `<ns>/map -> <ns>/odom` (**scout only**, see below) | `static_tf_map_to_odom` |
+| `mapper` | `elevation_mapping_cupy` in `hw-mighty-mapper` (**scout only**, see below) | — |
 
 The first three all run `onboard_mighty.launch.py`; `only_nodes:=` selects which of
 that file's nodes a pane starts, so the launch file stays the single source of truth for
@@ -306,16 +307,18 @@ there as on a rover; three things differ, all selected by one key in rover.env:
 | `map -> odom` | from DLIO (`dlio.service`) | identity, from the `map->odom TF` pane — pascal's DLIO publishes only `odom -> base_link` |
 | planner params | `hw_mighty_ground_robot.yaml` | the same, plus the overlay `hw_mighty_scout.yaml` (footprint only) |
 | zenoh session config | `/home/swarm/config` (fleet) | `docker/scout/` |
+| 2D mapper (`*_2d_topic`) | `elevation_mapping_cupy` on the Orin | the same mapper on the laptop GPU: `hw-mighty-mapper` container, `mapper` pane |
 
 `ROBOT_TYPE` unset means `red_rover`, so fleet rover.env files need no change.
 Commands still flow through `acl_ctrl_safety`: MPC publishes `/pascal/cmd_vel_auto`,
 and the safety node forwards it to `cmd_vel` only in AUTO (Y on the gamepad).
 
 ```bash
-sudo install -D -m 644 docker/scout/pascal.env /etc/rover/rover.env   # once
+sudo install -D -m 644 docker/scout/pascal.env /etc/rover/rover.env   # once (lewis: scout/lewis.env)
 cd docker && MIGHTY_ROS_DISTRO=jazzy make hw-build                     # or after a code change
+docker compose -f compose.hw.yaml --profile mapper build mapper        # once, or after a mapper.repos bump
 launch_pascal                         # pascal's own stack: router, sensors, DLIO, drive
-./mighty_hw.sh start                  # 5 panes, namespace pascal
+./mighty_hw.sh start                  # 6 panes, namespace pascal
 ```
 
 Things to know:
@@ -332,12 +335,25 @@ Things to know:
 - **A name without a two-digit number** (`pascal`) gets agent id 0 and no inter-agent
   frame alignment, so the fleet's `use_frame_alignment`/`share_traj` values are
   harmless for a solo scout.
-- **No mapper yet.** The planner plans only on `planning_occ_2d_topic` (plus
-  `esdf_2d_topic`, `occ_2d_topic`), which nothing on pascal publishes. Until one does,
-  every node starts and the planner never plans.
+- **The mapper** is the rovers' own: `nehirgerek/elevation_mapping_cupy` at the commit
+  OX05 runs, pinned in `docker/mapper.repos` (not `../mighty.repos`, which `setup.sh`
+  builds natively on Humble), launched exactly as on the Orin
+  (`elevation_mapping_dlio.launch.py quad:=<ns>`). It reads DLIO's deskewed cloud, so it
+  is lidar-agnostic; pascal's DLIO already publishes that topic and the `pascal/lidar`
+  frame it defaults to. Its image (`Dockerfile.mapper`, CUDA 12.6, torch 2.5.1+cu121,
+  CuPy 13.6) needs the NVIDIA container runtime and carries the same rmw_zenoh pin as
+  `mighty-hw` — bump both together. Its height/step thresholds are the Red Rover
+  tuning (`config/core/*.yaml` in the fork); revisit them for the Ouster's mount
+  height once there is real pascal data.
+- **The map persists across restarts of the other panes, not of the mapper.** Restart
+  the `mapper` pane (Ctrl-C / Up / Enter) to start from an empty map.
 - `mpc.yaml` (speed limits, weights) is the Red Rover tuning, baked from the `mpc` pin.
 
-To smoke-test without pascal's stack: `ROVER_ENV_FILE=$PWD/scout/pascal.env ./mighty_hw.sh start --dev`.
+To smoke-test without pascal's stack: `ROVER_ENV_FILE=$PWD/scout/pascal.env ./mighty_hw.sh start --dev`
+(all six panes, against the isolated router). Verified 2026-10-02 with a synthetic DLIO
+(deskewed cloud of flat ground plus a box 3 m ahead): the mapper marked the box face
+occupied and its shadow unknown, and the planner routed around the box to a goal
+behind it, with the MPC turning onto the path.
 
 ## Functional test by bag replay (`dev/replay/`)
 

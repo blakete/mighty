@@ -1,0 +1,7 @@
+# BuildKit per-Dockerfile ignore for Dockerfile.mapper. Build context = the
+# mighty repo root (compose: context ..), but the mapper image needs only its
+# pins and the vendored ROS snapshot key.
+*
+!docker/mapper.repos
+!docker/keys
+!docker/keys/**

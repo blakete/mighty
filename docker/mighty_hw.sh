@@ -55,6 +55,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONTAINER=hw-mighty
+MAPPER_CONTAINER=hw-mighty-mapper   # scout only: compose profile 'mapper'
 SESSION=hw_mighty
 IMAGE=mighty-hw:local
 REGISTRY=registry.gitlab.com/mit-acl/ugv/redrover/rover/mighty-hw
@@ -73,7 +74,10 @@ SETUP='source /opt/ros/$ROS_DISTRO/setup.bash && source /home/swarm/code/mighty_
 wait_router() {
     echo "until (echo >/dev/tcp/127.0.0.1/${ZENOH_ROUTER_PORT}) 2>/dev/null; do echo \"waiting for zenoh router on :${ZENOH_ROUTER_PORT}...\"; sleep 2; done"
 }
-dx() { echo "docker exec -it ${CONTAINER} bash -c '${SETUP} && $(wait_router) && $1'"; }
+MAPPER_SETUP='source /opt/ros/jazzy/setup.bash && source /home/swarm/code/elevation_mapping_ws/install/setup.bash'
+# dxc <container> <setup> <cmd>: a pane command running <cmd> in <container>.
+dxc() { echo "docker exec -it $1 bash -c '$2 && $(wait_router) && $3'"; }
+dx() { dxc "${CONTAINER}" "${SETUP}" "$1"; }
 
 attach() { exec tmux attach -t "${SESSION}"; }
 
@@ -114,14 +118,20 @@ start() {
     # per-robot config overlay and nodes). Unset = red_rover, so a fleet
     # rover.env that predates the key behaves exactly as before. Read on the
     # host because it also decides host-side things (config dir, prereq checks).
-    local robot_type
+    local robot_type mapper=false
     robot_type="$(env_value "${ROVER_ENV_FILE:-/etc/rover/rover.env}" ROBOT_TYPE)"
     robot_type="${robot_type:-red_rover}"
     case "${robot_type}" in
         red_rover) ;;
         # The scout has no fleet /home/swarm/config: its zenoh session config
         # ships in docker/scout/ (an explicit ROVER_CONFIG_DIR, e.g. --dev's, wins).
-        scout) export ROVER_CONFIG_DIR="${ROVER_CONFIG_DIR:-${SCRIPT_DIR}/scout}" ;;
+        # It also has no Orin, so its 2D mapper runs here, on the GPU
+        # (Dockerfile.mapper, compose profile 'mapper').
+        scout)
+            export ROVER_CONFIG_DIR="${ROVER_CONFIG_DIR:-${SCRIPT_DIR}/scout}"
+            COMPOSE+=(--profile mapper)
+            mapper=true
+            ;;
         *)
             echo "[mighty_hw] unknown ROBOT_TYPE '${robot_type}' in rover.env (expected red_rover or scout)" >&2
             exit 1
@@ -172,6 +182,14 @@ start() {
     if [[ -z "$(docker ps -q --filter "name=^${CONTAINER}$")" ]]; then
         echo "[mighty_hw] container did not come up; last logs:" >&2
         docker logs --tail 40 "${CONTAINER}" >&2 || true
+        exit 1
+    fi
+    # Same check for the mapper. Started by the same `up`, so no second wait;
+    # failure here is almost always the GPU runtime (nvidia-container-toolkit,
+    # or the NVIDIA driver not loaded after a kernel update).
+    if [[ "${mapper}" == true && -z "$(docker ps -q --filter "name=^${MAPPER_CONTAINER}$")" ]]; then
+        echo "[mighty_hw] ${MAPPER_CONTAINER} did not come up (is the GPU visible? docker run --rm --gpus all ubuntu nvidia-smi -L); last logs:" >&2
+        docker logs --tail 40 "${MAPPER_CONTAINER}" >&2 || true
         exit 1
     fi
     local robot_name
@@ -227,6 +245,12 @@ start() {
         titles+=('map->odom TF')
         cmds+=("$(dx "${launch_base} only_nodes:=static_tf_map_to_odom")")
     fi
+    # The 2D grids MIGHTY plans on (planning_occ_2d / esdf_2d / occ_2d_topic),
+    # from DLIO's deskewed cloud. Ungated: it waits for its own TF.
+    if [[ "${mapper}" == true ]]; then
+        titles+=('mapper')
+        cmds+=("$(dxc "${MAPPER_CONTAINER}" "${MAPPER_SETUP}" 'ros2 launch elevation_mapping_cupy elevation_mapping_dlio.launch.py quad:=$ROBOT_NAME')")
+    fi
     if (( ${#titles[@]} != ${#cmds[@]} )); then
         echo "[mighty_hw] BUG: ${#titles[@]} pane titles but ${#cmds[@]} commands —" \
              "panes would be mislabeled; fix the titles/cmds arrays" >&2
@@ -281,15 +305,16 @@ case "${cmd}" in
         ;;
     stop)
         # Session first: closing the panes HUPs the docker-exec'd nodes before
-        # the container itself goes away. --profile dev so a laptop's router
-        # container is removed too (no-op on a rover: nothing in that profile
-        # ever ran).
+        # the container itself goes away. --profile dev / mapper so a laptop's
+        # router and a scout's mapper container are removed too (no-op where
+        # nothing in that profile ever ran).
         tmux kill-session -t "${SESSION}" 2>/dev/null || true
-        exec "${COMPOSE[@]}" --profile dev down
+        exec "${COMPOSE[@]}" --profile dev --profile mapper down
         ;;
     status)
         docker ps --filter "name=^${CONTAINER}$" --format 'container: {{.Names}}  {{.Status}}  ({{.Image}})' | grep . \
             || { echo "container: not running"; exit 1; }
+        docker ps --filter "name=^${MAPPER_CONTAINER}$" --format 'container: {{.Names}}  {{.Status}}  ({{.Image}})'
         tmux list-panes -t "${SESSION}" \
             -F 'pane #{pane_index}  #{pane_title}  (#{pane_current_command})' 2>/dev/null \
             || echo "no ${SESSION} tmux session on the host"

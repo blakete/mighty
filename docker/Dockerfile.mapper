@@ -1,0 +1,88 @@
+# syntax=docker/dockerfile:1.7
+# mighty-mapper — the 2D terrain mapper MIGHTY plans on, for a robot with no
+# Orin: elevation_mapping_cupy (the team fork the Red Rovers run on their Orin),
+# publishing <ns>/{occ_2d,esdf_2d,planning_occ_2d}_topic from DLIO's deskewed
+# cloud. Used by the scout (pascal), where it runs on the laptop's NVIDIA GPU next
+# to the hw-mighty container (compose profile 'mapper', see mighty_hw.sh).
+#
+# Like Dockerfile.hw, a pure function of (this checkout, docker/mapper.repos):
+# sources are cloned in-build at their pins (public https, no SSH needed).
+#
+#   docker compose -f compose.hw.yaml --profile mapper build mapper
+#
+# Needs the NVIDIA container runtime at run time (nvidia-container-toolkit);
+# the build itself needs no GPU.
+#
+# Base and Python stack follow the fork's own docker/Dockerfile.x64 (CUDA 12
+# devel: CuPy JIT-compiles its kernels with NVRTC + the toolkit headers), with
+# the versions it leaves floating pinned here.
+FROM nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04
+SHELL ["/bin/bash", "-c"]
+ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8 ROS_DISTRO=jazzy
+ARG WS=/home/swarm/code/elevation_mapping_ws
+
+# RMW PIN — must equal Dockerfile.hw's jazzy pin: every container on one robot
+# carries the same rmw_zenoh build (see Dockerfile.hw / README.hw.md, "The RMW
+# pin"). Bump all three here and there together.
+ARG ROS_SNAPSHOT=2026-09-11
+ARG RMW_ZENOH_CPP_VER=0.2.10-1noble.20260902.013525
+ARG ZENOH_CPP_VENDOR_VER=0.2.10-1noble.20260722.215006
+ARG ROS_SNAPSHOT_KEY_FPR=4B63CF8FDE49746E98FA01DDAD19BAB3CBF125EA
+COPY docker/keys/ros-snapshot-archive-keyring.asc /tmp/ros-snapshot.asc
+RUN apt-get update && apt-get install -y --no-install-recommends curl gnupg ca-certificates \
+ && curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+        -o /usr/share/keyrings/ros-archive-keyring.gpg \
+ && echo "deb [signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu noble main" \
+        > /etc/apt/sources.list.d/ros2.list \
+ && gpg --dearmor < /tmp/ros-snapshot.asc > /usr/share/keyrings/ros-snapshot-archive-keyring.gpg \
+ && gpg --show-keys --with-colons /tmp/ros-snapshot.asc | awk -F: '/^fpr/{print $10; exit}' \
+      | grep -qx "${ROS_SNAPSHOT_KEY_FPR}" \
+ && rm -f /tmp/ros-snapshot.asc \
+ && echo "deb [signed-by=/usr/share/keyrings/ros-snapshot-archive-keyring.gpg] http://snapshots.ros.org/jazzy/${ROS_SNAPSHOT}/ubuntu noble main" \
+        > /etc/apt/sources.list.d/ros2-snapshot.list \
+ && printf 'Package: ros-jazzy-rmw-zenoh-cpp ros-jazzy-zenoh-cpp-vendor\nPin: origin snapshots.ros.org\nPin-Priority: 1001\n' \
+        > /etc/apt/preferences.d/99-rmw-zenoh-pin \
+ && apt-get update && apt-get install -y --no-install-recommends \
+        ros-jazzy-ros-base \
+        ros-jazzy-rmw-zenoh-cpp=${RMW_ZENOH_CPP_VER} \
+        ros-jazzy-zenoh-cpp-vendor=${ZENOH_CPP_VENDOR_VER} \
+        ros-jazzy-cv-bridge \
+        ros-jazzy-message-filters \
+        ros-jazzy-sensor-msgs-py \
+        ros-jazzy-std-srvs \
+        ros-jazzy-tf-transformations \
+        ros-jazzy-grid-map-msgs \
+        ros-jazzy-nav-msgs \
+        ros-jazzy-ament-cmake-python \
+        ros-jazzy-rosidl-default-generators \
+        python3-colcon-common-extensions python3-vcstool python3-pip \
+        python3-numpy python3-opencv python3-scipy python3-shapely \
+        python3-transforms3d python3-ruamel.yaml python3-yaml \
+        tmux \
+ && apt-mark hold ros-jazzy-rmw-zenoh-cpp ros-jazzy-zenoh-cpp-vendor \
+ && test "$(dpkg-query -W -f='${Version}' ros-jazzy-rmw-zenoh-cpp)" = "${RMW_ZENOH_CPP_VER}" \
+ && test "$(dpkg-query -W -f='${Version}' ros-jazzy-zenoh-cpp-vendor)" = "${ZENOH_CPP_VENDOR_VER}" \
+ && rm -rf /var/lib/apt/lists/*
+
+# CuPy (the map itself) + torch (traversability filter). numpy<2 keeps noble's
+# apt numpy 1.26, which Jazzy's rosidl extensions and cv_bridge are built
+# against (the fork's docs pin the same). torch from the cu121 index ships its
+# own CUDA libraries.
+RUN pip3 install --no-cache-dir --break-system-packages \
+        --extra-index-url https://download.pytorch.org/whl/cu121 \
+        torch==2.5.1 cupy-cuda12x==13.6.0 simple-parsing==0.1.7 'numpy<2'
+
+# Sources at their pins. Only what the mapper node needs is built; the fork's
+# plane_segmentation is skipped. semantic_sensor is built only because
+# elevation_mapping_cupy exec_depends on it (colcon refuses otherwise); it is
+# pure Python and never runs here.
+COPY docker/mapper.repos /tmp/mapper.repos
+WORKDIR ${WS}
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p src && vcs import src < /tmp/mapper.repos \
+ && source /opt/ros/jazzy/setup.bash \
+ && colcon build --packages-select elevation_map_msgs ros2_numpy semantic_sensor elevation_mapping_cupy \
+        --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+ && rm -rf build log
+RUN printf 'source /opt/ros/jazzy/setup.bash\nsource %s/install/setup.bash\n' "${WS}" >> /root/.bashrc
+# Command comes from compose: the container only idles (`sleep infinity`).

@@ -1,0 +1,16 @@
+# Sources for the mighty-mapper image (Dockerfile.mapper): the 2D terrain mapper
+# for robots WITHOUT the Red Rovers' Orin, i.e. the scout (pascal). Kept out of
+# ../mighty.repos on purpose: setup.sh imports and colcon-builds everything in
+# that file natively on Humble, and this mapper is Jazzy + CUDA only.
+repositories:
+  # The rovers' mapper: publishes <ns>/{occ_2d,esdf_2d,planning_occ_2d}_topic
+  # from DLIO's deskewed cloud. Pinned to what OX05 runs (2026-10-02, clean tree).
+  elevation_mapping_cupy:
+    type: git
+    url: https://github.com/nehirgerek/elevation_mapping_cupy.git
+    version: 3968f412e799098b63d7dc3d0def30b784c378f5
+  # Not in the Jazzy apt repos. jazzy branch head on 2026-10-02.
+  ros2_numpy:
+    type: git
+    url: https://github.com/Box-Robotics/ros2_numpy.git
+    version: d5ebf723e1d2457d36fa89bf021b212e340c3c11

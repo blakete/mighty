@@ -78,3 +78,36 @@ services:
     init: true
     restart: "no"
     command: ["bash", "-c", "source /opt/ros/$${ROS_DISTRO}/setup.bash && exec ros2 run rmw_zenoh_cpp rmw_zenohd"]
+
+  # Profile 'mapper' (mighty_hw.sh adds it for ROBOT_TYPE=scout; never on a Red
+  # Rover, whose mapper runs on its Orin): elevation_mapping_cupy on this
+  # machine's NVIDIA GPU, publishing <ns>/{occ_2d,esdf_2d,planning_occ_2d}_topic
+  # from DLIO's deskewed cloud. Idles like hw-mighty; mighty_hw.sh docker-execs
+  # the mapper into a pane. Same identity and zenoh session as hw-mighty.
+  #   build: docker compose -f compose.hw.yaml --profile mapper build mapper
+  mapper:
+    profiles: [mapper]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.mapper
+    image: mighty-mapper:local
+    container_name: hw-mighty-mapper
+    network_mode: host
+    env_file:
+      - path: ${ROVER_ENV_FILE:-/etc/rover/rover.env}
+        required: false
+    environment:
+      ZENOH_SESSION_CONFIG_URI: /home/swarm/config/zenoh_session_config.json5
+    volumes:
+      - "${ROVER_CONFIG_DIR:-/home/swarm/config}:/home/swarm/config:ro"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    init: true
+    stop_grace_period: 15s
+    restart: "no"
+    command: ["sleep", "infinity"]
