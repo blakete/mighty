@@ -37,6 +37,10 @@
   transport: {
     unicast: { qos: { enabled: true } },
     link: { rx: { max_message_size: 1073741824 } },
+    // Off, as in rmw_zenoh's stock session config. Left to zenoh's own default
+    // (on), nodes try to map a 48 MB pool in the container's 64 MB /dev/shm and
+    // log "Unable to create POSIX shm segment: OS error 12" (then use TCP anyway).
+    shared_memory: { enabled: false },
   },
   adminspace: {
     enabled: true,
