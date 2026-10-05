@@ -159,7 +159,10 @@ start() {
         fi
     fi
 
-    "${COMPOSE[@]}" up -d
+    # Fresh containers: killing a pane's `docker exec` leaves its node running in
+    # the container, so reusing one would double every node (two MPCs).
+    tmux kill-session -t "${SESSION}" 2>/dev/null || true
+    "${COMPOSE[@]}" up -d --force-recreate
     echo "[mighty_hw] waiting for the ${CONTAINER} container..."
     local i
     for (( i = 0; i < 30; i += 2 )); do

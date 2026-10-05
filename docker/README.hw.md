@@ -37,7 +37,7 @@ Nothing in mighty, mpc or dynus_interfaces links the Livox SDK or driver; the on
 ## Usage
 
 ```bash
-./mighty_hw.sh start           # container up + 4-pane host session (auto-attaches on a tty)
+./mighty_hw.sh start           # fresh containers + host session (auto-attaches on a tty); replaces any running stack
 ./mighty_hw.sh attach          # or: tmux attach -t hw_mighty
 ./mighty_hw.sh status
 ./mighty_hw.sh stop
