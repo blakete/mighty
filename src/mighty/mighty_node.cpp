@@ -16,6 +16,8 @@
 
 #include <fstream>
 #include <iomanip>
+#include <set>
+#include <stdexcept>
 
 using namespace std::chrono_literals;
 
@@ -50,6 +52,34 @@ double debug_log_t(double now_sec) {
   if (t0 == 0.0) t0 = now_sec;
   return now_sec - t0;
 }
+
+// Fleet roster (ZGW "12-robot mixed fleet" plan, D1): "NAME:id" entries, normally from the generated
+// fleet_roster.yaml params file. Throws on a malformed entry, a repeated name or a repeated id.
+std::vector<std::pair<std::string, int>> parse_agent_roster(const std::vector<std::string>& entries) {
+  std::vector<std::pair<std::string, int>> out;
+  std::set<std::string> names;
+  std::set<int> ids;
+  for (const auto& e : entries) {
+    const auto colon = e.find(':');
+    if (colon == std::string::npos || colon == 0 || colon + 1 == e.size())
+      throw std::runtime_error("agent_roster entry '" + e + "' is not NAME:id");
+    const std::string name = e.substr(0, colon);
+    std::size_t used = 0;
+    int id = 0;
+    try {
+      id = std::stoi(e.substr(colon + 1), &used);
+    } catch (const std::exception&) {
+      throw std::runtime_error("agent_roster entry '" + e + "': the id is not an integer");
+    }
+    if (used != e.size() - colon - 1 || id < 1)
+      throw std::runtime_error("agent_roster entry '" + e + "': the id must be a positive integer");
+    if (!names.insert(name).second) throw std::runtime_error("agent_roster names " + name + " twice");
+    if (!ids.insert(id).second)
+      throw std::runtime_error("agent_roster gives id " + std::to_string(id) + " to two robots");
+    out.emplace_back(name, id);
+  }
+  return out;
+}
 }  // namespace
 
 // ----------------------------------------------------------------------------
@@ -61,9 +91,25 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
   // Get id from ns
   ns_ = this->get_namespace();
   ns_ = ns_.substr(ns_.find_last_of("/") + 1);
-  id_str_ = ns_.substr(ns_.size() -
-                       2);  // ns is like NX01, so we get the last two characters and convert to int
-  id_ = std::stoi(id_str_);
+  // With a fleet roster the id is the roster's (fleet-wide: JK03 and RR03 can share one fleet) and a namespace
+  // missing from it is fatal; without one, the namespace's last two digits as before (ns is like NX01).
+  agent_roster_ = parse_agent_roster(
+      this->declare_parameter<std::vector<std::string>>("agent_roster", std::vector<std::string>{}));
+  if (!agent_roster_.empty()) {
+    auto self = std::find_if(agent_roster_.begin(), agent_roster_.end(),
+                             [this](const auto& e) { return e.first == ns_; });
+    if (self == agent_roster_.end()) {
+      RCLCPP_FATAL(this->get_logger(), "namespace %s is not in agent_roster", ns_.c_str());
+      throw std::runtime_error("namespace " + ns_ + " is not in agent_roster");
+    }
+    id_ = self->second;
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%02d", id_);
+    id_str_ = buf;
+  } else {
+    id_str_ = ns_.substr(ns_.size() - 2);
+    id_ = std::stoi(id_str_);
+  }
 
   // Declare, set, and print parameters
   this->declareParameters();
@@ -214,12 +260,23 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
   }
   // Frame alignment subscriptions (inter-agent transforms)
   if (par_.use_frame_alignment) {
-    for (int i = 1; i <= par_.num_agents; i++) {
-      if (i == id_) continue;
-      std::string prefix = ns_.substr(0, ns_.size() - 2);
-      char other_name[16];
-      std::snprintf(other_name, sizeof(other_name), "%s%02d", prefix.c_str(), i);
-      std::string topic = "/frame_align/" + ns_ + "/" + std::string(other_name);
+    // Peers: every other roster entry by name (mixed prefixes), else this prefix + 1..num_agents as before.
+    std::vector<std::pair<std::string, int>> peers;
+    if (!agent_roster_.empty()) {
+      for (const auto& e : agent_roster_)
+        if (e.second != id_) peers.push_back(e);
+    } else {
+      const std::string prefix = ns_.substr(0, ns_.size() - 2);
+      for (int i = 1; i <= par_.num_agents; i++) {
+        if (i == id_) continue;
+        char other_name[16];
+        std::snprintf(other_name, sizeof(other_name), "%s%02d", prefix.c_str(), i);
+        peers.emplace_back(other_name, i);
+      }
+    }
+    for (const auto& peer : peers) {
+      const int i = peer.second;  // a plain local: lambdas cannot capture structured bindings before C++20
+      std::string topic = "/frame_align/" + ns_ + "/" + peer.first;
       frame_align_transforms_[i] = Eigen::Matrix4d::Identity();
       frame_align_received_[i] = false;
       auto sub = this->create_subscription<geometry_msgs::msg::TransformStamped>(
