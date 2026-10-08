@@ -710,8 +710,12 @@ void MIGHTY::retrieveCPs(std::vector<Eigen::Matrix<double, 3, 6>>& cps) { cps = 
  * @brief Replans the trajectory.
  * @param double last_replaning_computation_time: Last replanning computation time.
  * @param double current_time: Current timestamp.
+ * @param ReplanOutcome* outcome: Optional; set to the global-plan outcome of this call.
  */
-std::tuple<bool, bool> MIGHTY::replan(double last_replaning_computation_time, double current_time) {
+std::tuple<bool, bool> MIGHTY::replan(double last_replaning_computation_time, double current_time,
+                                      ReplanOutcome* outcome) {
+  if (outcome) *outcome = ReplanOutcome::SKIPPED;
+
   /* -------------------- Housekeeping -------------------- */
 
   MyTimer timer_housekeeping(true);
@@ -720,7 +724,7 @@ std::tuple<bool, bool> MIGHTY::replan(double last_replaning_computation_time, do
   resetData();
 
   // Check if we need to replan
-  if (!checkReadyToReplan()) return std::make_tuple(false, false);
+  if (!checkReadyToReplan()) return std::make_tuple(false, false);  // outcome: SKIPPED
 
   // Get states we need
   state local_state, local_G_term, last_plan_state;
@@ -745,7 +749,8 @@ std::tuple<bool, bool> MIGHTY::replan(double last_replaning_computation_time, do
   }
 
   // Check if we need to replan based on the distance to the terminal goal
-  if (!needReplan(local_state, local_G_term, last_plan_state)) return std::make_tuple(false, false);
+  if (!needReplan(local_state, local_G_term, last_plan_state))
+    return std::make_tuple(false, false);  // outcome: SKIPPED
 
   if (par_.debug_verbose)
     printf("[TIMING] Housekeeping: %.2f ms\n", timer_housekeeping.getElapsedMicros() / 1000.0);
@@ -758,8 +763,13 @@ std::tuple<bool, bool> MIGHTY::replan(double last_replaning_computation_time, do
     if (par_.debug_verbose)
       printf("[TIMING] Global Planning (FAILED): %.2f ms\n",
              timer_global.getElapsedMicros() / 1000.0);
+    if (outcome) *outcome = ReplanOutcome::FAILED;
     return std::make_tuple(false, false);
   }
+  // generateGlobalPath succeeded, so solveHGP -> HGPPlanner::plan ran A* during this call and
+  // set its reached-goal flag. Only the replan timer drives this path, so the value is not stale.
+  if (outcome)
+    *outcome = hgp_manager_.reachedGoal() ? ReplanOutcome::SUCCESS : ReplanOutcome::PARTIAL;
   if (par_.debug_verbose)
     printf("[TIMING] Global Planning: %.2f ms\n", timer_global.getElapsedMicros() / 1000.0);
 

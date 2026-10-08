@@ -188,6 +188,8 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
       this->create_publisher<dynus_interfaces::msg::Trajectory>("trajectory", critical_qos);
   pub_mpc_path_ = this->create_publisher<dynus_interfaces::msg::SpeedyPath>("mpc_waypoints", 10);
   pub_goal_reached_ = this->create_publisher<std_msgs::msg::Empty>("goal_reached", critical_qos);
+  pub_planner_status_ =
+      this->create_publisher<goal_selector_msgs::msg::PlannerStatus>("planner_status", critical_qos);
   pub_command_to_exec_time_ =
       this->create_publisher<std_msgs::msg::Float64>("command_to_exec_time", 10);
 
@@ -243,11 +245,10 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
   timer_goal_ =
       this->create_wall_timer(std::chrono::duration<double>(par_.dc),
                               std::bind(&MIGHTY_NODE::publishGoal, this), this->cb_group_goal_);
-  // Goal-reached check is needed for both benchmark logging and exploration
-  // (so the manager knows when the robot has reached a frontier).
-  if (use_benchmark_ || par_.expl_enabled)
-    timer_goal_reached_check_ = this->create_wall_timer(
-        100ms, std::bind(&MIGHTY_NODE::goalReachedCheckCallback, this), this->cb_groups_re_[2]);
+  // Goal-reached check always runs: it publishes planner_status REACHED. (goal_reached and
+  // logData are still gated inside the callback, as before.)
+  timer_goal_reached_check_ = this->create_wall_timer(
+      100ms, std::bind(&MIGHTY_NODE::goalReachedCheckCallback, this), this->cb_groups_re_[2]);
   timer_cleanup_old_trajs_ = this->create_wall_timer(
       500ms, std::bind(&MIGHTY_NODE::cleanUpOldTrajsCallback, this), this->cb_groups_mu_[4]);
   if (par_.use_hardware)
@@ -257,8 +258,6 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
   // Stop the timer for callback
   if (timer_replanning_) timer_replanning_->cancel();
   if (timer_goal_) timer_goal_->cancel();
-  if (!use_benchmark_ && !par_.expl_enabled && timer_goal_reached_check_)
-    timer_goal_reached_check_->cancel();
 
   // Initialize the DYNUS object
   mighty_ptr_ = std::make_shared<MIGHTY>(par_);
@@ -1609,8 +1608,25 @@ void MIGHTY_NODE::replanCallback() {
   }
 
   // Replan
+  // Stamp of the goal held by the planner, read before replan (a goal arriving mid-tick is
+  // then reported under the old stamp, which the selector ignores).
+  const auto goal_stamp = getGoalStamp();
+  ReplanOutcome replan_outcome = ReplanOutcome::SKIPPED;
   auto [replanning_result, hgp_result] =
-      mighty_ptr_->replan(replanning_computation_time_, current_time);
+      mighty_ptr_->replan(replanning_computation_time_, current_time, &replan_outcome);
+
+  // Report the global-plan outcome of this tick (SKIPPED/FAILED/SUCCESS/PARTIAL).
+  {
+    using PS = goal_selector_msgs::msg::PlannerStatus;
+    uint8_t status = PS::SKIPPED;
+    switch (replan_outcome) {
+      case ReplanOutcome::SKIPPED: status = PS::SKIPPED; break;
+      case ReplanOutcome::FAILED:  status = PS::FAILED;  break;
+      case ReplanOutcome::SUCCESS: status = PS::SUCCESS; break;
+      case ReplanOutcome::PARTIAL: status = PS::PARTIAL; break;
+    }
+    publishPlannerStatus(status, goal_stamp);
+  }
 
   // Republish the terminal goal marker so RViz tracks any in-replan
   // relocation done by sanitizeTerminalGoal (e.g. when an obstacle gets
@@ -1811,9 +1827,24 @@ void MIGHTY_NODE::swarmGoalCallback(const geometry_msgs::msg::PoseStamped& msg) 
  */
 void MIGHTY_NODE::terminalGoalCallbackImpl(const geometry_msgs::msg::PoseStamped& msg,
                                            bool from_user) {
-  // Record the time when goal is received (for command-to-execution timing)
-  goal_received_time_ = this->now();
-  waiting_for_first_traj_ = true;
+  // header.stamp identifies one goal commitment. A zero stamp is replaced with now() so it is
+  // always treated as a new goal.
+  builtin_interfaces::msg::Time stamp = msg.header.stamp;
+  if (stamp.sec == 0 && stamp.nanosec == 0) stamp = this->now();
+
+  // Same (non-zero) stamp as the goal we hold: position update only. No state resets, no timer
+  // resets, no manual/exploration flag changes. A zero held stamp (no goal yet) never matches,
+  // so a goal stamped 0 by now() (e.g. sim time before /clock) is still a new goal.
+  const auto held_stamp = getGoalStamp();
+  const bool held_valid = held_stamp.sec != 0 || held_stamp.nanosec != 0;
+  const bool position_update_only =
+      held_valid && stamp.sec == held_stamp.sec && stamp.nanosec == held_stamp.nanosec;
+
+  if (!position_update_only) {
+    // Record the time when goal is received (for command-to-execution timing)
+    goal_received_time_ = this->now();
+    waiting_for_first_traj_ = true;
+  }
 
   // Debug log: every received term_goal
   if (auto& s = debug_log_stream(); s.is_open()) {
@@ -1825,7 +1856,7 @@ void MIGHTY_NODE::terminalGoalCallbackImpl(const geometry_msgs::msg::PoseStamped
     s.flush();
   }
 
-  if (from_user) {
+  if (!position_update_only && from_user) {
     manual_goal_active_ = true;
     // A manual goal preempts any in-progress exploration goal.
     exploration_active_ = false;
@@ -1871,14 +1902,46 @@ void MIGHTY_NODE::terminalGoalCallbackImpl(const geometry_msgs::msg::PoseStamped
     if (G_term.pos.z() > par_.z_max) G_term.pos.z() = par_.z_max;
   }
 
+  if (position_update_only) {
+    // Same goal, new position (e.g. re-relocation): update G_term only, as the per-replan
+    // relocation does.
+    mighty_ptr_->setGterm(G_term);
+    publishState(G_term, pub_point_G_term_);
+    return;
+  }
+
   // Update the terminal goal
   mighty_ptr_->setTerminalGoal(G_term);
+  {
+    std::lock_guard<std::mutex> lock(mtx_goal_stamp_);
+    goal_stamp_ = stamp;
+  }
 
   // Publish the term goal for visualization
   publishState(G_term, pub_point_G_term_);
 
   // Start replanning
   timer_replanning_->reset();
+}
+
+// ----------------------------------------------------------------------------
+
+builtin_interfaces::msg::Time MIGHTY_NODE::getGoalStamp() {
+  std::lock_guard<std::mutex> lock(mtx_goal_stamp_);
+  return goal_stamp_;
+}
+
+/**
+ * @brief Publish one planner_status message for the goal with the given stamp.
+ */
+void MIGHTY_NODE::publishPlannerStatus(uint8_t status,
+                                       const builtin_interfaces::msg::Time& goal_stamp) {
+  goal_selector_msgs::msg::PlannerStatus msg;
+  msg.header.stamp = this->now();
+  msg.header.frame_id = par_.map_frame_id;
+  msg.goal_stamp = goal_stamp;
+  msg.status = status;
+  pub_planner_status_->publish(msg);
 }
 
 // ----------------------------------------------------------------------------
@@ -1928,7 +1991,10 @@ void MIGHTY_NODE::goalReachedCheckCallback() {
   if (use_benchmark_) {
     logData();
   }
-  pub_goal_reached_->publish(std_msgs::msg::Empty());
+  // This timer now always runs (for planner_status REACHED); the goal_reached gate below only
+  // preserves the old behaviour, where the timer existed only if benchmarking or exploring.
+  if (use_benchmark_ || par_.expl_enabled) pub_goal_reached_->publish(std_msgs::msg::Empty());
+  publishPlannerStatus(goal_selector_msgs::msg::PlannerStatus::REACHED, getGoalStamp());
 
   // If the robot reached an exploration goal, mark it visited and clear our
   // active flag so the next explore-select tick can pick the next frontier.

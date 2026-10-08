@@ -15,6 +15,7 @@
   <depend>rclcpp_components</depend>
   <depend>example_interfaces</depend>
   <depend>dynus_interfaces</depend>
+  <depend>goal_selector_msgs</depend>
   <depend>visualization_msgs</depend>
   <depend>decomp_ros_msgs</depend>
   <depend>gazebo_msgs</depend>

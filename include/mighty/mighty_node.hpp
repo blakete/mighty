@@ -29,6 +29,7 @@
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <dynus_interfaces/msg/speedy_path.hpp>
+#include <goal_selector_msgs/msg/planner_status.hpp>
 #include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/float64.hpp>
 #include <std_msgs/msg/string.hpp>
@@ -246,6 +247,7 @@ class MIGHTY_NODE : public rclcpp::Node {
   rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr pub_point_A_;
   rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr pub_current_state_;
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr pub_goal_reached_;
+  rclcpp::Publisher<goal_selector_msgs::msg::PlannerStatus>::SharedPtr pub_planner_status_;
   rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr pub_setpoint_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_actual_traj_;
   rclcpp::Publisher<dynus_interfaces::msg::YawOutput>::SharedPtr pub_yaw_output_;
@@ -506,6 +508,14 @@ class MIGHTY_NODE : public rclcpp::Node {
   // Timer to make sure we don't sample point cloud too often
   rclcpp::Time last_lidar_callback_time_;
   rclcpp::Time last_depth_camera_callback_time_;
+
+  // Stamp of the term_goal the planner currently holds (zero before any goal). Written by
+  // terminalGoalCallbackImpl (goal callback / swarm / frontier / return-home callers) and read by
+  // the replan and goal-reached timers, which run in different callback groups.
+  builtin_interfaces::msg::Time goal_stamp_;
+  std::mutex mtx_goal_stamp_;
+  builtin_interfaces::msg::Time getGoalStamp();
+  void publishPlannerStatus(uint8_t status, const builtin_interfaces::msg::Time& goal_stamp);
 
   // Command-to-execution timing (time from goal received to first trajectory)
   rclcpp::Time goal_received_time_;

@@ -49,6 +49,10 @@ using AlignedPlaneBlockVec = std::vector<PlaneBlock, Eigen::aligned_allocator<Pl
 using ConstraintBlocks =
     std::vector<AlignedPlaneBlockVec, Eigen::aligned_allocator<AlignedPlaneBlockVec>>;
 
+// Which case a replan() call ended in (global-plan outcome; see goal_selector_msgs/PlannerStatus).
+// FAILED/SKIPPED <=> hgp_result == false. A later local-optimisation failure keeps SUCCESS/PARTIAL.
+enum class ReplanOutcome { SKIPPED, FAILED, SUCCESS, PARTIAL };
+
 enum DroneStatus { YAWING = 0, TRAVELING = 1, GOAL_SEEN = 2, GOAL_REACHED = 3 };
 
 /** @brief Core trajectory planner using Hermite spline-based optimization.
@@ -113,9 +117,12 @@ class MIGHTY {
   /** @brief Execute one full replan cycle (global path + local trajectory).
    *  @param last_replaning_computation_time Computation time of the previous replan.
    *  @param current_time Current wall/sim time.
+   *  @param outcome Optional out-param: which case the replan ended in (SKIPPED, FAILED, SUCCESS
+   *         or PARTIAL). Always written when non-null.
    *  @return Tuple of (replan_success, trajectory_changed).
    */
-  std::tuple<bool, bool> replan(double last_replaning_computation_time, double current_time);
+  std::tuple<bool, bool> replan(double last_replaning_computation_time, double current_time,
+                                ReplanOutcome* outcome = nullptr);
 
   /** @brief Begin adaptive k-value estimation for replanning intervals. */
   void startAdaptKValue();

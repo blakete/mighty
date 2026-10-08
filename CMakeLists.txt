@@ -43,6 +43,7 @@ find_package(PCL REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(dynus_interfaces REQUIRED)
+find_package(goal_selector_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
@@ -81,7 +82,7 @@ set_target_properties(map2d PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # add executables
 add_executable(mighty src/mighty/mighty_node.cpp src/mighty/mighty.cpp src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/mighty/utils.cpp src/mighty/lbfgs_solver.cpp src/mighty/lbfgs_solver_utils.cpp src/mighty/frontier_detector.cpp src/mighty/frontier_manager.cpp)
 target_link_libraries(mighty ${PCL_LIBRARIES} map2d)
-ament_target_dependencies(mighty rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
+ament_target_dependencies(mighty rclcpp example_interfaces dynus_interfaces goal_selector_msgs visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
 # Add odom to state converter
 add_executable(convert_odom_to_state src/mighty/convert_odom_to_state.cpp)

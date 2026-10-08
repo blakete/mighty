@@ -408,6 +408,9 @@ class HGPManager {
   std::shared_ptr<const class OccGrid2D> occ_grid_2d_;
 
  public:
+  /** @brief True if the last solveHGP A* search reached the exact goal (false: partial path). */
+  bool reachedGoal() const { return planner_ptr_ && planner_ptr_->reachedGoal(); }
+
   /** @brief Check if 2D ground robot planning mode is active. */
   bool isGroundRobot() const { return is_ground_robot_; }
 
