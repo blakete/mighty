@@ -329,7 +329,7 @@ mighty_node:
         # Detects unexplored frontiers in the 2D occupancy grid and autonomously
         # drives to them. A manual term_goal preempts; exploration resumes after
         # the manual goal is reached. See plan: snazzy-moseying-donut.md
-        exploration.enabled: true                                # [-] Master switch
+        exploration.enabled: false                               # [-] Master switch
         exploration.select_rate_hz: 1.0                          # [Hz] Goal-selection tick
         exploration.default_goal_z: 0.0                          # [m]  z for issued exploration goals
         exploration.detector.cluster_min_cells: 6                # [cells] drop tiny frontier clusters
@@ -341,7 +341,7 @@ mighty_node:
         # seeds outside the box are dropped, so the robot only receives
         # exploration goals inside [min_x,max_x] x [min_y,max_y]. RViz shows
         # the box as a yellow rectangle with the label "Exploration Area".
-        exploration.bounds.enabled: true                         # [-]  master switch
+        exploration.bounds.enabled: false                        # [-]  master switch
         exploration.bounds.min_x: -7.0                          # [m]
         exploration.bounds.max_x:  25.0                          # [m]
         exploration.bounds.min_y: -27.0                          # [m]

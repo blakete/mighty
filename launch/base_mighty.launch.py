@@ -34,6 +34,10 @@ def generate_launch_description():
     use_gazebo_gui_arg = DeclareLaunchArgument(
         'use_gazebo_gui', default_value='false', description='Flag to enable or disable gazebo gui'
     )
+    pause_arg = DeclareLaunchArgument(
+        'pause', default_value='false',
+        description='Start gzserver paused (unpause via /unpause_physics)'
+    )
     use_dyn_obs_arg = DeclareLaunchArgument(
         'use_dyn_obs', default_value='false', description='Flag to enable or disable dynamic obstacles'
     )
@@ -78,6 +82,7 @@ def generate_launch_description():
             'path_push': 'forest3.world',
             'ACL_office': 'ACL_office.world',
             'ground_robot': 'ACL_office.world',
+            'ACL_office_simple': 'ACL_office_simple.world',
             'ground_robot_forest': 'ground_robot_forest.world',
             'multiagent_testing': 'empty.world',
             'empty_wo_ground': 'empty_wo_ground.world',
@@ -130,7 +135,8 @@ def generate_launch_description():
             PythonLaunchDescriptionSource(
                 PathJoinSubstitution([FindPackageShare('gazebo_ros'), 'launch', 'gazebo.launch.py'])
             ),
-            launch_arguments={'world': world_path, 'use_sim_time': 'false', 'gui': use_gazebo_gui, 'enable_gpu': 'true'}.items()
+            launch_arguments={'world': world_path, 'use_sim_time': 'false', 'gui': use_gazebo_gui, 'enable_gpu': 'true',
+                              'pause': LaunchConfiguration('pause').perform(context)}.items()
         )
 
         # Dynamic obstacles (optional)
@@ -176,6 +182,7 @@ def generate_launch_description():
         env_arg,
         use_rviz_arg,
         use_gazebo_gui_arg,
+        pause_arg,
         use_dyn_obs_arg,
         use_ground_robot_arg,
         num_dyn_obstacles_arg,

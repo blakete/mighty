@@ -77,9 +77,10 @@ def generate_launch_description():
     map_size_z_arg = DeclareLaunchArgument('map_size_z', default_value='6.0')
     odometry_topic_arg = DeclareLaunchArgument('odometry_topic', default_value='visual_slam/odom')
     only_nodes_arg = DeclareLaunchArgument('only_nodes', default_value='',
-        description='HARDWARE ONLY. Comma-separated subset of this file\'s nodes '
-                    'to start; empty = all. Keys are the nodes\' real ROS names: '
-                    'mighty_node, convert_odom_to_state, convert_vicon_to_state, mpc')
+        description='Comma-separated subset of this file\'s nodes to start; empty = all. '
+                    'Keys are the nodes\' real ROS names: mighty_node, mpc, and on hardware '
+                    'convert_odom_to_state, convert_vicon_to_state; in sim robot_state_publisher, '
+                    'spawn_entity, fake_sim, pcl_render_node')
 
     # Opaque function to launch nodes
     def launch_setup(context, *args, **kwargs):
@@ -368,21 +369,31 @@ def generate_launch_description():
         # can be copy-pasted straight out of `ros2 node list`.
         only_nodes = LaunchConfiguration('only_nodes').perform(context)
         if only_nodes:
-            if not use_hardware:
-                raise RuntimeError(
-                    'only_nodes:= is a hardware-only filter; in sim it would '
-                    'silently drop fake_sim/pcl_render and leave mighty with no state')
-            keyed = {
-                'mighty_node':            mighty_node,
-                'convert_odom_to_state':  hw_odom_to_state_node,
-                'convert_vicon_to_state': pose_twist_to_state_node,
-                'mpc':                    mpc_node,
-            }
+            if use_hardware:
+                keyed = {
+                    'mighty_node':            mighty_node,
+                    'convert_odom_to_state':  hw_odom_to_state_node,
+                    'convert_vicon_to_state': pose_twist_to_state_node,
+                    'mpc':                    mpc_node,
+                }
+            else:
+                keyed = {
+                    'robot_state_publisher':  robot_state_publisher_node,
+                    'spawn_entity':           spawn_entity_node,
+                    'fake_sim':               fake_sim_node,
+                    'pcl_render_node':        pcl_render_node,
+                    'mighty_node':            mighty_node,
+                    'mpc':                    mpc_node,
+                }
             wanted = [k.strip() for k in only_nodes.split(',') if k.strip()]
             unknown = [k for k in wanted if k not in keyed]
             if unknown:
                 raise RuntimeError(f'only_nodes:= unknown key(s) {unknown}; '
                                    f'valid keys: {sorted(keyed)}')
+            if (not use_hardware and {'mighty_node', 'mpc'} & set(wanted)
+                    and 'fake_sim' not in wanted):
+                raise RuntimeError('only_nodes:= in sim: mighty_node/mpc need fake_sim '
+                                   '(it publishes their state and TF)')
             picked = [keyed[k] for k in wanted if keyed[k] in nodes_to_start]
             if not picked:
                 # An empty action list makes ros2 launch exit 0 in SILENCE, which

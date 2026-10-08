@@ -8,6 +8,7 @@
 
 #include <math.h>
 
+#include <atomic>
 #include <chrono>
 #include <thread>
 
@@ -174,7 +175,10 @@ class FakeSim : public rclcpp::Node {
     }
 
     // Delay before sending the initial state to Gazebo
-    if (send_state_to_gazebo_) std::thread(&FakeSim::sendGazeboState, this).detach();
+    if (send_state_to_gazebo_) {
+      gazebo_send_in_flight_ = true;
+      std::thread(&FakeSim::sendGazeboState, this).detach();
+    }
 
     // Flag to publish drone marker
     publish_marker_drone_ = (visual_level > 0);
@@ -215,6 +219,12 @@ class FakeSim : public rclcpp::Node {
   dynus_interfaces::msg::State state_;
   bool publish_marker_drone_{false};
   bool send_state_to_gazebo_{true};
+  // sendGazeboState() blocks on the service future, so it runs on a detached thread; without this
+  // guard, a slow/backed-up Gazebo response means the 100Hz timer piles up a new detached thread
+  // every 10ms with no bound, until std::thread itself fails (EAGAIN) and crashes the process.
+  std::atomic<bool> gazebo_send_in_flight_{false};
+  // Gazebo answers in ~1ms; past this the response is treated as lost (see sendGazeboState()).
+  static constexpr std::chrono::milliseconds kGazeboResponseTimeout{100};
 
   std::shared_ptr<tf2_ros::Buffer> tf2_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf2_listener_;
@@ -318,11 +328,17 @@ class FakeSim : public rclcpp::Node {
 
     auto future = gazebo_client_->async_send_request(request);
 
-    try {
-      (void)future.get();
-    } catch (const std::exception&) {
-      // Keep silent (same behavior as your original code)
+    // Bounded wait: On timeout, drop the request and let the next tick send a new one.
+    if (future.wait_for(kGazeboResponseTimeout) == std::future_status::ready) {
+      try {
+        (void)future.get();
+      } catch (const std::exception&) {
+        // Keep silent
+      }
+    } else {
+      gazebo_client_->remove_pending_request(future);
     }
+    gazebo_send_in_flight_ = false;
   }
 
   void getTransformStamped() {
@@ -412,8 +428,10 @@ class FakeSim : public rclcpp::Node {
       pub_marker_drone_->publish(getDroneMarker());
     }
 
-    // Send the state to Gazebo
-    if (send_state_to_gazebo_) {
+    // Send the state to Gazebo — skip this tick if the previous send hasn't finished yet, rather
+    // than piling up another detached thread on top of it (see gazebo_send_in_flight_).
+    bool expected = false;
+    if (send_state_to_gazebo_ && gazebo_send_in_flight_.compare_exchange_strong(expected, true)) {
       std::thread(&FakeSim::sendGazeboState, this).detach();
     }
 

@@ -938,12 +938,6 @@ class MapUtil {
     // Initialize the closest free point
     closest_free_point = point;
 
-    // Check if the map is initialized
-    if (!map_initialized_) {
-      std::cout << "Map is not initialized" << std::endl;
-      return;
-    }
-
     // Get the position of the point in int
     Veci<3> point_int = floatToInt(point);
 
@@ -1000,11 +994,6 @@ class MapUtil {
    */
   void findClosestNonOccupiedPoint(const Vec3f& point, Vec3f& closest_non_occupied_point) {
     closest_non_occupied_point = point;
-
-    if (!map_initialized_) {
-      std::cout << "Map is not initialized" << std::endl;
-      return;
-    }
 
     Veci<3> point_int = floatToInt(point);
     int index = getIndex(point_int);
