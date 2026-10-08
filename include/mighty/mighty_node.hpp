@@ -375,6 +375,7 @@ class MIGHTY_NODE : public rclcpp::Node {
   int id_;
   std::string ns_;
   std::string id_str_;
+  std::vector<std::pair<std::string, int>> agent_roster_;  // "NAME:id" parameter agent_roster, in file order
   parameters par_;
   uint32_t trajectory_id_ = 0;             // Trajectory ID for replan detection
   double final_g_ = 0.0;                   // only for debugging
