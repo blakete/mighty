@@ -13,6 +13,8 @@
 #   DLIO            dlio.service (dlio_ws)          -> <ns>/dlio/odom_node/odom, map->odom
 #   livox driver    sensors.service                  -> <ns>/livox/{lidar,imu}
 #   mapper          elevation_mapping_cupy, OX08 Orin -> <ns>/occ_2d_topic, esdf_2d_topic
+#                   or, with map fusion, mapping.service (rover repo: global_mapper +
+#                   map_fusion in their own container) -> the same three grid topics
 #   zenoh router    drive.service                    -> :7447
 #   sim repos       gazebo/uav_simulator/livox sim   (BUILD_SIMULATION=OFF)
 # Nothing in mighty, mpc or dynus_interfaces links the Livox SDK or driver:
