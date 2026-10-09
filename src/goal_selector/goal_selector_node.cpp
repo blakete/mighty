@@ -229,6 +229,7 @@ void GoalSelectorNode::declareParameters() {
   this->declare_parameter("exploration.visited_map.fuse_into_local", true);
   this->declare_parameter("exploration.visited_map.detect_on_visited_map", true);
   this->declare_parameter("exploration.visualization.publish_markers", true);
+  this->declare_parameter("exploration.frontier_band_radius_m", 0.5);
   this->declare_parameter("exploration.minpos.enabled", false);
   this->declare_parameter("exploration.minpos.peer_timeout_sec", 5.0);
   this->declare_parameter("exploration.minpos.peer_publish_rate_hz", 5.0);
@@ -305,6 +306,7 @@ void GoalSelectorNode::readParameters() {
   par_.expl_fuse_persistent_into_local = b("exploration.visited_map.fuse_into_local");
   par_.expl_detect_on_visited_map = b("exploration.visited_map.detect_on_visited_map");
   par_.expl_publish_markers = b("exploration.visualization.publish_markers");
+  par_.expl_frontier_band_radius_m = d("exploration.frontier_band_radius_m");
   par_.expl_use_minpos = b("exploration.minpos.enabled");
   par_.expl_peer_timeout_sec = d("exploration.minpos.peer_timeout_sec");
   par_.expl_peer_publish_rate_hz = d("exploration.minpos.peer_publish_rate_hz");

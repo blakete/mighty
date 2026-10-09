@@ -56,7 +56,6 @@ struct parameters {
   // Formation flight (per-agent membership + desired pairwise offsets)
   bool use_formation{false};
   double formation_weight{0.0};
-  std::vector<double> formation_self_offset{0.0, 0.0, 0.0};   // δ_i (length 3)
   std::vector<int64_t> formation_neighbor_ids;                // neighbor agent IDs
   std::vector<double> formation_neighbor_offsets;             // flat 3*N: δ_ij
 
@@ -93,10 +92,6 @@ struct parameters {
   double free_start_factor;
   bool use_free_goal;
   double free_goal_factor;
-  bool relocate_occupied_goal;
-  double goal_relocation_clearance_m{1.0};  // [m] Min clearance from occupied cells enforced
-                                             // when relocating a goal out of occupied space
-                                             // (ground-robot 2D path; see sanitizeTerminalGoal2D)
 
   // LOS post processing parameters
   int los_cells;
@@ -324,104 +319,6 @@ struct parameters {
   // Trajectory publishing parameters
   int trajectory_downsample_points{500};  // Number of points to downsample trajectory to
   double mpc_path_spacing{0.05};          // [m] Spacing between waypoints in MPC path
-
-  // Frontier-based exploration (ground robot only).
-  // Master toggle is `expl_enabled`. When enabled, mighty_node runs a frontier
-  // detector + persistent global frontier database on the published 2D occupancy
-  // grid (occ_2d_topic), and autonomously issues exploration goals via the same
-  // pathway as a manual term_goal. A manual term_goal preempts exploration; the
-  // robot resumes exploration after the manual goal is reached.
-  bool   expl_enabled{false};
-  double expl_select_rate_hz{1.0};
-  double expl_default_goal_z{0.0};
-  // Detector
-  int    expl_cluster_min_cells{6};
-  int    expl_border_margin_cells{2};
-  int    expl_obstacle_clearance_cells{1};
-  double expl_robot_snap_radius_m{1.0};
-  // ESDF-based obstacle clearance for frontier centroids. Frontiers whose
-  // centroid is within this distance of any obstacle (per the 2D ESDF) are
-  // dropped and existing records are invalidated. Set to 0 (or no ESDF
-  // available) to disable. Meters.
-  double expl_min_obstacle_distance_m{0.0};
-  // Optional axis-aligned exploration bounds (world frame). Frontier seeds
-  // outside the box are dropped, so the robot only receives goals inside it.
-  bool   expl_bounds_enabled{false};
-  double expl_bounds_min_x{-50.0};
-  double expl_bounds_max_x{ 50.0};
-  double expl_bounds_min_y{-50.0};
-  double expl_bounds_max_y{ 50.0};
-  // Utility weights
-  double expl_w_size{1.0};
-  double expl_w_dist{2.0};
-  double expl_w_info{1.0};
-  double expl_w_revisit{0.5};
-  double expl_w_heading{0.3};
-  double expl_size_ref_m2{5.0};
-  double expl_dist_ref_m{25.0};
-  double expl_sensor_radius_m{5.0};
-  double expl_goal_select_threshold{-1.0e9};
-  // Manager / lifecycle
-  double expl_merge_radius_m{1.0};
-  double expl_centroid_ema_alpha{0.5};
-  double expl_visit_radius_m{2.0};
-  double expl_visit_dwell_sec{1.0};
-  int    expl_verify_radius_cells{2};
-  int    expl_max_frontiers{1000};
-  int    expl_unreachable_consec_thresh{5};
-  // Pursuit timeout — auto-invalidate a frontier we've been chasing too long.
-  // Budget = max(min_sec, dist / v_ref * factor). Set factor <= 0 to disable.
-  double expl_pursuit_timeout_factor{10.0};
-  double expl_pursuit_timeout_v_ref{0.5};
-  double expl_pursuit_timeout_min_sec{10.0};
-  // Invalidation keep-out — drop fresh clusters that fall within radius_m of
-  // any INVALIDATED record whose invalidation is still inside the cooldown
-  // window. Set radius_m <= 0 to disable; cooldown_sec <= 0 = permanent.
-  double expl_invalidation_keep_out_radius_m{1.5};
-  double expl_invalidation_cooldown_sec{30.0};
-  // Goal preemption — while pursuing a frontier, keep re-ranking on each
-  // select tick and switch when a different frontier beats the current one's
-  // FRESH utility by more than margin. With w_dist/dist_ref_m = 1.0/m the
-  // margin is effectively meters-of-advantage. min_commit_sec suppresses
-  // thrash right after a switch. Disabled by default (legacy hard-commit).
-  bool   expl_preempt_enabled{false};
-  double expl_preempt_margin{2.0};
-  double expl_preempt_min_commit_sec{2.0};
-  // Static stuck timeout: after the robot has moved and then stops making
-  // progress (< stuck_move_thresh_m displacement) for stuck_timeout_sec while
-  // pursuing a frontier, that frontier is INVALIDATED and the selector re-picks.
-  // stuck_timeout_sec <= 0 disables (default keeps the feature on at 5 s).
-  double expl_stuck_timeout_sec{5.0};
-  double expl_stuck_move_thresh_m{0.15};
-  // Persistent visited bitmap (suppresses re-detection of revisited frontiers)
-  double expl_visited_map_center_x{0.0};
-  double expl_visited_map_center_y{0.0};
-  double expl_visited_map_width_m{100.0};
-  double expl_visited_map_height_m{100.0};
-  double expl_visited_map_resolution_m{0.15};
-  bool   expl_publish_visited_map{true};
-  // When true, fuse persistent visited_map_ values into UNKNOWN cells of the
-  // freshly received local OccupancyGrid before it is consumed by HGP / the
-  // local optimizer / the frontier detector. This makes revisited regions
-  // immediately come back with their last-known FREE/OCCUPIED state instead
-  // of one-frame UNKNOWN flicker. Static-environment only — re-introduces
-  // stale OCCUPIED for moving obstacles that have since left.
-  bool   expl_fuse_persistent_into_local{true};
-  // When true, run the frontier detector on the persistent visited_map_
-  // (entire mission history) instead of the freshly received local sliding
-  // window. Surfaces frontiers at the boundary of explored area no matter
-  // where the robot currently is — fixes "revisited corridor doesn't show
-  // its far-end frontier" symptom. Inherits the phantom-OCCUPIED caveat of
-  // the persistent map for dynamic environments.
-  bool   expl_detect_on_visited_map{true};
-  // MinPos multi-robot exploration
-  bool   expl_use_minpos{false};              // enable rank-based peer-aware allocation
-  double expl_peer_timeout_sec{5.0};          // drop peer after this silence (seconds)
-  double expl_peer_publish_rate_hz{5.0};      // throttle for pose broadcast (Hz)
-  double expl_min_frontier_dist_to_peers_m{0.0};  // reject frontier candidates within this radius of any active peer; 0 disables
-  double expl_peer_visit_radius_m{2.0};       // mark frontier VISITED when any active peer is within this radius (sticky); 0 disables
-  // Visualization
-  bool   expl_publish_markers{true};
 };
 
 struct BasisConverter {

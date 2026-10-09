@@ -38,16 +38,24 @@
  *   manualGoalUnreachable(); the goal is never released or resent.
  *
  * Relocation (spec 4.4)
- *   On every onPlanningOccGrid() (and when a manual / return-home goal is committed) the selector
- *   rebuilds the planner's 2D window map from the latest planning_occ_2d grid with the planner's
- *   window geometry and inflation (map2d library). Manual and return-home goals are relocated on it;
- *   the current such goal is re-relocated (from its last published, relocated position, as the
- *   planner does from its stored G_term; also after REACHED) on every rebuild and republished with the same stamp if
- *   it moved. Relocation failure publishes the unrelocated goal (D10). ACTIVE / DORMANT frontiers
- *   whose centroid lies in an occupied or inflated cell of the map are invalidated (D8b).
+ *   On every onPlanningOccGrid() (and when a goal is committed) the selector rebuilds the planner's
+ *   2D window map from the latest planning_occ_2d grid with the planner's window geometry and
+ *   inflation_2d_m (map2d library). ALL goal kinds (frontier, manual, return-home) are relocated on it,
+ *   switched by relocate_occupied_goal (false: published unrelocated, never re-relocated). The current
+ *   goal is re-relocated on every rebuild from its last published (relocated) position, as the planner
+ *   does from its stored G_term (also after REACHED), and republished with the same stamp if it moved.
+ *   Relocation failure publishes the unrelocated goal (D10).
  *   The window is centred on the robot and sized from the robot->goal distance, where "goal" is the
- *   current commitment's *stored* (unrelocated) target, projected on the horizon sphere exactly as
+ *   current commitment's published (relocated) position, projected on the horizon sphere exactly as
  *   the planner does; with no commitment the goal is taken to be the robot position.
+ *
+ * Frontier band (D8b, revised)
+ *   A separate band map is built from the raw occ_2d grid: only occupied cells are obstacles (unknown
+ *   is NOT; planning_occ_2d fills unknown space as occupied, so it cannot be used), on the same
+ *   window geometry, inflated by expl_frontier_band_radius_m. ACTIVE / DORMANT frontiers whose centroid
+ *   is in that band (in-window only) are invalidated via markInvalidated on every planning-grid
+ *   update and before every selection. The band map is rebuilt lazily when the raw grid or the window
+ *   changes. Not built when exploration is disabled.
  */
 #pragma once
 
@@ -140,6 +148,9 @@ struct SelectorParams {
   double expl_peer_visit_radius_m{2.0};
   // Visualization
   bool   expl_publish_markers{true};
+  // D8b: frontiers whose centroid is within this radius of a REAL obstacle (occupied cell of occ_2d;
+  // unknown is not an obstacle) are invalidated. Hw value 0.5 = the planner's inflation_2d_m.
+  double expl_frontier_band_radius_m{0.5};
 
   // --- shared with the planner's YAML ---
   double goal_radius{0.5};                   ///< return-home re-arm distance
@@ -235,7 +246,7 @@ class GoalSelector {
   Output onOccGrid(double now, GridInput grid);
 
   /** @brief planning_occ_2d_topic grid: rebuild the relocation map (spec 4.4), invalidate frontiers
-   *  in the occupied / inflated band (D8b), re-relocate the current manual / return-home goal and
+   *  in the real-obstacle band (D8b), re-relocate the current goal and
    *  republish it with the same stamp if it moved. */
   Output onPlanningOccGrid(double now, const GridInput& grid);
 
@@ -319,7 +330,9 @@ class GoalSelector {
   void commit(GoalKind kind, const Eigen::Vector3d& target, double now, Output& out);
 
   // relocation (spec 4.4)
+  map2d::WindowGeometry planningWindow(double& map_res) const;
   void rebuildRelocationMap();
+  void ensureBandMap();
   RelocResult relocate(const Eigen::Vector3d& goal) const;
   void invalidateFrontiersInBand(double now, Output& out);
   void rerelocateCurrent(Output& out);
@@ -366,6 +379,8 @@ class GoalSelector {
 
   PlanningSource planning_src_;
   map2d::Grid2D reloc_map_;
+  map2d::Grid2D band_map_;                  // real-obstacle band (occ_2d), same window as reloc_map_
+  const OccGrid2D* band_src_{nullptr};      // raw grid band_map_ was built from
 };
 
 }  // namespace goal_selector

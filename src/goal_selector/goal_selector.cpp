@@ -430,9 +430,9 @@ void GoalSelector::commit(GoalKind kind, const Eigen::Vector3d& target, double n
   if (kind == GoalKind::kManual) manual_unreachable_ = false;
 
   bool relocated = false;
-  if (kind != GoalKind::kFrontier) {
-    // Relocation applies to manual and return-home goals only (frontiers in the band are
-    // invalidated instead, D8b). Rebuild first so the window is centred for this target.
+  if (params_.relocate_occupied_goal) {
+    // All goal kinds are relocated (frontier, manual, return-home), switched by
+    // relocate_occupied_goal. Rebuild first so the window is centred for this target.
     rebuildRelocationMap();
     const RelocResult r = relocate(target);
     if (!r.ok) {
@@ -604,9 +604,7 @@ Output GoalSelector::onPlanningOccGrid(double now, const GridInput& grid) {
   return out;
 }
 
-void GoalSelector::rebuildRelocationMap() {
-  if (!planning_src_.valid || !state_initialized_) return;
-
+map2d::WindowGeometry GoalSelector::planningWindow(double& map_res) const {
   // Planner window geometry (MIGHTY::computeMapSize / HGPManager::updateMap / MapUtil::readMap).
   const Eigen::Vector3d pos(pose_.x, pose_.y, pose_.z);
   Eigen::Vector3d g_term = pos;  // no commitment: window is the minimum one
@@ -626,9 +624,14 @@ void GoalSelector::rebuildRelocationMap() {
   // float(factor_hgp * res) and uses that as its resolution for everything else.
   const int cells_x = map2d::windowCells(wdx, params_.res);
   const int cells_y = map2d::windowCells(wdy, params_.res);
-  const double map_res = static_cast<double>(static_cast<float>(params_.factor_hgp * params_.res));
-  const map2d::WindowGeometry win =
-      map2d::windowGeometry(pos.x(), pos.y(), cells_x, cells_y, map_res, params_.inflation_hgp);
+  map_res = static_cast<double>(static_cast<float>(params_.factor_hgp * params_.res));
+  return map2d::windowGeometry(pos.x(), pos.y(), cells_x, cells_y, map_res, params_.inflation_hgp);
+}
+
+void GoalSelector::rebuildRelocationMap() {
+  if (!planning_src_.valid || !state_initialized_) return;
+  double map_res = 0.0;
+  const map2d::WindowGeometry win = planningWindow(map_res);
 
   map2d::SourceGrid src;
   src.width = planning_src_.width;
@@ -674,13 +677,49 @@ GoalSelector::RelocResult GoalSelector::relocate(const Eigen::Vector3d& goal) co
   return r;
 }
 
-void GoalSelector::invalidateFrontiersInBand(double now, Output& out) {
-  if (!params_.expl_enabled || !frontier_manager_ || reloc_map_.values.empty()) return;
+void GoalSelector::ensureBandMap() {
+  if (!params_.expl_enabled || !occ_grid_2d_ || !state_initialized_) return;
 
-  // D8b: ACTIVE / DORMANT frontiers whose centroid is in an occupied or inflated cell of the
-  // relocation map. Cells outside the window are NOT in the band (is2DOccupied would report
-  // them occupied), so only in-bounds cells count.
-  const auto view = reloc_map_.view();
+  // Rebuild only when the raw grid or the window changed (the window follows the robot / goal).
+  double map_res = 0.0;
+  const map2d::WindowGeometry win = planningWindow(map_res);
+  if (!band_map_.values.empty() && band_src_ == occ_grid_2d_.get() && band_map_.dim_x == win.dim_x &&
+      band_map_.dim_y == win.dim_y && band_map_.origin_x == win.origin_x &&
+      band_map_.origin_y == win.origin_y && band_map_.res == map_res)
+    return;
+
+  // Real obstacles only: occupied cells of occ_2d (unknown and free are not obstacles).
+  map2d::SourceGrid src;
+  src.width = occ_grid_2d_->width();
+  src.height = occ_grid_2d_->height();
+  src.resolution = occ_grid_2d_->resolution();
+  src.inv_resolution = occ_grid_2d_->invResolution();
+  src.origin_x = occ_grid_2d_->originX();
+  src.origin_y = occ_grid_2d_->originY();
+  src.occupied = &occ_grid_2d_->occupiedData();
+  src.unknown = &occ_grid_2d_->unknownData();
+
+  map2d::Grid2D g;
+  g.dim_x = win.dim_x;
+  g.dim_y = win.dim_y;
+  g.res = map_res;
+  g.origin_x = win.origin_x;
+  g.origin_y = win.origin_y;
+  map2d::buildFromOccupancy(src, g.dim_x, g.dim_y, g.res, g.origin_x, g.origin_y, g.values);
+  map2d::inflate(g, std::max(0.0f, static_cast<float>(params_.expl_frontier_band_radius_m)));
+  band_map_ = std::move(g);
+  band_src_ = occ_grid_2d_.get();
+}
+
+void GoalSelector::invalidateFrontiersInBand(double now, Output& out) {
+  if (!params_.expl_enabled || !frontier_manager_) return;
+  ensureBandMap();
+  if (band_map_.values.empty()) return;
+
+  // D8b: ACTIVE / DORMANT frontiers whose centroid is within frontier_band_radius_m of a REAL
+  // obstacle (band map above). Cells outside the window are NOT in the band (is2DOccupied would
+  // report them occupied), so only in-bounds cells count.
+  const auto view = band_map_.view();
   std::vector<uint64_t> to_invalidate;
   for (const auto& r : frontier_manager_->records()) {
     if (r.state != FrontierState::ACTIVE && r.state != FrontierState::DORMANT) continue;
@@ -701,7 +740,7 @@ void GoalSelector::invalidateFrontiersInBand(double now, Output& out) {
 
 void GoalSelector::rerelocateCurrent(Output& out) {
   if (!params_.relocate_occupied_goal) return;
-  if (current_.kind != GoalKind::kManual && current_.kind != GoalKind::kReturnHome) return;
+  if (current_.kind == GoalKind::kNone) return;
 
   const RelocResult r = relocate(current_.published);  // from the stored (relocated) goal, as the planner does
   if (!r.ok) return;  // keep the previous goal; the next map update may make a cell available

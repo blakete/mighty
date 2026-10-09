@@ -87,20 +87,6 @@ class MIGHTY {
   bool findAandAtime(state& A, double& A_time, double current_time,
                      double last_replaning_computation_time);
 
-  /** @brief Check if a point is in an occupied voxel.
-   *  @param point Query position.
-   *  @return True if occupied.
-   */
-  bool checkIfPointOccupied(const Vec3f& point);
-
-  /** @brief NEW BRANCH of checkIfPointOccupied(): checks the 2D ground-robot
-   *  tri-state map instead of the 3D voxel map -- see
-   *  HGPManager::checkIfPointOccupied2D() for why this exists.
-   *  @param point Query position.
-   *  @return True if the 2D cell is occupied.
-   */
-  bool checkIfPointOccupied2D(const Vec3f& point);
-
   /** @brief Check if a point is in a free voxel.
    *  @param point Query position.
    *  @return True if free.
@@ -218,24 +204,6 @@ class MIGHTY {
    *  @param term_goal New terminal goal state.
    */
   void setTerminalGoal(const state& term_goal);
-
-  /** @brief If the goal lies in an occupied voxel, relocate it to the nearest
-   *         free/unknown cell pushed outward by ||drone_bbox|| along the
-   *         direction from the original (occupied) goal. The z component is
-   *         left to the caller to re-clamp if needed. Goal is mutated in place.
-   *  @param goal Terminal goal state to sanitize (modified in place).
-   *  @return True if goal is safe to use (was already non-occupied or was
-   *          successfully relocated). False if the map is initialized but no
-   *          non-occupied cell could be found within the BFS budget — caller
-   *          should drop the goal in that case.
-   */
-  bool sanitizeTerminalGoal(state& goal);
-
-  /** @brief NEW: 2D-map counterpart of sanitizeTerminalGoal(), used for
-   *  ground-robot 2D deployments -- see the branch at the top of
-   *  sanitizeTerminalGoal() for why. Same contract/return value.
-   */
-  bool sanitizeTerminalGoal2D(state& goal);
 
   /** @brief Change the drone state machine status.
    *  @param new_status One of DroneStatus enum values.

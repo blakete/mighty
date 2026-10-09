@@ -187,73 +187,6 @@ void HGPManager::freeGoal(Vec3f& goal, double factor) {
   }
 }
 
-bool HGPManager::checkIfPointOccupied(const Vec3f& point) {
-  // Use planning map if available, otherwise fall back to the base map.
-  // map_util_for_planning_ is only created inside setupHGPPlanner/solveHGP,
-  // so callers outside the planning pipeline (e.g. checkHoverAvoidance) need
-  // the fallback.
-  //
-  // Locked: setupHGPPlanner() reassigns map_util_for_planning_ under
-  // mtx_map_util_ from the replan thread (cb_group_replan_); this can be
-  // called from the goal callback thread (cb_group_goal_ is Reentrant) at the
-  // same time via sanitizeTerminalGoal(). Reading the shared_ptr here without
-  // the same lock races the reassignment's destroy of the old pointee --
-  // observed as "double free or corruption" when several goals arrive close
-  // together.
-  std::lock_guard<std::mutex> lock(mtx_map_util_);
-  const auto& mu = map_util_for_planning_ ? map_util_for_planning_ : map_util_;
-  if (!mu) return false;  // map not yet initialized
-
-  Veci<3> point_int = mu->floatToInt(point);
-  return mu->isOccupied(point_int);
-}
-
-bool HGPManager::checkIfPointOccupied2D(const Vec3f& point) {
-  // Locked: see checkIfPointOccupied() above -- same race applies here.
-  std::lock_guard<std::mutex> lock(mtx_map_util_);
-  const auto& mu = map_util_for_planning_ ? map_util_for_planning_ : map_util_;
-  if (!mu || !mu->has2DMap()) return false;
-
-  int dimX, dimY;
-  mu->get2DDimensions(dimX, dimY);
-  const auto origin = mu->getOrigin();
-  const double res = mu->getRes();
-  if (res <= 0.0) return false;
-
-  const int x = static_cast<int>(std::floor((point.x() - origin(0)) / res));
-  const int y = static_cast<int>(std::floor((point.y() - origin(1)) / res));
-  return mu->is2DOccupied(x, y);
-}
-
-bool HGPManager::isClearOfOccupied2D(const Vec3f& point, double clearance_m) {
-  // Locked: see checkIfPointOccupied() above -- same race applies here.
-  std::lock_guard<std::mutex> lock(mtx_map_util_);
-  const auto& mu = map_util_for_planning_ ? map_util_for_planning_ : map_util_;
-  if (!mu || !mu->has2DMap()) return true;
-
-  const double res = mu->getRes();
-  if (res <= 0.0 || clearance_m <= 0.0) return true;
-
-  const auto origin = mu->getOrigin();
-  const int cx = static_cast<int>(std::floor((point.x() - origin(0)) / res));
-  const int cy = static_cast<int>(std::floor((point.y() - origin(1)) / res));
-
-  // Disk scan in cell units (matches the pattern already used for
-  // hgp_stop_distance_m's tooCloseToObstacle in solveHGP() below), but via
-  // is2DOccupied() specifically -- NOT get2DOccupancy(...) != 0, which also
-  // catches UNKNOWN (val_unknown_ == -1) and would make this reject goals
-  // that are merely near unmapped space rather than a real obstacle.
-  const int r = std::max(1, static_cast<int>(std::ceil(clearance_m / res)));
-  const int r2 = r * r;
-  for (int dy = -r; dy <= r; ++dy) {
-    for (int dx = -r; dx <= r; ++dx) {
-      if (dx * dx + dy * dy > r2) continue;
-      if (mu->is2DOccupied(cx + dx, cy + dy)) return false;
-    }
-  }
-  return true;
-}
-
 bool HGPManager::get2DPlanningMapSnapshot(std::vector<int8_t>& values,
                                           std::vector<uint8_t>& inflated, int& dimX, int& dimY,
                                           double& res, Vec3f& origin) {
@@ -350,8 +283,7 @@ bool HGPManager::solveHGP(const Vec3f& start_sent, const Vec3f& start_vel, const
 
     // Free start/goal in the 2D map — ground points would otherwise block them.
     // The goal box keeps inflation cells: a goal inside the clearance band must
-    // stay blocked, both so plan() rejects it and so the next cycle's
-    // sanitizeTerminalGoal (which reads this copy) still sees it and relocates it.
+    // stay blocked so plan() rejects it.
     // Leaving the start inside the band is handled by A*'s start exemption instead.
     if (map_util_for_planning_->has2DMap()) {
       Veci<3> si = map_util_for_planning_->floatToInt(start_for_search);
@@ -1474,32 +1406,6 @@ void HGPManager::findClosestFreePoint(const Vec3f& point, Vec3f& closest_free_po
   mtx_map_util_.lock();
   map_util_->findClosestFreePoint(point, closest_free_point);
   mtx_map_util_.unlock();
-}
-
-void HGPManager::findClosestNonOccupiedPoint(const Vec3f& point,
-                                             Vec3f& closest_non_occupied_point) {
-  // Match checkIfPointOccupied: prefer the planning map (post-inflation) when
-  // it exists, otherwise fall back to the base map. Callers may invoke this
-  // outside of a planning cycle (e.g. from a goal callback).
-  mtx_map_util_.lock();
-  const auto& mu = map_util_for_planning_ ? map_util_for_planning_ : map_util_;
-  if (mu) {
-    mu->findClosestNonOccupiedPoint(point, closest_non_occupied_point);
-  } else {
-    closest_non_occupied_point = point;
-  }
-  mtx_map_util_.unlock();
-}
-
-bool HGPManager::findClosestNonOccupied2DPoint(const Vec3f& point,
-                                               Vec3f& closest_non_occupied_point) {
-  std::lock_guard<std::mutex> lock(mtx_map_util_);
-  const auto& mu = map_util_for_planning_ ? map_util_for_planning_ : map_util_;
-  if (!mu) {
-    closest_non_occupied_point = point;
-    return false;
-  }
-  return mu->findClosestNonOccupied2DPoint(point, closest_non_occupied_point);
 }
 
 int HGPManager::countUnknownCells() const { return map_util_for_planning_->countUnknownCells(); }

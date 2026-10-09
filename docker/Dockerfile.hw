@@ -33,7 +33,7 @@
 ARG WS=/home/swarm/code/mighty_ws
 # Dependency repos from mighty.repos that the HARDWARE stack needs. Keys must
 # match mighty.repos entries; the filter below fails loudly on a typo.
-ARG HW_DEPS="dynus_interfaces mpc DecompROS2"
+ARG HW_DEPS="dynus_interfaces goal_selector_msgs mpc DecompROS2"
 
 # ---------- deps-src: pinned dependency sources ----------------------------------
 FROM ros:humble-ros-base AS deps-src

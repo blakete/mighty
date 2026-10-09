@@ -10,9 +10,6 @@
 #include <mighty/mighty_node.hpp>
 #include <mighty/esdf_grid_2d.hpp>
 #include <mighty/occ_grid_2d.hpp>
-#include <mighty/frontier_detector.hpp>
-#include <mighty/frontier_manager.hpp>
-#include <mighty/visited_map.hpp>
 
 #include <fstream>
 #include <iomanip>
@@ -86,16 +83,8 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
     cb_groups_mu_[i] = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     cb_groups_re_[i] = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
   }
-  // MutuallyExclusive (NOT Reentrant): every callback on this group mutates
-  // shared map state — occ_grid_2d_, esdf_grid_, visited_map_, frontier_manager_
-  // — without any internal locking. With Reentrant, two concurrent occ2DCallback
-  // invocations would race the `occ_grid_2d_ = OccGrid2D::fromOccupancyGrid(...)`
-  // assignment in occ2DCallback: the in-flight FrontierDetector::detect() in one
-  // thread holds a raw reference to the previous OccGrid2D, and the second
-  // thread's shared_ptr replacement drops its refcount to zero, freeing the
-  // unknown_/occupied_ vector data the BFS is still reading. SIGSEGV in
-  // isUnknown() inside the BFS expansion. Serializing the group fixes this and
-  // also closes the analogous race on frontier_manager_::update()/evict.
+  // MutuallyExclusive (NOT Reentrant): every callback on this group mutates shared map state
+  // (esdf_grid_, planning_occ_grid_2d_) without internal locking, so the group is serialized.
   this->cb_group_map_ =
       this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   this->cb_group_replan_ =
@@ -206,18 +195,6 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
   sub_terminal_goal_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
       "term_goal", critical_qos,
       std::bind(&MIGHTY_NODE::terminalGoalCallback, this, std::placeholders::_1));
-  // Shared swarm goal: a single /swarm_goal publication is fanned out to each
-  // agent's local terminal-goal pin via formation_self_offset, so the whole
-  // swarm can be commanded with one PoseStamped message.
-  if (par_.use_formation) {
-    sub_swarm_goal_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-        "/swarm_goal", critical_qos,
-        std::bind(&MIGHTY_NODE::swarmGoalCallback, this, std::placeholders::_1));
-    RCLCPP_INFO(this->get_logger(),
-                "Subscribing to /swarm_goal with self offset [%.2f %.2f %.2f]",
-                par_.formation_self_offset[0], par_.formation_self_offset[1],
-                par_.formation_self_offset[2]);
-  }
   // Frame alignment subscriptions (inter-agent transforms)
   if (par_.use_frame_alignment) {
     for (int i = 1; i <= par_.num_agents; i++) {
@@ -245,8 +222,7 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
   timer_goal_ =
       this->create_wall_timer(std::chrono::duration<double>(par_.dc),
                               std::bind(&MIGHTY_NODE::publishGoal, this), this->cb_group_goal_);
-  // Goal-reached check always runs: it publishes planner_status REACHED. (goal_reached and
-  // logData are still gated inside the callback, as before.)
+  // Goal-reached check always runs: it publishes planner_status REACHED and goal_reached.
   timer_goal_reached_check_ = this->create_wall_timer(
       100ms, std::bind(&MIGHTY_NODE::goalReachedCheckCallback, this), this->cb_groups_re_[2]);
   timer_cleanup_old_trajs_ = this->create_wall_timer(
@@ -306,8 +282,7 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
   }
 
   // ESDF subscription (ground robot only). global_mapper_ros publishes these
-  // with BEST_EFFORT reliability — must match here or DDS silently drops
-  // delivery and the exploration pipeline never sees an occupancy grid.
+  // with BEST_EFFORT reliability — must match here or DDS silently drops delivery.
   if (par_.use_esdf_cost && par_.vehicle_type == "ground_robot") {
     // SensorDataQoS = BEST_EFFORT + VOLATILE + KEEP_LAST/5 — copies the whole
     // profile, unlike QoSInitialization::from_rmw which only sets history+depth.
@@ -318,12 +293,6 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
     RCLCPP_INFO(this->get_logger(), "ESDF: Subscribed to esdf_2d_topic (d_safe=%.1f m, weight=%.0f)",
                 par_.esdf_d_safe, par_.esdf_weight);
 
-    // RAW binary 2D occupancy for frontier detection / visited-map (NOT the planner).
-    sub_occ_2d_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
-        "occ_2d_topic", map_qos,
-        std::bind(&MIGHTY_NODE::occ2DCallback, this, std::placeholders::_1), options_map);
-    RCLCPP_INFO(this->get_logger(), "Occ2D raw: subscribed to occ_2d_topic for frontier detection");
-
     // Planning occupancy (large-UNKNOWN-as-OCCUPIED) for HGP/A* ONLY. Same map QoS and
     // same mutually-exclusive map callback group as occ_2d. Relative topic -> resolves to
     // <ns>/planning_occ_2d_topic (no namespace hard-coded).
@@ -332,155 +301,6 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
         std::bind(&MIGHTY_NODE::planningOcc2DCallback, this, std::placeholders::_1), options_map);
     RCLCPP_INFO(this->get_logger(),
                 "Occ2D planning: subscribed to planning_occ_2d_topic for HGP/A*");
-
-    // Frontier-based exploration. The detector + persistent manager run inside
-    // occ2DCallback; the explore-select timer issues exploration goals through
-    // the same pathway as a manual term_goal.
-    if (par_.expl_enabled) {
-      FrontierDetectorParams dp;
-      dp.cluster_min_cells       = par_.expl_cluster_min_cells;
-      dp.border_margin_cells     = par_.expl_border_margin_cells;
-      dp.obstacle_clearance_cells = par_.expl_obstacle_clearance_cells;
-      dp.robot_snap_radius_m     = par_.expl_robot_snap_radius_m;
-      dp.bounds_enabled          = par_.expl_bounds_enabled;
-      dp.bounds_min_x            = par_.expl_bounds_min_x;
-      dp.bounds_max_x            = par_.expl_bounds_max_x;
-      dp.bounds_min_y            = par_.expl_bounds_min_y;
-      dp.bounds_max_y            = par_.expl_bounds_max_y;
-      frontier_detector_ = std::make_unique<FrontierDetector>(dp);
-
-      FrontierManagerParams mp;
-      mp.merge_radius_m            = par_.expl_merge_radius_m;
-      mp.centroid_ema_alpha        = par_.expl_centroid_ema_alpha;
-      mp.visit_radius_m            = par_.expl_visit_radius_m;
-      mp.visit_dwell_sec           = par_.expl_visit_dwell_sec;
-      mp.verify_radius_cells       = par_.expl_verify_radius_cells;
-      mp.max_frontiers             = par_.expl_max_frontiers;
-      mp.w_size     = par_.expl_w_size;
-      mp.w_dist     = par_.expl_w_dist;
-      mp.w_info     = par_.expl_w_info;
-      mp.w_revisit  = par_.expl_w_revisit;
-      mp.w_heading  = par_.expl_w_heading;
-      mp.size_ref_m2     = par_.expl_size_ref_m2;
-      mp.dist_ref_m      = par_.expl_dist_ref_m;
-      mp.sensor_radius_m = par_.expl_sensor_radius_m;
-      mp.goal_select_threshold = par_.expl_goal_select_threshold;
-      mp.pursuit_timeout_factor  = par_.expl_pursuit_timeout_factor;
-      mp.pursuit_timeout_v_ref   = par_.expl_pursuit_timeout_v_ref;
-      mp.pursuit_timeout_min_sec = par_.expl_pursuit_timeout_min_sec;
-      mp.invalidation_keep_out_radius_m = par_.expl_invalidation_keep_out_radius_m;
-      mp.invalidation_cooldown_sec      = par_.expl_invalidation_cooldown_sec;
-      mp.peer_visit_radius_m            = par_.expl_peer_visit_radius_m;
-      frontier_manager_ = std::make_unique<FrontierManager>(mp);
-
-      // Persistent visited bitmap. Records every cell ever observed across
-      // the mission so the detector can suppress re-detection along the
-      // sliding-window seam when the robot revisits an area.
-      visited_map_ = std::make_unique<VisitedMap>(
-          par_.expl_visited_map_center_x,
-          par_.expl_visited_map_center_y,
-          par_.expl_visited_map_width_m,
-          par_.expl_visited_map_height_m,
-          par_.expl_visited_map_resolution_m);
-
-      pub_frontiers_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
-          "exploration/frontiers", 10);
-      pub_explore_current_goal_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
-          "exploration/current_goal", 10);
-      pub_visited_map_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>(
-          "exploration/visited_map", rclcpp::QoS(1).transient_local());
-
-      // MinPos peer pose sharing (global topic, all agents pub+sub)
-      if (par_.expl_use_minpos) {
-        auto peer_qos = rclcpp::QoS(10).reliable();
-        pub_peer_pose_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
-            "/exploration/peer_poses", peer_qos);
-        sub_peer_pose_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-            "/exploration/peer_poses", peer_qos,
-            [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
-              // Filter out own messages
-              if (msg->header.frame_id == ns_) return;
-              peer_tracker_.updatePeer(
-                  msg->header.frame_id,
-                  msg->pose.position.x,
-                  msg->pose.position.y,
-                  rclcpp::Time(msg->header.stamp).seconds());
-            },
-            options_re_1);
-        RCLCPP_INFO(this->get_logger(),
-                    "Exploration MinPos: enabled, peer_timeout=%.1fs, publish_rate=%.1fHz",
-                    par_.expl_peer_timeout_sec, par_.expl_peer_publish_rate_hz);
-      }
-
-      // Visited-map sharing: broadcast our persistent map so peers can skip
-      // frontiers in areas we've already explored. Subscriber on cb_group_map_
-      // so mergeFrom() is serialized with occ2DCallback / frontier detection.
-      if (par_.expl_use_minpos) {
-        pub_peer_visited_map_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>(
-            "/exploration/visited_maps", rclcpp::QoS(1).reliable());
-        sub_peer_visited_map_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
-            "/exploration/visited_maps", rclcpp::QoS(1).reliable(),
-            [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
-              if (msg->header.frame_id == ns_ || !visited_map_) return;
-              visited_map_->mergeFrom(
-                  msg->data.data(),
-                  static_cast<int>(msg->info.width),
-                  static_cast<int>(msg->info.height),
-                  msg->info.origin.position.x,
-                  msg->info.origin.position.y,
-                  msg->info.resolution);
-            },
-            options_map);
-        RCLCPP_INFO(this->get_logger(), "Exploration MinPos: visited-map sharing enabled");
-      }
-
-      // Global return-home trigger. One publish on /exploration/return_home
-      // makes every subscribing agent drop new frontier work and head back to
-      // its captured start position. Reliable QoS so a single shot reaches
-      // every agent. cb_group_map_ keeps it serialized with explore-select.
-      sub_return_home_ = this->create_subscription<std_msgs::msg::Empty>(
-          "/exploration/return_home", rclcpp::QoS(1).reliable(),
-          [this](const std_msgs::msg::Empty::SharedPtr) {
-            if (home_return_requested_) {
-              RCLCPP_INFO(this->get_logger(),
-                          "Return-home trigger received, but already returning home");
-              return;
-            }
-            if (!exploration_start_captured_) {
-              RCLCPP_WARN(this->get_logger(),
-                          "Return-home trigger received before exploration started — "
-                          "no start pose captured, ignoring");
-              return;
-            }
-            home_return_requested_ = true;
-            geometry_msgs::msg::PoseStamped home;
-            home.header.frame_id    = par_.map_frame_id;
-            home.header.stamp       = this->now();
-            home.pose.position.x    = exploration_start_pos_.x();
-            home.pose.position.y    = exploration_start_pos_.y();
-            home.pose.position.z    = par_.expl_default_goal_z;
-            home.pose.orientation.w = 1.0;
-            terminalGoalCallbackImpl(home, /*from_user=*/false);
-            exploration_active_  = false;
-            RCLCPP_INFO(this->get_logger(),
-                        "Return-home: heading to (%.2f, %.2f, %.2f)",
-                        exploration_start_pos_.x(), exploration_start_pos_.y(),
-                        par_.expl_default_goal_z);
-          },
-          options_map);
-
-      const double rate_hz = std::max(0.1, par_.expl_select_rate_hz);
-      const auto period = std::chrono::duration<double>(1.0 / rate_hz);
-      timer_explore_select_ = this->create_wall_timer(
-          std::chrono::duration_cast<std::chrono::nanoseconds>(period),
-          std::bind(&MIGHTY_NODE::exploreSelectCallback, this), this->cb_group_map_);
-
-      RCLCPP_INFO(this->get_logger(),
-                  "Exploration: enabled, select rate=%.1f Hz, min_cells=%d, "
-                  "merge_radius=%.2fm, visit_radius=%.2fm",
-                  rate_hz, par_.expl_cluster_min_cells,
-                  par_.expl_merge_radius_m, par_.expl_visit_radius_m);
-    }
   }
 }
 
@@ -519,7 +339,6 @@ void MIGHTY_NODE::declareParameters() {
   // Formation flight
   this->declare_parameter("use_formation", false);
   this->declare_parameter("formation_weight", 0.0);
-  this->declare_parameter("formation_self_offset", std::vector<double>{0.0, 0.0, 0.0});
   this->declare_parameter("formation_neighbor_ids", std::vector<int64_t>{});
   this->declare_parameter("formation_neighbor_offsets", std::vector<double>{});
 
@@ -557,8 +376,6 @@ void MIGHTY_NODE::declareParameters() {
   this->declare_parameter("free_start_factor", 1.0);
   this->declare_parameter("use_free_goal", false);
   this->declare_parameter("free_goal_factor", 1.0);
-  this->declare_parameter("relocate_occupied_goal", true);
-  this->declare_parameter("goal_relocation_clearance_m", 1.0);
   this->declare_parameter("max_dist_vertexes", 5.0);
   this->declare_parameter("w_unknown", 1.0);
   this->declare_parameter("w_align", 60.0);
@@ -760,61 +577,6 @@ void MIGHTY_NODE::declareParameters() {
   this->declare_parameter("trajectory_downsample_points", 500);
   this->declare_parameter("mpc_path_spacing", 0.05);
 
-  // Frontier-based exploration (ground robot only).
-  this->declare_parameter("exploration.enabled", false);
-  this->declare_parameter("exploration.select_rate_hz", 1.0);
-  this->declare_parameter("exploration.default_goal_z", 0.0);
-  this->declare_parameter("exploration.detector.cluster_min_cells", 6);
-  this->declare_parameter("exploration.detector.border_margin_cells", 2);
-  this->declare_parameter("exploration.detector.obstacle_clearance_cells", 1);
-  this->declare_parameter("exploration.detector.robot_snap_radius_m", 1.0);
-  this->declare_parameter("exploration.bounds.enabled", false);
-  this->declare_parameter("exploration.bounds.min_x", -50.0);
-  this->declare_parameter("exploration.bounds.max_x",  50.0);
-  this->declare_parameter("exploration.bounds.min_y", -50.0);
-  this->declare_parameter("exploration.bounds.max_y",  50.0);
-  this->declare_parameter("exploration.detector.min_obstacle_distance_m", 0.0);
-  this->declare_parameter("exploration.utility.w_size", 1.0);
-  this->declare_parameter("exploration.utility.w_dist", 2.0);
-  this->declare_parameter("exploration.utility.w_info", 1.0);
-  this->declare_parameter("exploration.utility.w_revisit", 0.5);
-  this->declare_parameter("exploration.utility.w_heading", 0.3);
-  this->declare_parameter("exploration.utility.size_ref_m2", 5.0);
-  this->declare_parameter("exploration.utility.dist_ref_m", 25.0);
-  this->declare_parameter("exploration.utility.sensor_radius_m", 5.0);
-  this->declare_parameter("exploration.utility.goal_select_threshold", -1.0e9);
-  this->declare_parameter("exploration.manager.merge_radius_m", 1.0);
-  this->declare_parameter("exploration.manager.centroid_ema_alpha", 0.5);
-  this->declare_parameter("exploration.manager.visit_radius_m", 2.0);
-  this->declare_parameter("exploration.manager.visit_dwell_sec", 1.0);
-  this->declare_parameter("exploration.manager.verify_radius_cells", 2);
-  this->declare_parameter("exploration.manager.max_frontiers", 1000);
-  this->declare_parameter("exploration.manager.unreachable_consec_thresh", 5);
-  this->declare_parameter("exploration.manager.pursuit_timeout_factor", 10.0);
-  this->declare_parameter("exploration.manager.pursuit_timeout_v_ref", 0.5);
-  this->declare_parameter("exploration.manager.pursuit_timeout_min_sec", 10.0);
-  this->declare_parameter("exploration.manager.invalidation_keep_out_radius_m", 1.5);
-  this->declare_parameter("exploration.manager.invalidation_cooldown_sec", 30.0);
-  this->declare_parameter("exploration.manager.preempt_enabled", false);
-  this->declare_parameter("exploration.manager.preempt_margin", 2.0);
-  this->declare_parameter("exploration.manager.preempt_min_commit_sec", 2.0);
-  this->declare_parameter("exploration.manager.stuck_timeout_sec", 5.0);
-  this->declare_parameter("exploration.manager.stuck_move_thresh_m", 0.15);
-  this->declare_parameter("exploration.visited_map.center_x", 0.0);
-  this->declare_parameter("exploration.visited_map.center_y", 0.0);
-  this->declare_parameter("exploration.visited_map.width_m", 100.0);
-  this->declare_parameter("exploration.visited_map.height_m", 100.0);
-  this->declare_parameter("exploration.visited_map.resolution_m", 0.15);
-  this->declare_parameter("exploration.visited_map.publish", true);
-  this->declare_parameter("exploration.visited_map.fuse_into_local", true);
-  this->declare_parameter("exploration.visited_map.detect_on_visited_map", true);
-  this->declare_parameter("exploration.visualization.publish_markers", true);
-  // MinPos multi-robot frontier allocation
-  this->declare_parameter("exploration.minpos.enabled", false);
-  this->declare_parameter("exploration.minpos.peer_timeout_sec", 5.0);
-  this->declare_parameter("exploration.minpos.peer_publish_rate_hz", 5.0);
-  this->declare_parameter("exploration.minpos.min_frontier_dist_to_peers_m", 0.0);
-  this->declare_parameter("exploration.minpos.peer_visit_radius_m", 2.0);
 }
 
 // ----------------------------------------------------------------------------
@@ -844,17 +606,10 @@ void MIGHTY_NODE::setParameters() {
   // Formation flight
   par_.use_formation = this->get_parameter("use_formation").as_bool();
   par_.formation_weight = this->get_parameter("formation_weight").as_double();
-  par_.formation_self_offset = this->get_parameter("formation_self_offset").as_double_array();
   par_.formation_neighbor_ids = this->get_parameter("formation_neighbor_ids").as_integer_array();
   par_.formation_neighbor_offsets =
       this->get_parameter("formation_neighbor_offsets").as_double_array();
   if (par_.use_formation) {
-    if (par_.formation_self_offset.size() != 3) {
-      RCLCPP_FATAL(this->get_logger(),
-                   "formation_self_offset must have length 3 (got %zu); shutting down",
-                   par_.formation_self_offset.size());
-      rclcpp::shutdown();
-    }
     if (par_.formation_neighbor_offsets.size() != 3 * par_.formation_neighbor_ids.size()) {
       RCLCPP_FATAL(this->get_logger(),
                    "formation_neighbor_offsets length (%zu) must be 3 * "
@@ -911,9 +666,6 @@ void MIGHTY_NODE::setParameters() {
   par_.free_start_factor = this->get_parameter("free_start_factor").as_double();
   par_.use_free_goal = this->get_parameter("use_free_goal").as_bool();
   par_.free_goal_factor = this->get_parameter("free_goal_factor").as_double();
-  par_.relocate_occupied_goal = this->get_parameter("relocate_occupied_goal").as_bool();
-  par_.goal_relocation_clearance_m =
-      this->get_parameter("goal_relocation_clearance_m").as_double();
   par_.max_dist_vertexes = this->get_parameter("max_dist_vertexes").as_double();
   par_.w_unknown = this->get_parameter("w_unknown").as_double();
   par_.w_align = this->get_parameter("w_align").as_double();
@@ -1131,78 +883,6 @@ void MIGHTY_NODE::setParameters() {
 
   par_.trajectory_downsample_points = this->get_parameter("trajectory_downsample_points").as_int();
   par_.mpc_path_spacing = this->get_parameter("mpc_path_spacing").as_double();
-
-  // Frontier-based exploration
-  par_.expl_enabled              = this->get_parameter("exploration.enabled").as_bool();
-  par_.expl_select_rate_hz       = this->get_parameter("exploration.select_rate_hz").as_double();
-  par_.expl_default_goal_z       = this->get_parameter("exploration.default_goal_z").as_double();
-  par_.expl_cluster_min_cells    = this->get_parameter("exploration.detector.cluster_min_cells").as_int();
-  par_.expl_border_margin_cells  = this->get_parameter("exploration.detector.border_margin_cells").as_int();
-  par_.expl_obstacle_clearance_cells =
-      this->get_parameter("exploration.detector.obstacle_clearance_cells").as_int();
-  par_.expl_robot_snap_radius_m  = this->get_parameter("exploration.detector.robot_snap_radius_m").as_double();
-  par_.expl_bounds_enabled       = this->get_parameter("exploration.bounds.enabled").as_bool();
-  par_.expl_bounds_min_x         = this->get_parameter("exploration.bounds.min_x").as_double();
-  par_.expl_bounds_max_x         = this->get_parameter("exploration.bounds.max_x").as_double();
-  par_.expl_bounds_min_y         = this->get_parameter("exploration.bounds.min_y").as_double();
-  par_.expl_bounds_max_y         = this->get_parameter("exploration.bounds.max_y").as_double();
-  par_.expl_min_obstacle_distance_m =
-      this->get_parameter("exploration.detector.min_obstacle_distance_m").as_double();
-  par_.expl_w_size               = this->get_parameter("exploration.utility.w_size").as_double();
-  par_.expl_w_dist               = this->get_parameter("exploration.utility.w_dist").as_double();
-  par_.expl_w_info               = this->get_parameter("exploration.utility.w_info").as_double();
-  par_.expl_w_revisit            = this->get_parameter("exploration.utility.w_revisit").as_double();
-  par_.expl_w_heading            = this->get_parameter("exploration.utility.w_heading").as_double();
-  par_.expl_size_ref_m2          = this->get_parameter("exploration.utility.size_ref_m2").as_double();
-  par_.expl_dist_ref_m           = this->get_parameter("exploration.utility.dist_ref_m").as_double();
-  par_.expl_sensor_radius_m      = this->get_parameter("exploration.utility.sensor_radius_m").as_double();
-  par_.expl_goal_select_threshold = this->get_parameter("exploration.utility.goal_select_threshold").as_double();
-  par_.expl_merge_radius_m       = this->get_parameter("exploration.manager.merge_radius_m").as_double();
-  par_.expl_centroid_ema_alpha   = this->get_parameter("exploration.manager.centroid_ema_alpha").as_double();
-  par_.expl_visit_radius_m       = this->get_parameter("exploration.manager.visit_radius_m").as_double();
-  par_.expl_visit_dwell_sec      = this->get_parameter("exploration.manager.visit_dwell_sec").as_double();
-  par_.expl_verify_radius_cells  = this->get_parameter("exploration.manager.verify_radius_cells").as_int();
-  par_.expl_max_frontiers        = this->get_parameter("exploration.manager.max_frontiers").as_int();
-  par_.expl_unreachable_consec_thresh =
-      this->get_parameter("exploration.manager.unreachable_consec_thresh").as_int();
-  par_.expl_pursuit_timeout_factor =
-      this->get_parameter("exploration.manager.pursuit_timeout_factor").as_double();
-  par_.expl_pursuit_timeout_v_ref =
-      this->get_parameter("exploration.manager.pursuit_timeout_v_ref").as_double();
-  par_.expl_pursuit_timeout_min_sec =
-      this->get_parameter("exploration.manager.pursuit_timeout_min_sec").as_double();
-  par_.expl_invalidation_keep_out_radius_m =
-      this->get_parameter("exploration.manager.invalidation_keep_out_radius_m").as_double();
-  par_.expl_invalidation_cooldown_sec =
-      this->get_parameter("exploration.manager.invalidation_cooldown_sec").as_double();
-  par_.expl_preempt_enabled =
-      this->get_parameter("exploration.manager.preempt_enabled").as_bool();
-  par_.expl_preempt_margin =
-      this->get_parameter("exploration.manager.preempt_margin").as_double();
-  par_.expl_preempt_min_commit_sec =
-      this->get_parameter("exploration.manager.preempt_min_commit_sec").as_double();
-  par_.expl_stuck_timeout_sec =
-      this->get_parameter("exploration.manager.stuck_timeout_sec").as_double();
-  par_.expl_stuck_move_thresh_m =
-      this->get_parameter("exploration.manager.stuck_move_thresh_m").as_double();
-  par_.expl_visited_map_center_x   = this->get_parameter("exploration.visited_map.center_x").as_double();
-  par_.expl_visited_map_center_y   = this->get_parameter("exploration.visited_map.center_y").as_double();
-  par_.expl_visited_map_width_m    = this->get_parameter("exploration.visited_map.width_m").as_double();
-  par_.expl_visited_map_height_m   = this->get_parameter("exploration.visited_map.height_m").as_double();
-  par_.expl_visited_map_resolution_m = this->get_parameter("exploration.visited_map.resolution_m").as_double();
-  par_.expl_publish_visited_map    = this->get_parameter("exploration.visited_map.publish").as_bool();
-  par_.expl_fuse_persistent_into_local =
-      this->get_parameter("exploration.visited_map.fuse_into_local").as_bool();
-  par_.expl_detect_on_visited_map =
-      this->get_parameter("exploration.visited_map.detect_on_visited_map").as_bool();
-  par_.expl_publish_markers      = this->get_parameter("exploration.visualization.publish_markers").as_bool();
-  par_.expl_use_minpos           = this->get_parameter("exploration.minpos.enabled").as_bool();
-  par_.expl_peer_timeout_sec     = this->get_parameter("exploration.minpos.peer_timeout_sec").as_double();
-  par_.expl_peer_publish_rate_hz = this->get_parameter("exploration.minpos.peer_publish_rate_hz").as_double();
-  par_.expl_min_frontier_dist_to_peers_m =
-      this->get_parameter("exploration.minpos.min_frontier_dist_to_peers_m").as_double();
-  par_.expl_peer_visit_radius_m =
-      this->get_parameter("exploration.minpos.peer_visit_radius_m").as_double();
 }
 
 // ----------------------------------------------------------------------------
@@ -1254,9 +934,6 @@ void MIGHTY_NODE::printParameters() {
   RCLCPP_INFO(this->get_logger(), "Free Start Factor: %f", par_.free_start_factor);
   RCLCPP_INFO(this->get_logger(), "Use Free Goal?: %d", par_.use_free_goal);
   RCLCPP_INFO(this->get_logger(), "Free Goal Factor: %f", par_.free_goal_factor);
-  RCLCPP_INFO(this->get_logger(), "Relocate Occupied Goal?: %d", par_.relocate_occupied_goal);
-  RCLCPP_INFO(this->get_logger(), "Goal Relocation Clearance: %f m",
-              par_.goal_relocation_clearance_m);
   RCLCPP_INFO(this->get_logger(), "2D Inflation: %f m, Unknown Clearance 2D: %f m",
               par_.inflation_2d_m, par_.unknown_clearance_2d_m);
   RCLCPP_INFO(this->get_logger(), "max_dist_vertexes: %f", par_.max_dist_vertexes);
@@ -1567,22 +1244,6 @@ void MIGHTY_NODE::stateCallback(const dynus_interfaces::msg::State::SharedPtr ms
       last_actual_traj_publish_t_ = t_now_actual;
     }
   }
-
-  // MinPos: broadcast own position to peers (throttled)
-  if (pub_peer_pose_ && par_.expl_peer_publish_rate_hz > 0.0) {
-    const double t_now_peer = this->now().seconds();
-    const double period = 1.0 / par_.expl_peer_publish_rate_hz;
-    if (t_now_peer - last_peer_pose_publish_t_ >= period) {
-      geometry_msgs::msg::PoseStamped pose_msg;
-      pose_msg.header.stamp = this->now();
-      pose_msg.header.frame_id = ns_;
-      pose_msg.pose.position.x = msg->pos.x;
-      pose_msg.pose.position.y = msg->pos.y;
-      pose_msg.pose.position.z = msg->pos.z;
-      pub_peer_pose_->publish(pose_msg);
-      last_peer_pose_publish_t_ = t_now_peer;
-    }
-  }
 }
 
 // ----------------------------------------------------------------------------
@@ -1628,15 +1289,6 @@ void MIGHTY_NODE::replanCallback() {
     publishPlannerStatus(status, goal_stamp);
   }
 
-  // Republish the terminal goal marker so RViz tracks any in-replan
-  // relocation done by sanitizeTerminalGoal (e.g. when an obstacle gets
-  // sensed after the original click and the goal jumps to a clear cell).
-  if (par_.relocate_occupied_goal) {
-    state gterm_now;
-    mighty_ptr_->getGterm(gterm_now);
-    publishState(gterm_now, pub_point_G_term_);
-  }
-
   // Get computation time (used to find point A) - note this value is not updated in the replan
   // function
   if (replanning_result) {
@@ -1676,27 +1328,6 @@ void MIGHTY_NODE::replanCallback() {
       s << "\n";
     }
     s.flush();
-  }
-
-  // Frontier-unreachable detection: if the global planner consistently fails
-  // on an exploration goal, mark it INVALIDATED so the manager can pick the
-  // next one. We use hgp_result rather than replanning_result because the
-  // local L-BFGS may legitimately fail intermittently while HGP is fine.
-  if (par_.expl_enabled && exploration_active_ && frontier_manager_) {
-    if (!hgp_result) {
-      if (++unreachable_consec_count_ >= par_.expl_unreachable_consec_thresh) {
-        RCLCPP_WARN(this->get_logger(),
-                    "Exploration: frontier %lu unreachable after %d HGP failures, "
-                    "invalidating",
-                    static_cast<unsigned long>(current_explore_id_),
-                    unreachable_consec_count_);
-        frontier_manager_->markInvalidated(current_explore_id_, this->now().seconds());
-        exploration_active_ = false;
-        unreachable_consec_count_ = 0;
-      }
-    } else {
-      unreachable_consec_count_ = 0;
-    }
   }
 
   // To share trajectory with other agents
@@ -1794,46 +1425,17 @@ void MIGHTY_NODE::replanCallback() {
 // ----------------------------------------------------------------------------
 
 /**
- * @brief Public callback for the terminal goal topic. A user-issued goal
- *        preempts any active frontier exploration.
+ * @brief Callback for the terminal goal topic (published by the goal selector).
+ *        header.stamp identifies one goal commitment; a repeated stamp is a position update.
  */
 void MIGHTY_NODE::terminalGoalCallback(const geometry_msgs::msg::PoseStamped& msg) {
-  terminalGoalCallbackImpl(msg, /*from_user=*/true);
-}
-
-/**
- * @brief Apply the per-agent formation offset to a shared /swarm_goal
- *        publication and forward to the standard goal-pin path.
- *
- *        Routing through terminalGoalCallbackImpl with from_user=true means
- *        the swarm goal preempts exploration just like a manual goal would,
- *        and the existing reconstruct() pin (P[M_]=xf_) automatically becomes
- *        G_swarm + δ_i for each agent.
- */
-void MIGHTY_NODE::swarmGoalCallback(const geometry_msgs::msg::PoseStamped& msg) {
-  geometry_msgs::msg::PoseStamped offset_msg = msg;
-  offset_msg.pose.position.x += par_.formation_self_offset[0];
-  offset_msg.pose.position.y += par_.formation_self_offset[1];
-  offset_msg.pose.position.z += par_.formation_self_offset[2];
-  terminalGoalCallbackImpl(offset_msg, /*from_user=*/true);
-}
-
-/**
- * @brief Internal goal-issuing entry point shared by the public callback and
- *        the frontier exploration loop. `from_user=true` records that a manual
- *        goal is now active (preempting exploration); `from_user=false` is
- *        used by the explore-select callback so the same routine doesn't
- *        clobber its own state.
- */
-void MIGHTY_NODE::terminalGoalCallbackImpl(const geometry_msgs::msg::PoseStamped& msg,
-                                           bool from_user) {
   // header.stamp identifies one goal commitment. A zero stamp is replaced with now() so it is
   // always treated as a new goal.
   builtin_interfaces::msg::Time stamp = msg.header.stamp;
   if (stamp.sec == 0 && stamp.nanosec == 0) stamp = this->now();
 
-  // Same (non-zero) stamp as the goal we hold: position update only. No state resets, no timer
-  // resets, no manual/exploration flag changes. A zero held stamp (no goal yet) never matches,
+  // Same (non-zero) stamp as the goal we hold: position update only. No state resets and no
+  // timer resets. A zero held stamp (no goal yet) never matches,
   // so a goal stamped 0 by now() (e.g. sim time before /clock) is still a new goal.
   const auto held_stamp = getGoalStamp();
   const bool held_valid = held_stamp.sec != 0 || held_stamp.nanosec != 0;
@@ -1850,20 +1452,9 @@ void MIGHTY_NODE::terminalGoalCallbackImpl(const geometry_msgs::msg::PoseStamped
   if (auto& s = debug_log_stream(); s.is_open()) {
     s << debug_log_t(this->now().seconds()) << " TERM_GOAL "
       << msg.pose.position.x << " " << msg.pose.position.y << " " << msg.pose.position.z
-      << " from_user=" << (from_user ? 1 : 0)
       << " frame=" << msg.header.frame_id
       << "\n";
     s.flush();
-  }
-
-  if (!position_update_only && from_user) {
-    manual_goal_active_ = true;
-    // A manual goal preempts any in-progress exploration goal.
-    exploration_active_ = false;
-    exploration_start_captured_ = false;
-    unreachable_consec_count_ = 0;
-    // Operator override of a return-home — start a fresh session.
-    home_return_requested_ = false;
   }
 
   // Set the terminal goal
@@ -1885,26 +1476,8 @@ void MIGHTY_NODE::terminalGoalCallbackImpl(const geometry_msgs::msg::PoseStamped
   // Set the terminal goal
   G_term.setPos(msg.pose.position.x, msg.pose.position.y, goal_z);
 
-  // If the goal lies in an occupied voxel, relocate it to the nearest
-  // free/unknown cell with ||drone_bbox|| clearance from the original point.
-  // The mutated G_term then flows into both the planner and the RViz marker.
-  if (par_.relocate_occupied_goal) {
-    if (!mighty_ptr_->sanitizeTerminalGoal(G_term)) {
-      // ERROR (not WARN) so it survives --log-level error in the launch file.
-      RCLCPP_ERROR(this->get_logger(),
-                   "Goal at (%.2f,%.2f,%.2f) is in occupied space and could not be "
-                   "relocated; ignoring.",
-                   msg.pose.position.x, msg.pose.position.y, goal_z);
-      return;
-    }
-    // Re-clamp z in case the BFS pushed the relocated goal out of bounds.
-    if (G_term.pos.z() < par_.z_min) G_term.pos.z() = par_.z_min;
-    if (G_term.pos.z() > par_.z_max) G_term.pos.z() = par_.z_max;
-  }
-
   if (position_update_only) {
-    // Same goal, new position (e.g. re-relocation): update G_term only, as the per-replan
-    // relocation does.
+    // Same goal, new position (selector re-relocation): update G_term only.
     mighty_ptr_->setGterm(G_term);
     publishState(G_term, pub_point_G_term_);
     return;
@@ -1991,22 +1564,10 @@ void MIGHTY_NODE::goalReachedCheckCallback() {
   if (use_benchmark_) {
     logData();
   }
-  // This timer now always runs (for planner_status REACHED); the goal_reached gate below only
-  // preserves the old behaviour, where the timer existed only if benchmarking or exploring.
-  if (use_benchmark_ || par_.expl_enabled) pub_goal_reached_->publish(std_msgs::msg::Empty());
+  // goal_reached is published on every arrival (user decision, spec §11.11). It used to be gated on
+  // `use_benchmark_ || expl_enabled`; expl_enabled no longer exists in the planner.
+  pub_goal_reached_->publish(std_msgs::msg::Empty());
   publishPlannerStatus(goal_selector_msgs::msg::PlannerStatus::REACHED, getGoalStamp());
-
-  // If the robot reached an exploration goal, mark it visited and clear our
-  // active flag so the next explore-select tick can pick the next frontier.
-  if (par_.expl_enabled && exploration_active_ && frontier_manager_) {
-    frontier_manager_->markVisited(current_explore_id_);
-    exploration_active_ = false;
-    unreachable_consec_count_ = 0;
-  }
-  // A manual goal that just completed releases the preemption.
-  if (manual_goal_active_) {
-    manual_goal_active_ = false;
-  }
 }
 
 // ----------------------------------------------------------------------------
@@ -3345,11 +2906,9 @@ void MIGHTY_NODE::esdfCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg
 }
 
 void MIGHTY_NODE::planningOcc2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
-  // Planning-only occupancy: same current occupancy update as occ_2d, but the mapper has
-  // already converted large connected UNKNOWN components to OCCUPIED for HGP/A*. Feed
-  // ONLY the planner here. Do NOT run FrontierDetector, touch the VisitedMap, or set
-  // current_detect_grid_ — those stay on the RAW occ_2d in occ2DCallback. The mapper
-  // refreshes this map every cycle, so MIGHTY adds no persistence/clearing logic.
+  // Planning-only occupancy: the mapper has already converted large connected UNKNOWN components
+  // to OCCUPIED for HGP/A*. The mapper refreshes this map every cycle, so MIGHTY adds no
+  // persistence/clearing logic.
   // Coverage vs planner window (logged once per grid-size change). The planner's
   // robot-centred window is >= min_wdx x min_wdy and grows to contain the goal;
   // any part of it the mapper does not cover is UNKNOWN in the tri-state 2D map
@@ -3411,686 +2970,6 @@ void MIGHTY_NODE::publishPlanningMap2D(const std_msgs::msg::Header& source_heade
     grid.data[i] = inflated[i] ? int8_t(99) : values[i];
   }
   pub_planning_map_2d_->publish(grid);
-}
-
-void MIGHTY_NODE::occ2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
-  // Remember the global mapper's ground-plane z so publishVisitedMap() can
-  // render at the same height as the live occ_2d layer in RViz.
-  occ2d_origin_z_ = msg->info.origin.position.z;
-
-  // Persistent-map fusion: any cell that arrived UNKNOWN from the mapper but
-  // was previously observed (FREE or OCCUPIED) gets restored from
-  // visited_map_ before we build OccGrid2D. So when the robot revisits a
-  // previously-explored region, the sliding window comes back instantly with
-  // its last-known occupancy instead of one frame of UNKNOWN flicker. This
-  // re-introduces stale OCCUPIED for moving obstacles that have since left,
-  // so it's only safe in static environments — gated by a parameter.
-  // Mutating msg->data in place is safe here because (a) we're the only
-  // subscriber to occ_2d_topic in this process, (b) cb_group_map_ is now
-  // MutuallyExclusive, and (c) inter-process delivery gives us a unique copy.
-  if (visited_map_ && par_.expl_fuse_persistent_into_local && !msg->data.empty()) {
-    const double res = msg->info.resolution;
-    const double ox  = msg->info.origin.position.x;
-    const double oy  = msg->info.origin.position.y;
-    const unsigned W = msg->info.width;
-    const unsigned H = msg->info.height;
-    for (unsigned iy = 0; iy < H; ++iy) {
-      for (unsigned ix = 0; ix < W; ++ix) {
-        const size_t i = static_cast<size_t>(iy) * W + ix;
-        if (i >= msg->data.size()) break;
-        if (msg->data[i] >= 0) continue;  // already known (FREE or OCCUPIED)
-        const double wx = ox + (ix + 0.5) * res;
-        const double wy = oy + (iy + 0.5) * res;
-        const int8_t v = visited_map_->getStateWorld(wx, wy);
-        if (v != VisitedMap::kUnknown) {
-          msg->data[i] = v;  // restore old persistent value
-        }
-      }
-    }
-  }
-
-  occ_grid_2d_ = OccGrid2D::fromOccupancyGrid(*msg);
-  // NOTE: the RAW occ_2d map now feeds ONLY the visited-map fusion (above) and the
-  // FrontierDetector/Manager pipeline (below). The HGP/A* planner map is updated from
-  // planning_occ_2d_topic in planningOcc2DCallback() — so the mapper's large-UNKNOWN->
-  // OCCUPIED planning cells never leak into frontier detection or the visited map.
-  // (The previous setOccGrid2D(occ_grid_2d_) + updateMap2DOnly() moved there.)
-
-  // Frontier-based exploration: detect frontiers in the new grid, update the
-  // persistent global database, then immediately try to issue an exploration
-  // goal so the robot starts moving the moment the first frontier appears
-  // (instead of waiting up to 1 s for the explore-select timer tick).
-  if (par_.expl_enabled && occ_grid_2d_ && frontier_detector_ && frontier_manager_
-      && state_initialized_) {
-    state cur;
-    mighty_ptr_->getState(cur);
-    Eigen::Vector3d robot_pose(cur.pos.x(), cur.pos.y(), cur.yaw);
-    Eigen::Vector2d robot_xy(cur.pos.x(), cur.pos.y());
-
-    // Absorb the freshly observed cells into the persistent visited bitmap
-    // *before* running the detector, so cells we are observing right now are
-    // already marked visited and never become "stale unknown" on the next
-    // sliding step.
-    if (visited_map_) visited_map_->absorb(*occ_grid_2d_);
-
-    // Pick the grid the detector runs on. The persistent visited_map_ is the
-    // entire mission history, so frontiers at the boundary of explored area
-    // are always reachable via WFD even when the robot is far from them. The
-    // local sliding window is the legacy path; both paths feed the visited
-    // map as the suppression filter when on the local grid.
-    if (par_.expl_detect_on_visited_map && visited_map_ && !visited_map_->empty()) {
-      current_detect_grid_ = OccGrid2D::fromTristate(
-          visited_map_->width(), visited_map_->height(),
-          visited_map_->resolution(),
-          visited_map_->originX(), visited_map_->originY(),
-          visited_map_->data());
-    } else {
-      current_detect_grid_ = occ_grid_2d_;
-    }
-    const auto& detect_grid = *current_detect_grid_;
-    const VisitedMap* visited_filter =
-        par_.expl_detect_on_visited_map ? nullptr : visited_map_.get();
-    auto clusters = frontier_detector_->detect(detect_grid, robot_xy,
-                                               visited_filter);
-
-    // ESDF-based clearance filter: drop frontiers whose centroid is closer
-    // than `expl_min_obstacle_distance_m` to the nearest obstacle. The ESDF
-    // gives a meter-accurate distance and matches what HGP/L-BFGS use for
-    // collision avoidance, so frontiers we keep are guaranteed to have
-    // breathing room from walls. Disabled when threshold <= 0 or no ESDF.
-    if (esdf_grid_ && par_.expl_min_obstacle_distance_m > 0.0) {
-      const double thresh = par_.expl_min_obstacle_distance_m;
-      clusters.erase(
-          std::remove_if(
-              clusters.begin(), clusters.end(),
-              [&](const FrontierCluster& c) {
-                return esdf_grid_->queryDistance(c.centroid.x(),
-                                                 c.centroid.y()) < thresh;
-              }),
-          clusters.end());
-    }
-
-    const auto active_peers = par_.expl_use_minpos
-        ? peer_tracker_.getActivePeers(this->now().seconds(),
-                                       par_.expl_peer_timeout_sec)
-        : std::vector<PeerPose>{};
-    frontier_manager_->update(clusters, detect_grid, robot_pose,
-                              this->now().seconds(), active_peers);
-
-    // Also retroactively invalidate existing records that drifted too close
-    // to obstacles (e.g. via EMA centroid updates) or that were inserted
-    // before the ESDF caught up. Without this, stale records that already
-    // hugged a wall would never be cleared.
-    if (esdf_grid_ && par_.expl_min_obstacle_distance_m > 0.0) {
-      const double thresh = par_.expl_min_obstacle_distance_m;
-      for (const auto& r : frontier_manager_->records()) {
-        if (r.state != FrontierState::ACTIVE &&
-            r.state != FrontierState::DORMANT) continue;
-        if (esdf_grid_->queryDistance(r.centroid_xy.x(),
-                                      r.centroid_xy.y()) < thresh) {
-          frontier_manager_->markInvalidated(r.id, this->now().seconds());
-        }
-      }
-    }
-
-    // Publish the persistent occupancy map ~1 Hz so RViz can layer it behind
-    // the sliding occ_2d. Throttling matters because each publish copies the
-    // full persistent buffer (~444 KB at the 100×100 m default; bigger if the
-    // user enlarges expl_visited_map_width_m / height_m) and the map only
-    // changes incrementally between frames. transient_local QoS guarantees
-    // late-joining RViz still gets the latest snapshot.
-    if (visited_map_ && par_.expl_publish_visited_map) {
-      const double t_now = this->now().seconds();
-      if (t_now - last_visited_publish_t_ >= 1.0) {
-        publishVisitedMap();
-        last_visited_publish_t_ = t_now;
-      }
-    }
-
-    // Broadcast our visited map to peers so they can skip already-explored
-    // frontiers. Same 1 Hz throttle as the local RViz publish.
-    if (pub_peer_visited_map_ && visited_map_ && !visited_map_->empty()) {
-      const double t_now = this->now().seconds();
-      if (t_now - last_peer_visited_publish_t_ >= 1.0) {
-        nav_msgs::msg::OccupancyGrid msg;
-        msg.header.frame_id = ns_;
-        msg.header.stamp    = this->now();
-        msg.info.resolution = static_cast<float>(visited_map_->resolution());
-        msg.info.width      = static_cast<unsigned>(visited_map_->width());
-        msg.info.height     = static_cast<unsigned>(visited_map_->height());
-        msg.info.origin.position.x = visited_map_->originX();
-        msg.info.origin.position.y = visited_map_->originY();
-        msg.info.origin.orientation.w = 1.0;
-        const auto& v = visited_map_->data();
-        msg.data.assign(v.begin(), v.end());
-        pub_peer_visited_map_->publish(msg);
-        last_peer_visited_publish_t_ = t_now;
-      }
-    }
-
-    // Throttled diagnostic so it's obvious whether detection is finding
-    // anything (and gives a hint about *why* if the answer is "no").
-    {
-      // Quick scan of the published grid for cell-state distribution.
-      int n_unknown = 0, n_free = 0, n_occ = 0;
-      const auto& occ = occ_grid_2d_->occupiedData();
-      const auto& unk = occ_grid_2d_->unknownData();
-      for (size_t i = 0; i < occ.size(); ++i) {
-        if (unk[i])      ++n_unknown;
-        else if (occ[i]) ++n_occ;
-        else             ++n_free;
-      }
-      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-          "[expl] grid %dx%d  free=%d  occ=%d  unknown=%d  fresh=%zu  db=%zu",
-          occ_grid_2d_->width(), occ_grid_2d_->height(),
-          n_free, n_occ, n_unknown, clusters.size(), frontier_manager_->size());
-    }
-
-    if (par_.expl_publish_markers) publishFrontierMarkers();
-
-    // Drive the goal-selection loop immediately. This makes the robot start
-    // moving as soon as the first frontier exists, rather than waiting for
-    // the next 1 Hz explore-select tick.
-    exploreSelectCallback();
-  }
-}
-
-// ----------------------------------------------------------------------------
-
-/**
- * @brief Frontier exploration: pick the next goal from the global frontier DB
- *        and issue it through the same pathway as a manual term_goal. Skipped
- *        when a manual goal is active or our own previous goal is still being
- *        pursued.
- */
-void MIGHTY_NODE::exploreSelectCallback() {
-  if (!par_.expl_enabled) return;
-  if (manual_goal_active_) return;
-  // Once a global return-home has been requested, stop issuing frontier goals
-  // so the agent commits to going home and doesn't get yanked back out by a
-  // newly-detected frontier mid-return. The latch is released further down,
-  // once the trip has actually finished — see the return-home re-arm block.
-  if (!occ_grid_2d_ || !frontier_manager_) return;
-  if (!current_detect_grid_) return;
-  if (!state_initialized_) return;
-
-  // If we still have an in-progress exploration goal that hasn't been
-  // marked VISITED/INVALIDATED yet, either leave it alone (legacy hard-commit)
-  // or — with preemption enabled — keep re-ranking every tick and switch when
-  // a different frontier beats the current one's FRESH utility by more than
-  // preempt_margin. Both utilities are recomputed against the robot's current
-  // pose and grid, so a frontier that was the right pick at commit time loses
-  // its seat once a newly-detected closer one overtakes it. The margin plus
-  // min-commit dwell provide hysteresis: with distance dominating the utility
-  // (w_dist/dist_ref_m = 1/m) a naive always-re-select would thrash between
-  // near-equal frontiers as the robot moves, resetting the planner each time.
-  if (exploration_active_) {
-    auto* r = frontier_manager_->find(current_explore_id_);
-    if (r && (r->state == FrontierState::ACTIVE ||
-              r->state == FrontierState::DORMANT)) {
-      // --- Static stuck watchdog (runs regardless of preemption) -----------
-      // Once the robot has actually moved toward this frontier and then stops
-      // making progress (< stuck_move_thresh_m displacement) for
-      // stuck_timeout_sec, abandon it. This catches the A* partial-path case:
-      // the robot drives to the last reachable waypoint (e.g. the stand-off in
-      // front of a walled-off frontier), parks, and would otherwise sit there
-      // until the much longer pursuit timeout. explore_has_moved_ gates the
-      // clock so pre-motion yaw/plan latency right after commit can't trip it.
-      if (par_.expl_stuck_timeout_sec > 0.0) {
-        const double t_stuck = this->now().seconds();
-        state cur_s;
-        mighty_ptr_->getState(cur_s);
-        const Eigen::Vector2d xy(cur_s.pos.x(), cur_s.pos.y());
-        if ((xy - explore_last_progress_xy_).norm() > par_.expl_stuck_move_thresh_m) {
-          explore_last_progress_xy_ = xy;       // progressed -> reset the clock
-          explore_last_progress_t_  = t_stuck;
-          explore_has_moved_        = true;
-        } else if (explore_has_moved_ &&
-                   t_stuck - explore_last_progress_t_ >= par_.expl_stuck_timeout_sec) {
-          RCLCPP_WARN(this->get_logger(),
-                      "Exploration: frontier %lu stuck (no motion > %.2f m for %.1f s) "
-                      "-> invalidating, re-selecting",
-                      static_cast<unsigned long>(current_explore_id_),
-                      par_.expl_stuck_move_thresh_m, par_.expl_stuck_timeout_sec);
-          frontier_manager_->markInvalidated(current_explore_id_, t_stuck);
-          exploration_active_      = false;
-          explore_last_progress_t_ = -1.0;
-          explore_has_moved_       = false;
-          // fall through to the normal selection path below (picks a new goal now)
-        }
-      }
-
-      // Preemption / hold-goal logic only applies if the watchdog above didn't
-      // just release the pursuit.
-      if (exploration_active_) {
-      if (!par_.expl_preempt_enabled) return;
-
-      const double t_now = this->now().seconds();
-      if (explore_committed_at_t_ >= 0.0 &&
-          t_now - explore_committed_at_t_ < par_.expl_preempt_min_commit_sec) {
-        return;  // inside the commit dwell — no switching yet
-      }
-
-      state cur_p;
-      mighty_ptr_->getState(cur_p);
-      const Eigen::Vector3d pose_p(cur_p.pos.x(), cur_p.pos.y(), cur_p.yaw);
-
-      // Same selector the commit path below uses, so preemption and initial
-      // selection can never disagree about what "best" means.
-      std::optional<FrontierRecord> best;
-      if (par_.expl_use_minpos) {
-        auto peers = peer_tracker_.getActivePeers(
-            t_now, par_.expl_peer_timeout_sec);
-        best = frontier_manager_->selectNextGoalMinPos(
-            pose_p, *current_detect_grid_, peers,
-            par_.expl_min_frontier_dist_to_peers_m);
-      } else {
-        best = frontier_manager_->selectNextGoal(pose_p, *current_detect_grid_);
-      }
-      if (!best || best->id == current_explore_id_) return;
-
-      const auto u_cur = frontier_manager_->utilityOf(
-          current_explore_id_, pose_p, *current_detect_grid_);
-      if (!u_cur) return;  // record vanished between find() and here — next tick sorts it out
-      if (best->cached_utility < *u_cur + par_.expl_preempt_margin) return;
-
-      // Preempt: release the old pursuit WITHOUT invalidating it. Clearing
-      // the armed deadline matters — the pursuit-timeout sweep in update()
-      // fires on any ACTIVE/DORMANT record whose deadline elapsed, chased or
-      // not, and markSelected() refuses to re-arm an already-armed record.
-      // Without this clear, a frontier we merely glanced at gets blacklisted
-      // (plus its keep-out radius) minutes later for no reason.
-      RCLCPP_INFO(this->get_logger(),
-                  "Exploration: preempting frontier %lu (u=%.2f) for %lu "
-                  "(u=%.2f, margin %.2f)",
-                  static_cast<unsigned long>(current_explore_id_), *u_cur,
-                  static_cast<unsigned long>(best->id), best->cached_utility,
-                  par_.expl_preempt_margin);
-      frontier_manager_->clearPursuit(current_explore_id_);
-      exploration_active_ = false;
-      // Fall through to the normal selection path, which re-picks `best`
-      // (same selector, same inputs), publishes it, and arms its timeout.
-      }  // end if (exploration_active_) — preemption/hold guard
-    }
-    // Otherwise (record gone or already terminal) fall through and pick a new one.
-  }
-
-  state cur;
-  mighty_ptr_->getState(cur);
-  Eigen::Vector3d robot_pose(cur.pos.x(), cur.pos.y(), cur.yaw);
-
-  // --- Return-home re-arm ---------------------------------------------------
-  // home_return_requested_ commits the agent to its return trip so a frontier
-  // popping up mid-transit can't yank it back out. It used to be a one-way
-  // latch, which meant a single transient "no frontiers" tick ended the mission
-  // permanently: detection kept running and RViz kept drawing frontiers, but
-  // this callback short-circuited forever and no goal was ever issued again.
-  // The detector reaches frontiers only through free cells connected to the
-  // robot, so a momentary break in that connectivity is enough to trigger it.
-  //
-  // Release the latch once the trip has actually completed — the robot is
-  // parked within goal_radius of the captured start — so a new session can
-  // begin if frontiers remain. While still en route we keep the original
-  // commit-to-the-return behaviour and bail out.
-  if (home_return_requested_) {
-    const double d_home = (Eigen::Vector2d(cur.pos.x(), cur.pos.y())
-                           - exploration_start_pos_.head<2>()).norm();
-    if (d_home > par_.goal_radius) return;  // still en route — stay latched
-    home_return_requested_      = false;
-    exploration_start_captured_ = false;    // next goal opens a fresh session
-    RCLCPP_INFO(this->get_logger(),
-                "Exploration: return-home complete at (%.2f, %.2f) — re-arming; "
-                "will resume if frontiers reappear",
-                cur.pos.x(), cur.pos.y());
-  }
-
-  // Multi-agent timing guard: peer-shared maps can populate frontiers before
-  // this agent's own state has settled past the (0,0,0) default, causing the
-  // start capture below to grab origin instead of the real spawn pose. Only
-  // applies when at least one peer has been heard — on solo hardware (e.g.
-  // RR04 DLIO) the rover legitimately starts at origin and the guard would
-  // otherwise deadlock the planner (goal never issued -> rover never moves
-  // -> guard never lifts).
-  if (!exploration_start_captured_ && par_.expl_use_minpos) {
-    const auto peers = peer_tracker_.getActivePeers(
-        this->now().seconds(), par_.expl_peer_timeout_sec);
-    if (!peers.empty()) {
-      const double dist_to_origin =
-          std::sqrt(cur.pos.x() * cur.pos.x() + cur.pos.y() * cur.pos.y());
-      if (dist_to_origin < 0.5) {
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-          "Exploration deferred: robot pose (%.3f, %.3f) within 0.5m of origin "
-          "with %zu peer(s) active — waiting for state to settle",
-          cur.pos.x(), cur.pos.y(), peers.size());
-        return;
-      }
-    }
-  }
-
-  std::optional<FrontierRecord> next;
-  if (par_.expl_use_minpos) {
-    auto peers = peer_tracker_.getActivePeers(
-        this->now().seconds(), par_.expl_peer_timeout_sec);
-    next = frontier_manager_->selectNextGoalMinPos(
-        robot_pose, *current_detect_grid_, peers,
-        par_.expl_min_frontier_dist_to_peers_m);
-  } else {
-    next = frontier_manager_->selectNextGoal(robot_pose, *current_detect_grid_);
-  }
-  if (!next) {
-    if (exploration_active_) {
-      std::cout << "[mighty] No frontiers left. Robot now at ("
-                << cur.pos.x() << ", " << cur.pos.y() << ", " << cur.pos.z()
-                << "). Returning to captured start ("
-                << exploration_start_pos_.x() << ", "
-                << exploration_start_pos_.y() << ", "
-                << exploration_start_pos_.z() << ")"
-                << std::endl;
-      RCLCPP_INFO(this->get_logger(),
-                  "Exploration: nothing left to explore — returning to start at (%.2f, %.2f, %.2f)",
-                  exploration_start_pos_.x(), exploration_start_pos_.y(), exploration_start_pos_.z());
-      geometry_msgs::msg::PoseStamped home;
-      home.header.frame_id    = par_.map_frame_id;
-      home.header.stamp       = this->now();
-      home.pose.position.x    = exploration_start_pos_.x();
-      home.pose.position.y    = exploration_start_pos_.y();
-      home.pose.position.z    = par_.expl_default_goal_z;
-      home.pose.orientation.w = 1.0;
-      terminalGoalCallbackImpl(home, /*from_user=*/false);
-      // Lock in the return-home: the gate at the top of exploreSelectCallback
-      // now short-circuits, so a peer's visited_map merge or a fresh frontier
-      // pop-up mid-transit can't yank the agent back out. Same flag the
-      // /exploration/return_home topic uses — single source of truth.
-      home_return_requested_ = true;
-    }
-    exploration_active_ = false;
-    // Note: exploration_start_captured_ is intentionally NOT reset here.
-    // While the robot is en route home, new frontiers may be discovered as the
-    // map updates, causing exploreSelectCallback to auto-restart. Resetting
-    // would let it re-capture the mid-transit pose as a new "start" and the
-    // final return-home would land there instead of the true session start.
-    // Only a manual user goal (true session boundary) resets the flag.
-    return;
-  }
-
-  geometry_msgs::msg::PoseStamped g;
-  g.header.frame_id    = par_.map_frame_id;
-  g.header.stamp       = this->now();
-  g.pose.position.x    = next->centroid_xy.x();
-  g.pose.position.y    = next->centroid_xy.y();
-  g.pose.position.z    = par_.expl_default_goal_z;
-  g.pose.orientation.w = 1.0;
-
-  RCLCPP_INFO(this->get_logger(),
-              "Exploration: -> frontier %lu at (%.2f, %.2f), state=%d, u=%.3f",
-              static_cast<unsigned long>(next->id),
-              next->centroid_xy.x(), next->centroid_xy.y(),
-              static_cast<int>(next->state), next->cached_utility);
-
-  terminalGoalCallbackImpl(g, /*from_user=*/false);
-
-  if (!exploration_start_captured_) {
-    exploration_start_pos_ = Eigen::Vector3d(cur.pos.x(), cur.pos.y(), cur.pos.z());
-    exploration_start_captured_ = true;
-    std::cout << "[mighty] Exploration start captured at ("
-              << exploration_start_pos_.x() << ", "
-              << exploration_start_pos_.y() << ", "
-              << exploration_start_pos_.z() << ") — will return here when done"
-              << std::endl;
-    RCLCPP_INFO(this->get_logger(),
-                "Exploration: starting from (%.2f, %.2f, %.2f) — will return here when done",
-                exploration_start_pos_.x(), exploration_start_pos_.y(), exploration_start_pos_.z());
-  }
-
-  current_explore_id_       = next->id;
-  exploration_active_       = true;
-  explore_committed_at_t_   = this->now().seconds();
-  unreachable_consec_count_ = 0;
-  // Arm the stuck watchdog fresh for this pursuit.
-  explore_last_progress_xy_ = Eigen::Vector2d(robot_pose.x(), robot_pose.y());
-  explore_last_progress_t_  = this->now().seconds();
-  explore_has_moved_        = false;
-  frontier_manager_->markSelected(
-      next->id, Eigen::Vector2d(robot_pose.x(), robot_pose.y()),
-      this->now().seconds());
-  publishExplorationCurrentGoal(*next);
-}
-
-// ----------------------------------------------------------------------------
-
-namespace {
-
-std_msgs::msg::ColorRGBA makeColor(double r, double g, double b, double a) {
-  std_msgs::msg::ColorRGBA c;
-  c.r = static_cast<float>(r);
-  c.g = static_cast<float>(g);
-  c.b = static_cast<float>(b);
-  c.a = static_cast<float>(a);
-  return c;
-}
-
-std_msgs::msg::ColorRGBA colorForState(FrontierState s) {
-  switch (s) {
-    case FrontierState::ACTIVE:      return makeColor(0.0, 0.8, 1.0, 0.9);  // cyan
-    case FrontierState::DORMANT:     return makeColor(0.6, 0.6, 0.6, 0.7);  // gray
-    case FrontierState::VISITED:     return makeColor(0.0, 0.9, 0.0, 0.7);  // green
-    case FrontierState::INVALIDATED: return makeColor(0.9, 0.0, 0.0, 0.7);  // red
-  }
-  return makeColor(1.0, 1.0, 1.0, 0.7);
-}
-
-}  // namespace
-
-/**
- * @brief Publish frontier visualization markers. We only show ACTIVE and
- *        DORMANT centroids plus a small `id=N` text label per centroid, plus
- *        the yellow robot→goal line. VISITED and INVALIDATED frontiers are
- *        kept in the database (so they still gate selection and DB eviction)
- *        but suppressed from RViz to keep the scene readable. One MarkerArray
- *        per cycle, prefixed with DELETEALL so stale markers don't accumulate.
- */
-void MIGHTY_NODE::publishFrontierMarkers() {
-  if (!pub_frontiers_ || !frontier_manager_ || !occ_grid_2d_) return;
-
-  visualization_msgs::msg::MarkerArray arr;
-
-  // DELETEALL prefix to wipe stale markers from previous cycles.
-  {
-    visualization_msgs::msg::Marker del;
-    del.header.frame_id = par_.map_frame_id;
-    del.header.stamp    = this->now();
-    del.action          = visualization_msgs::msg::Marker::DELETEALL;
-    arr.markers.push_back(del);
-  }
-
-  const auto& records = frontier_manager_->records();
-
-  visualization_msgs::msg::Marker centroids;
-  centroids.header.frame_id = par_.map_frame_id;
-  centroids.header.stamp    = this->now();
-  centroids.ns              = "frontier_centroids";
-  centroids.id              = 0;
-  centroids.type            = visualization_msgs::msg::Marker::SPHERE_LIST;
-  centroids.action          = visualization_msgs::msg::Marker::ADD;
-  centroids.scale.x = 0.3;
-  centroids.scale.y = 0.3;
-  centroids.scale.z = 0.3;
-  centroids.pose.orientation.w = 1.0;
-
-  int label_id = 0;
-  for (const auto& r : records) {
-    // Only ACTIVE and DORMANT are visualized — VISITED/INVALIDATED stay in
-    // the DB but are hidden from RViz.
-    if (r.state != FrontierState::ACTIVE && r.state != FrontierState::DORMANT) {
-      continue;
-    }
-
-    // Centroid sphere, colored by state.
-    geometry_msgs::msg::Point p;
-    p.x = r.centroid_xy.x();
-    p.y = r.centroid_xy.y();
-    p.z = par_.expl_default_goal_z + 0.1;
-    centroids.points.push_back(p);
-    centroids.colors.push_back(colorForState(r.state));
-
-    // Per-record text label — just the id, so you can track a specific
-    // frontier across cycles. (Cluster size and cached utility are dropped.)
-    visualization_msgs::msg::Marker label;
-    label.header.frame_id = par_.map_frame_id;
-    label.header.stamp    = this->now();
-    label.ns              = "frontier_labels";
-    label.id              = label_id++;
-    label.type            = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
-    label.action          = visualization_msgs::msg::Marker::ADD;
-    label.pose.position.x = r.centroid_xy.x();
-    label.pose.position.y = r.centroid_xy.y();
-    label.pose.position.z = par_.expl_default_goal_z + 0.6;
-    label.pose.orientation.w = 1.0;
-    label.scale.z = 0.4;
-    label.color   = makeColor(0.0, 0.0, 0.0, 1.0);
-    {
-      char buf[64];
-      if (r.pursuit_deadline_t > 0.0 && r.pursuit_budget_sec > 0.0) {
-        const double t_now = this->now().seconds();
-        const double elapsed = r.pursuit_budget_sec
-                             - std::max(0.0, r.pursuit_deadline_t - t_now);
-        std::snprintf(buf, sizeof(buf), "id=%lu\n%.1fs/%.1fs",
-                      static_cast<unsigned long>(r.id),
-                      elapsed, r.pursuit_budget_sec);
-      } else {
-        std::snprintf(buf, sizeof(buf), "id=%lu",
-                      static_cast<unsigned long>(r.id));
-      }
-      label.text = buf;
-    }
-    arr.markers.push_back(label);
-  }
-  if (!centroids.points.empty()) arr.markers.push_back(centroids);
-
-  // Yellow line from robot to current exploration goal.
-  if (exploration_active_ && state_initialized_) {
-    state cur;
-    mighty_ptr_->getState(cur);
-    auto* r = frontier_manager_->find(current_explore_id_);
-    if (r) {
-      visualization_msgs::msg::Marker line;
-      line.header.frame_id = par_.map_frame_id;
-      line.header.stamp    = this->now();
-      line.ns              = "frontier_goal_line";
-      line.id              = 0;
-      line.type            = visualization_msgs::msg::Marker::LINE_STRIP;
-      line.action          = visualization_msgs::msg::Marker::ADD;
-      line.scale.x         = 0.15;
-      line.color           = makeColor(1.0, 1.0, 0.0, 0.9);
-      line.pose.orientation.w = 1.0;
-      geometry_msgs::msg::Point a;
-      a.x = cur.pos.x();
-      a.y = cur.pos.y();
-      a.z = par_.expl_default_goal_z + 0.1;
-      geometry_msgs::msg::Point b;
-      b.x = r->centroid_xy.x();
-      b.y = r->centroid_xy.y();
-      b.z = par_.expl_default_goal_z + 0.1;
-      line.points.push_back(a);
-      line.points.push_back(b);
-      arr.markers.push_back(line);
-    }
-  }
-
-  // Yellow rectangle showing the user-configured exploration bounds, plus a
-  // text label so it's obvious in RViz what the rectangle means.
-  if (par_.expl_bounds_enabled) {
-    const double z = par_.expl_default_goal_z + 0.05;
-    const double x0 = par_.expl_bounds_min_x;
-    const double x1 = par_.expl_bounds_max_x;
-    const double y0 = par_.expl_bounds_min_y;
-    const double y1 = par_.expl_bounds_max_y;
-
-    visualization_msgs::msg::Marker rect;
-    rect.header.frame_id = par_.map_frame_id;
-    rect.header.stamp    = this->now();
-    rect.ns              = "exploration_bounds";
-    rect.id              = 0;
-    rect.type            = visualization_msgs::msg::Marker::LINE_STRIP;
-    rect.action          = visualization_msgs::msg::Marker::ADD;
-    rect.scale.x         = 0.10;            // line thickness
-    rect.color           = makeColor(1.0, 1.0, 0.0, 0.9);  // yellow
-    rect.pose.orientation.w = 1.0;
-    auto pt = [&](double x, double y) {
-      geometry_msgs::msg::Point p; p.x = x; p.y = y; p.z = z; return p;
-    };
-    rect.points.push_back(pt(x0, y0));
-    rect.points.push_back(pt(x1, y0));
-    rect.points.push_back(pt(x1, y1));
-    rect.points.push_back(pt(x0, y1));
-    rect.points.push_back(pt(x0, y0));   // close the loop
-    arr.markers.push_back(rect);
-
-    visualization_msgs::msg::Marker label;
-    label.header.frame_id = par_.map_frame_id;
-    label.header.stamp    = this->now();
-    label.ns              = "exploration_bounds_label";
-    label.id              = 0;
-    label.type            = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
-    label.action          = visualization_msgs::msg::Marker::ADD;
-    label.pose.position.x = 0.5 * (x0 + x1);
-    label.pose.position.y = y1 + 0.5;     // sit just above the top edge
-    label.pose.position.z = z + 0.5;
-    label.pose.orientation.w = 1.0;
-    label.scale.z = 0.6;
-    label.color   = makeColor(1.0, 1.0, 0.0, 0.9);
-    label.text    = "Exploration Area";
-    arr.markers.push_back(label);
-  }
-
-  pub_frontiers_->publish(arr);
-}
-
-// ----------------------------------------------------------------------------
-
-void MIGHTY_NODE::publishExplorationCurrentGoal(const FrontierRecord& r) {
-  if (!pub_explore_current_goal_) return;
-  geometry_msgs::msg::PoseStamped g;
-  g.header.frame_id    = par_.map_frame_id;
-  g.header.stamp       = this->now();
-  g.pose.position.x    = r.centroid_xy.x();
-  g.pose.position.y    = r.centroid_xy.y();
-  g.pose.position.z    = par_.expl_default_goal_z;
-  g.pose.orientation.w = 1.0;
-  pub_explore_current_goal_->publish(g);
-}
-
-// ----------------------------------------------------------------------------
-
-/**
- * @brief Publish the persistent occupancy map as a nav_msgs/OccupancyGrid.
- *        The buffer already holds tristate values (-1 unknown / 0 free /
- *        100 occupied) matching the message encoding, so this is a flat
- *        copy. RViz subscribes to /exploration/visited_map and renders it
- *        behind the sliding occ_2d so revisited cells keep their last-known
- *        FREE/OCCUPIED color instead of flickering UNKNOWN.
- */
-void MIGHTY_NODE::publishVisitedMap() {
-  if (!pub_visited_map_ || !visited_map_ || visited_map_->empty()) return;
-
-  nav_msgs::msg::OccupancyGrid msg;
-  msg.header.frame_id = par_.map_frame_id;
-  msg.header.stamp    = this->now();
-  msg.info.resolution = static_cast<float>(visited_map_->resolution());
-  msg.info.width      = static_cast<unsigned>(visited_map_->width());
-  msg.info.height     = static_cast<unsigned>(visited_map_->height());
-  msg.info.origin.position.x    = visited_map_->originX();
-  msg.info.origin.position.y    = visited_map_->originY();
-  // Match whatever z the live occ_2d layer is at (global_mapper uses
-  // z_ground). Falls back to the exploration default goal z until the first
-  // occ_2d arrives so a late RViz subscriber still sees a sensible plane.
-  msg.info.origin.position.z    =
-      occ2d_origin_z_.value_or(par_.expl_default_goal_z);
-  msg.info.origin.orientation.w = 1.0;
-
-  const auto& v = visited_map_->data();
-  msg.data.assign(v.begin(), v.end());  // raw tristate copy
-  pub_visited_map_->publish(msg);
 }
 
 // ----------------------------------------------------------------------------

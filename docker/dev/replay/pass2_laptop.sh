@@ -2,7 +2,10 @@
 # PASS 2 — run ON A LAPTOP. Plays the planner INPUTS of a pass1_rover.sh
 # recording (TF, DLIO odom + pose, the three 2-D grids) through the re-stamp
 # relay into the --dev stack running under the recording rover's name, and
-# counts what the LAPTOP's own planner/MPC emit. No mapper, no sim time.
+# counts what the LAPTOP's own planner/MPC/goal_selector emit (mighty_hw.sh
+# start --dev brings up the goal_selector pane; it gets `state` from the
+# convert_odom_to_state pane and the 2-D grids from the relay, and publishes
+# exploration/current_goal, which is what the counter below watches). No mapper, no sim time.
 # Verified on alienware-02 2026-09-17: same 15 exploration goals as the rover run,
 # MPC ramps to v_max, 0 TF/solver failures.
 #
@@ -14,7 +17,7 @@
 # KEEP_RUNNING=1 pass2_laptop.sh <bag> — skip the final `mighty_hw.sh stop`, so
 # hw-mighty (and its dev zenoh router) stay up after the bag finishes playing,
 # for interactive use (e.g. RViz "2D Goal Pose" against a manually-set term_goal
-# — see config/hw_mighty_ground_robot.yaml's exploration.enabled). Default
+# — see config/hw_goal_selector.yaml's exploration.enabled). Default
 # (unset) keeps the original verified-regression-test behavior: full teardown.
 set -uo pipefail
 BAG="${1:?augmented bag dir}"

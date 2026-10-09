@@ -17,6 +17,7 @@ the mighty repo root; every dependency is cloned *inside* the build at its
 | `mighty` | this checkout (`COPY .`, filtered by `Dockerfile.hw.dockerignore`) |
 | `mpc` | `git@gitlab.com:mit-acl/ugv/ugv_control/mpc.git` @ pin (**private** — needs SSH at build) |
 | `dynus_interfaces` | github @ pin |
+| `goal_selector_msgs` | github (public, https) @ pin |
 | `DecompROS2` (`decomp_util`, `decomp_ros_msgs`, `decomp_rviz_plugins`, `decomp_test_node`) | github @ pin |
 
 Nothing else on the host is an input: no sibling workspaces, no prebuilt tarballs.
@@ -74,15 +75,16 @@ build the same session, and a hand-started one is not tracked by the unit.
 | `MIGHTY planner` | the planner | `mighty_node` |
 | `convert_odom_to_state` | odom → `state` relay | `convert_odom_to_state` |
 | `MPC` | tracks `mpc_waypoints`, publishes `cmd_vel_auto` | `mpc` |
-| `RViz 2D goal` | `repub_rviz_2Dgoal.py` | — |
+| `goal_selector` | exploration, goal relocation, RViz/manual goals -> `term_goal` (params: `hw_goal_selector.yaml` layered on the planner's) | `goal_selector` |
 
-The first three all run `onboard_mighty.launch.py`; `only_nodes:=` selects which of
+All four run `onboard_mighty.launch.py`; `only_nodes:=` selects which of
 that file's nodes a pane starts, so the launch file stays the single source of truth for
 parameters (`mighty_node`'s are a computed merge of `mighty.yaml` ←
-`hw_mighty_ground_robot.yaml` plus overrides — never hand-roll them as `ros2 run`).
+`hw_mighty_ground_robot.yaml` plus overrides; `goal_selector`'s are that same merge with
+`hw_goal_selector.yaml` layered on top — never hand-roll them as `ros2 run`).
 
 Only the planner and MPC panes gate on `wait_for_tf.py <ns>/map <ns>/odom` (the
-`/tf_static` startup-race fix); the state converter never touches TF. `wait_for_tf.py`
+`/tf_static` startup-race fix); the state converter and goal selector never touch TF. `wait_for_tf.py`
 warns and continues on timeout, so the stack never deadlocks. Restarting the MPC pane is
 **not instant** — `MPCNode` builds an IPOPT/collocation NLP first.
 
@@ -161,14 +163,14 @@ a `config/*.yaml` edit needs no rebuild at all (see *Parameters* below).
 docker run --rm mighty-hw:local bash -c '
   source /opt/ros/humble/setup.bash &&
   source /home/swarm/code/mighty_ws/install/setup.bash &&
-  ros2 pkg list | grep -E "^(mighty|mpc|dynus_interfaces|decomp)" &&
+  ros2 pkg list | grep -E "^(mighty|mpc|dynus_interfaces|goal_selector|decomp)" &&
   dpkg-query -W ros-humble-rmw-zenoh-cpp ros-humble-zenoh-cpp-vendor &&
   ros2 launch mighty onboard_mighty.launch.py --show-args 2>/dev/null | grep -c only_nodes'
 ```
 
 Expect, in order:
 
-1. six packages — `mighty`, `mpc`, `dynus_interfaces`, `decomp_ros_msgs`,
+1. seven packages — `mighty`, `mpc`, `dynus_interfaces`, `goal_selector_msgs`, `decomp_ros_msgs`,
    `decomp_rviz_plugins`, `decomp_test_node`. `decomp_util` is a plain CMake package and
    never appears in `ros2 pkg list` — run
    `ls /home/swarm/code/mighty_ws/install/decomp_util` inside the image instead.
@@ -259,7 +261,7 @@ come from there.
 `share/mighty/config`, always. So on a rover:
 
 ```bash
-vim config/hw_mighty_ground_robot.yaml     # edit
+vim config/hw_mighty_ground_robot.yaml     # edit (exploration/relocation: config/hw_goal_selector.yaml)
 # in the planner pane: Ctrl-C, Up, Enter   # restart that one node
 git commit -am "..."                        # the change is a commit here, never a rebuild
 ```
@@ -268,7 +270,7 @@ What that covers and what it does not:
 
 | | source | change needs |
 |---|---|---|
-| `config/*.yaml` (planner params, zenoh session) | this checkout | pane restart |
+| `config/*.yaml` (planner + goal_selector params, zenoh session) | this checkout | pane restart |
 | `launch/`, `rviz/`, C++ | image | `make hw-build` + `pull` |
 | `mpc.yaml` | mpc repo @ its `mighty.repos` pin, baked | commit in mpc + pin bump + rebuild |
 

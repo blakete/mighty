@@ -79,7 +79,11 @@ def generate_launch_description():
     only_nodes_arg = DeclareLaunchArgument('only_nodes', default_value='',
         description='HARDWARE ONLY. Comma-separated subset of this file\'s nodes '
                     'to start; empty = all. Keys are the nodes\' real ROS names: '
-                    'mighty_node, convert_odom_to_state, convert_vicon_to_state, mpc')
+                    'mighty_node, convert_odom_to_state, convert_vicon_to_state, mpc, '
+                    'goal_selector (only startable via this filter, never by default)')
+    goal_selector_config_arg = DeclareLaunchArgument('goal_selector_config', default_value='',
+        description='HARDWARE ONLY. Path to the goal_selector YAML layered on top of the '
+                    'planner parameters (empty = <mighty share>/config/hw_goal_selector.yaml)')
 
     # Opaque function to launch nodes
     def launch_setup(context, *args, **kwargs):
@@ -338,6 +342,27 @@ def generate_launch_description():
             name='static_tf_map_to_odom', output='screen',
             arguments=['0','0','0','0','0','0','1', f'{namespace}/map', f'{namespace}/odom'])
         
+        # Goal selector (hardware, only_nodes:=goal_selector). Parameters = the SAME merged
+        # planner dict as mighty_node (base yaml <- hw yaml <- launch overrides: it reads
+        # horizon / map window / inflation_2d_m / ... from it; undeclared keys are ignored),
+        # then the selector's own YAML (exploration.*, relocation, goal_radius) on top.
+        goal_selector_node = None
+        if use_hardware:
+            gs_path = LaunchConfiguration('goal_selector_config').perform(context) or os.path.join(
+                get_package_share_directory('mighty'), 'config', 'hw_goal_selector.yaml')
+            with open(gs_path, 'r') as f:
+                gs_params = yaml.safe_load(f)['goal_selector']['ros__parameters']
+            goal_selector_params = {**parameters, **gs_params}
+            goal_selector_node = Node(
+                package='mighty',
+                executable='goal_selector',
+                name='goal_selector',
+                namespace=namespace,
+                output='screen',
+                emulate_tty=True,
+                parameters=[goal_selector_params],
+            )
+
         # Return launch description
         nodes_to_start = [mighty_node]
         if use_hardware:
@@ -377,17 +402,21 @@ def generate_launch_description():
                 'convert_odom_to_state':  hw_odom_to_state_node,
                 'convert_vicon_to_state': pose_twist_to_state_node,
                 'mpc':                    mpc_node,
+                'goal_selector':          goal_selector_node,
             }
             wanted = [k.strip() for k in only_nodes.split(',') if k.strip()]
             unknown = [k for k in wanted if k not in keyed]
             if unknown:
                 raise RuntimeError(f'only_nodes:= unknown key(s) {unknown}; '
                                    f'valid keys: {sorted(keyed)}')
-            picked = [keyed[k] for k in wanted if keyed[k] in nodes_to_start]
+            # goal_selector is selectable only here: it is never in the default set.
+            picked = [keyed[k] for k in wanted
+                      if keyed[k] is not None and (keyed[k] in nodes_to_start or k == 'goal_selector')]
             if not picked:
                 # An empty action list makes ros2 launch exit 0 in SILENCE, which
                 # in a tmux pane looks exactly like a healthy node. Fail loudly.
-                here = sorted(k for k, n in keyed.items() if n in nodes_to_start)
+                here = sorted(k for k, n in keyed.items()
+                              if n is not None and (n in nodes_to_start or k == 'goal_selector'))
                 raise RuntimeError(
                     f'only_nodes:={only_nodes} selects nothing this mode starts '
                     f'(robot_type={robot_type}, '
@@ -432,5 +461,6 @@ def generate_launch_description():
         formation_neighbor_ids_arg,
         formation_neighbor_offsets_arg,
         only_nodes_arg,
+        goal_selector_config_arg,
         OpaqueFunction(function=launch_setup)
     ])

@@ -12,6 +12,10 @@ repositories:
     type: git
     url: https://github.com/kotakondo/dynus_interfaces.git
     version: c43bcec6d4b67c6f8a8baabb1b2f8c1ba8b919d1
+  goal_selector_msgs:
+    type: git
+    url: https://github.com/schannap/goal_selector_msgs.git
+    version: 4a03aed2461cb532e5fd2d327df7158f74029c39
   gazebo_ros_pkgs:
     type: git
     url: https://github.com/kotakondo/gazebo_ros_pkgs.git
