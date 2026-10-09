@@ -45,6 +45,7 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(dynus_interfaces REQUIRED)
 find_package(goal_selector_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
@@ -83,6 +84,21 @@ set_target_properties(map2d PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_executable(mighty src/mighty/mighty_node.cpp src/mighty/mighty.cpp src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/mighty/utils.cpp src/mighty/lbfgs_solver.cpp src/mighty/lbfgs_solver_utils.cpp src/mighty/frontier_detector.cpp src/mighty/frontier_manager.cpp)
 target_link_libraries(mighty ${PCL_LIBRARIES} map2d)
 ament_target_dependencies(mighty rclcpp example_interfaces dynus_interfaces goal_selector_msgs visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
+
+# Goal selector: ROS-free core (linkable by tests) + thin ROS node.
+# The core pulls in nav_msgs headers via OccGrid2D but no rclcpp.
+add_library(goal_selector_core STATIC
+  src/goal_selector/goal_selector.cpp
+  src/mighty/frontier_detector.cpp
+  src/mighty/frontier_manager.cpp)
+target_include_directories(goal_selector_core PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+target_link_libraries(goal_selector_core map2d)
+ament_target_dependencies(goal_selector_core nav_msgs Eigen3)
+set_target_properties(goal_selector_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+add_executable(goal_selector src/goal_selector/goal_selector_node.cpp)
+target_link_libraries(goal_selector goal_selector_core)
+ament_target_dependencies(goal_selector rclcpp dynus_interfaces goal_selector_msgs geometry_msgs nav_msgs std_msgs visualization_msgs tf2 Eigen3)
 
 # Add odom to state converter
 add_executable(convert_odom_to_state src/mighty/convert_odom_to_state.cpp)
@@ -143,6 +159,7 @@ DESTINATION share/${PROJECT_NAME}
 # install for executables (always built)
 install(TARGETS
   mighty
+  goal_selector
   fake_sim
   convert_odom_to_state
   convert_vicon_to_state
