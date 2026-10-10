@@ -345,7 +345,7 @@ def generate_launch_description():
         # Goal selector (hardware, only_nodes:=goal_selector). Parameters = the SAME merged
         # planner dict as mighty_node (base yaml <- hw yaml <- launch overrides: it reads
         # horizon / map window / inflation_2d_m / ... from it; undeclared keys are ignored),
-        # then the selector's own YAML (exploration.*, relocation, goal_radius) on top.
+        # then the selector's own YAML (exploration.*, goal_radius) on top.
         goal_selector_node = None
         if use_hardware:
             gs_path = LaunchConfiguration('goal_selector_config').perform(context) or os.path.join(

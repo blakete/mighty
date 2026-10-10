@@ -1,7 +1,7 @@
 # =============================================================================
 # Goal selector -- Ground Robot Hardware
 # =============================================================================
-# Parameters of the goal_selector node (exploration + goal relocation). Launched by
+# Parameters of the goal_selector node (exploration + manual/return-home goals). Launched by
 # launch/onboard_mighty.launch.py only_nodes:=goal_selector, which layers this file
 # ON TOP of the planner's merged mighty.yaml <- hw_mighty_ground_robot.yaml block
 # (the selector reads horizon, map window, inflation_2d_m, ... from that layer).
@@ -11,10 +11,6 @@
 # exploration.detector.min_obstacle_distance_m is gone (D3): not used by the selector.
 goal_selector:
     ros__parameters:
-
-        # --- Goal relocation (clicked/commanded goals) ---
-        relocate_occupied_goal: true                    # [-] If a clicked/commanded goal lands in an occupied or inflated 2D cell, relocate it to the nearest cell outside the band (see sanitizeTerminalGoal2D)
-        goal_relocation_clearance_m: 0.0                # [m] Extra standoff beyond the inflation band for a relocated goal (disk check). 0 = the goal lands on the nearest cell outside the band, which already has inflation_2d_m clearance.
 
         # --- Goal reached (return-home re-arm) ---
         goal_radius: 0.5                                # [m] Goal reached threshold
@@ -27,9 +23,8 @@ goal_selector:
         exploration.default_goal_z: 0.0
         exploration.detector.cluster_min_cells: 6
         exploration.detector.border_margin_cells: 1
-        exploration.detector.obstacle_clearance_cells: 1
+        exploration.detector.obstacle_clearance_cells: 0   # occupied band (inflation_2d_m) already keeps frontiers clear of obstacles
         exploration.detector.robot_snap_radius_m: 0.5
-        exploration.frontier_band_radius_m: 0.5         # [m] Frontiers within this distance of a REAL obstacle (occupied cell of occ_2d_topic; unknown does not count) are invalidated. Same as the planner's inflation_2d_m; the dropped ESDF filter used 0.1
         exploration.bounds.enabled: false
         # exploration.bounds.min_x: 3.0
         # exploration.bounds.max_x:  18.0
@@ -65,7 +60,7 @@ goal_selector:
         exploration.manager.verify_radius_cells: 2
         exploration.manager.max_frontiers: 1000
         exploration.manager.unreachable_consec_thresh: 5
-        exploration.manager.stuck_timeout_sec: 5.0               # [s]   after moving then no progress for this long (e.g. parked at last A* waypoint), INVALIDATE frontier and re-select. 0 disables
+        exploration.manager.stuck_timeout_sec: 5.0               # [s]   after moving then no progress for this long (e.g. parked at last A* waypoint), INVALIDATE frontier and re-select; a stuck MANUAL goal is released (exploration resumes if enabled). 0 disables (both)
         exploration.manager.stuck_move_thresh_m: 0.10            # [m]   displacement below this counts as "no progress" for the stuck timeout
         # Pursuit timeout: auto-INVALIDATE a frontier we've been chasing longer
         # than max(min_sec, dist/v_ref*factor). Set factor <= 0 to disable.

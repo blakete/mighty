@@ -64,6 +64,14 @@ class FrontierDetector {
    *                     UNKNOWN neighbors that are already visited do *not*
    *                     count as frontier-generating — they are stale slid-out
    *                     cells, not genuine unexplored area.
+   *  @param passable    Optional row-major mask (same dims as `grid`, 1 = walkable).
+   *                     Flagged cells are traversable by the reachability walk and
+   *                     valid robot-snap targets even when not FREE in `grid` (e.g.
+   *                     known-free cells that a derived grid marks UNKNOWN only
+   *                     because they lie in an unknown-inflation band). They are
+   *                     never frontier cells; frontier cells stay FREE cells with
+   *                     an UNKNOWN 8-neighbor. nullptr: walk FREE cells only. A
+   *                     size mismatch is ignored (treated as nullptr).
    *  @return Vector of frontier clusters in world frame, sorted by descending
    *          size_cells. Empty if the robot pose can't be snapped to a free
    *          cell or no frontiers exist.
@@ -71,7 +79,8 @@ class FrontierDetector {
   std::vector<FrontierCluster> detect(
       const OccGrid2D& grid,
       const Eigen::Vector2d& robot_xy,
-      const VisitedMap* visited_map = nullptr) const;
+      const VisitedMap* visited_map = nullptr,
+      const std::vector<uint8_t>* passable = nullptr) const;
 
   const FrontierDetectorParams& params() const { return params_; }
 

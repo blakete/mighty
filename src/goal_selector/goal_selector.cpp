@@ -18,14 +18,6 @@ std::string fmt(const char* f, ...) {
   return std::string(buf);
 }
 
-// Same arithmetic as mighty_utils::projectPointToSphere (src/mighty/utils.cpp).
-Eigen::Vector3d projectPointToSphere(const Eigen::Vector3d& P1, const Eigen::Vector3d& P2,
-                                     double radius) {
-  if ((P2 - P1).norm() <= radius) return P2;
-  Eigen::Vector3d v = (P2 - P1).normalized();
-  return P1 + v * radius;
-}
-
 }  // namespace
 
 // ----------------------------------------------------------------------------
@@ -103,6 +95,20 @@ Output GoalSelector::onState(double now, const Pose& pose) {
       last_peer_pose_publish_t_ = now;
     }
   }
+
+  // Manual-goal stuck watchdog (N4): runs here (not on the select tick) so it also works with
+  // exploration disabled, where there is no select timer.
+  if (manual_goal_active_ && stuckWatchdogFired(now)) {
+    log(out, LogMessage::Level::kWarn,
+        fmt("Manual goal (stamp %lld) stuck (no motion > %.2f m for %.1f s) -> releasing it%s",
+            static_cast<long long>(current_.stamp_ns), params_.expl_stuck_move_thresh_m,
+            params_.expl_stuck_timeout_sec,
+            params_.expl_enabled ? ", resuming exploration" : ", idle"));
+    manual_goal_active_ = false;
+    manual_unreachable_ = false;
+    unreachable_consec_count_ = 0;
+    selectAndCommit(now, out);  // no-op unless exploration is enabled and ready
+  }
   return out;
 }
 
@@ -179,21 +185,25 @@ Output GoalSelector::onOccGrid(double now, GridInput grid) {
   // Absorb the freshly observed cells into the visited bitmap *before* detection.
   if (visited_map_) visited_map_->absorb(*occ_grid_2d_);
 
-  // Pick the grid the detector runs on (persistent map or the local sliding window).
+  // Pick the grid the detector runs on (persistent map or the local sliding window), then derive
+  // the frontier map from it (occupied band -> occupied, unknown band -> unknown; N1/N5).
+  std::shared_ptr<const OccGrid2D> detect_src;
   if (params_.expl_detect_on_visited_map && visited_map_ && !visited_map_->empty()) {
-    current_detect_grid_ = OccGrid2D::fromTristate(
+    detect_src = OccGrid2D::fromTristate(
         visited_map_->width(), visited_map_->height(), visited_map_->resolution(),
         visited_map_->originX(), visited_map_->originY(), visited_map_->data());
   } else {
-    current_detect_grid_ = occ_grid_2d_;
+    detect_src = occ_grid_2d_;
   }
-  const auto& detect_grid = *current_detect_grid_;
+  frontier_grid_ = buildFrontierGrid(*detect_src, frontier_passable_);
+  const auto& detect_grid = *frontier_grid_;
   const VisitedMap* visited_filter =
       params_.expl_detect_on_visited_map ? nullptr : visited_map_.get();
-  auto clusters = frontier_detector_->detect(detect_grid, robot_xy, visited_filter);
+  auto clusters = frontier_detector_->detect(detect_grid, robot_xy, visited_filter, &frontier_passable_);
 
-  // (The ESDF clearance filter is dropped, D3. Frontiers in the inflated band are invalidated in
-  //  onPlanningOccGrid, D8b.)
+  // (The ESDF clearance filter is dropped, D3. FrontierManager::update INVALIDATES a record whose
+  //  centroid falls in the occupied band only when the record is not re-matched this cycle; a
+  //  matched record keeps its centroid even in the band.)
 
   const auto active_peers = params_.expl_use_minpos
                                 ? peer_tracker_.getActivePeers(now, params_.expl_peer_timeout_sec)
@@ -239,15 +249,38 @@ Output GoalSelector::onSelectTick(double now) {
   return out;
 }
 
+// Stuck watchdog (frontier and manual pursuit): armed after the robot first moves more than
+// stuck_move_thresh_m; fires (once, then disarms) after stuck_timeout_sec without such motion.
+// stuck_timeout_sec <= 0 disables it.
+void GoalSelector::armStuckWatchdog(double now) {
+  explore_last_progress_xy_ = Eigen::Vector2d(pose_.x, pose_.y);
+  explore_last_progress_t_ = now;
+  explore_has_moved_ = false;
+}
+
+bool GoalSelector::stuckWatchdogFired(double now) {
+  if (params_.expl_stuck_timeout_sec <= 0.0) return false;
+  const Eigen::Vector2d xy(pose_.x, pose_.y);
+  if ((xy - explore_last_progress_xy_).norm() > params_.expl_stuck_move_thresh_m) {
+    explore_last_progress_xy_ = xy;  // progressed -> reset the clock
+    explore_last_progress_t_ = now;
+    explore_has_moved_ = true;
+    return false;
+  }
+  if (explore_has_moved_ && now - explore_last_progress_t_ >= params_.expl_stuck_timeout_sec) {
+    explore_last_progress_t_ = -1.0;
+    explore_has_moved_ = false;
+    return true;
+  }
+  return false;
+}
+
 void GoalSelector::selectAndCommit(double now, Output& out) {
   if (!params_.expl_enabled) return;
   if (manual_goal_active_) return;  // manual override: no selection / preemption / watchdog
   if (!occ_grid_2d_ || !frontier_manager_) return;
-  if (!current_detect_grid_) return;
+  if (!frontier_grid_) return;
   if (!state_initialized_) return;
-
-  // Never commit an in-band frontier (spec 4.4): invalidate those first, then select among the rest.
-  invalidateFrontiersInBand(now, out);
 
   // If we still have an in-progress exploration goal that hasn't been marked VISITED/INVALIDATED
   // yet, either leave it alone (legacy hard-commit) or, with preemption enabled, keep re-ranking
@@ -256,26 +289,15 @@ void GoalSelector::selectAndCommit(double now, Output& out) {
     auto* r = frontier_manager_->find(current_explore_id_);
     if (r && (r->state == FrontierState::ACTIVE || r->state == FrontierState::DORMANT)) {
       // --- Static stuck watchdog (runs regardless of preemption) -----------------------------
-      if (params_.expl_stuck_timeout_sec > 0.0) {
-        const double t_stuck = now;
-        const Eigen::Vector2d xy(pose_.x, pose_.y);
-        if ((xy - explore_last_progress_xy_).norm() > params_.expl_stuck_move_thresh_m) {
-          explore_last_progress_xy_ = xy;  // progressed -> reset the clock
-          explore_last_progress_t_ = t_stuck;
-          explore_has_moved_ = true;
-        } else if (explore_has_moved_ &&
-                   t_stuck - explore_last_progress_t_ >= params_.expl_stuck_timeout_sec) {
-          log(out, LogMessage::Level::kWarn,
-              fmt("Exploration: frontier %lu stuck (no motion > %.2f m for %.1f s) "
-                  "-> invalidating, re-selecting",
-                  static_cast<unsigned long>(current_explore_id_), params_.expl_stuck_move_thresh_m,
-                  params_.expl_stuck_timeout_sec));
-          frontier_manager_->markInvalidated(current_explore_id_, t_stuck);
-          exploration_active_ = false;
-          explore_last_progress_t_ = -1.0;
-          explore_has_moved_ = false;
-          // fall through to the normal selection path below (picks a new goal now)
-        }
+      if (stuckWatchdogFired(now)) {
+        log(out, LogMessage::Level::kWarn,
+            fmt("Exploration: frontier %lu stuck (no motion > %.2f m for %.1f s) "
+                "-> invalidating, re-selecting",
+                static_cast<unsigned long>(current_explore_id_), params_.expl_stuck_move_thresh_m,
+                params_.expl_stuck_timeout_sec));
+        frontier_manager_->markInvalidated(current_explore_id_, now);
+        exploration_active_ = false;
+        // fall through to the normal selection path below (picks a new goal now)
       }
 
       // Preemption / hold-goal logic only applies if the watchdog above didn't just release.
@@ -295,14 +317,14 @@ void GoalSelector::selectAndCommit(double now, Output& out) {
         if (params_.expl_use_minpos) {
           auto peers = peer_tracker_.getActivePeers(t_now, params_.expl_peer_timeout_sec);
           best = frontier_manager_->selectNextGoalMinPos(
-              pose_p, *current_detect_grid_, peers, params_.expl_min_frontier_dist_to_peers_m);
+              pose_p, *frontier_grid_, peers, params_.expl_min_frontier_dist_to_peers_m);
         } else {
-          best = frontier_manager_->selectNextGoal(pose_p, *current_detect_grid_);
+          best = frontier_manager_->selectNextGoal(pose_p, *frontier_grid_);
         }
         if (!best || best->id == current_explore_id_) return;
 
         const auto u_cur =
-            frontier_manager_->utilityOf(current_explore_id_, pose_p, *current_detect_grid_);
+            frontier_manager_->utilityOf(current_explore_id_, pose_p, *frontier_grid_);
         if (!u_cur) return;
         if (best->cached_utility < *u_cur + params_.expl_preempt_margin) return;
 
@@ -361,10 +383,10 @@ void GoalSelector::selectAndCommit(double now, Output& out) {
   std::optional<FrontierRecord> next;
   if (params_.expl_use_minpos) {
     auto peers = peer_tracker_.getActivePeers(now, params_.expl_peer_timeout_sec);
-    next = frontier_manager_->selectNextGoalMinPos(robot_pose, *current_detect_grid_, peers,
+    next = frontier_manager_->selectNextGoalMinPos(robot_pose, *frontier_grid_, peers,
                                                    params_.expl_min_frontier_dist_to_peers_m);
   } else {
-    next = frontier_manager_->selectNextGoal(robot_pose, *current_detect_grid_);
+    next = frontier_manager_->selectNextGoal(robot_pose, *frontier_grid_);
   }
   if (!next) {
     if (exploration_active_) {
@@ -407,10 +429,7 @@ void GoalSelector::selectAndCommit(double now, Output& out) {
   exploration_active_ = true;
   explore_committed_at_t_ = now;
   unreachable_consec_count_ = 0;
-  // Arm the stuck watchdog fresh for this pursuit.
-  explore_last_progress_xy_ = Eigen::Vector2d(robot_pose.x(), robot_pose.y());
-  explore_last_progress_t_ = now;
-  explore_has_moved_ = false;
+  armStuckWatchdog(now);  // fresh for this pursuit
   frontier_manager_->markSelected(next->id, Eigen::Vector2d(robot_pose.x(), robot_pose.y()), now);
   out.exploration_current_goal = g;
 }
@@ -424,38 +443,14 @@ void GoalSelector::commit(GoalKind kind, const Eigen::Vector3d& target, double n
   current_.kind = kind;
   current_.stamp_ns = nextStampNs(now);
   current_.target = target;
-  current_.published = target;
 
   // (commit never touches manual_goal_active_: callers set it, as terminalGoalCallbackImpl did.)
   if (kind == GoalKind::kManual) manual_unreachable_ = false;
 
-  bool relocated = false;
-  if (params_.relocate_occupied_goal) {
-    // All goal kinds are relocated (frontier, manual, return-home), switched by
-    // relocate_occupied_goal. Rebuild first so the window is centred for this target.
-    rebuildRelocationMap();
-    const RelocResult r = relocate(target);
-    if (!r.ok) {
-      // D10: relocation failed -> publish the unrelocated goal; the planner's consecutive
-      // failures handle it.
-      log(out, LogMessage::Level::kError,
-          fmt("Goal at (%.2f,%.2f,%.2f) is in occupied space and could not be relocated; "
-              "publishing it unrelocated.",
-              target.x(), target.y(), target.z()));
-    } else if ((r.position - target).norm() > 1e-6) {
-      current_.published = r.position;
-      relocated = true;
-      log(out, LogMessage::Level::kInfo,
-          fmt("Goal relocated (2D map) from (%.2f,%.2f,%.2f) to (%.2f,%.2f,%.2f)", target.x(),
-              target.y(), target.z(), r.position.x(), r.position.y(), r.position.z()));
-    }
-  }
-
   GoalCommand cmd;
-  cmd.position = current_.published;
+  cmd.position = target;  // published exactly as given
   cmd.stamp_ns = current_.stamp_ns;
   cmd.kind = kind;
-  cmd.relocated = relocated;
   out.term_goal = cmd;
 }
 
@@ -474,6 +469,7 @@ Output GoalSelector::onManualGoal(double now, double x, double y, double z) {
 
   commit(GoalKind::kManual, Eigen::Vector3d(x, y, z), now, out);
   manual_goal_active_ = true;
+  armStuckWatchdog(now);  // N4: manual goals share the frontier stuck watchdog
   log(out, LogMessage::Level::kInfo,
       fmt("Manual goal (%.2f, %.2f, %.2f) committed (stamp %lld)", x, y, z,
           static_cast<long long>(current_.stamp_ns)));
@@ -533,7 +529,8 @@ Output GoalSelector::onPlannerStatus(double now, PlannerStatus status, int64_t g
           unreachable_consec_count_ = 0;
         }
       } else if (manual_pursuit) {
-        // Manual goals are never released or resent on failure: only warn + flag (D8a).
+        // Manual goals are never released or resent on FAILED: only warn + flag (D8a). (They are
+        // released by REACHED or the stuck watchdog.)
         ++unreachable_consec_count_;
         if (unreachable_consec_count_ >= params_.expl_unreachable_consec_thresh &&
             !manual_unreachable_) {
@@ -575,190 +572,48 @@ Output GoalSelector::onPlannerStatus(double now, PlannerStatus status, int64_t g
 }
 
 // ----------------------------------------------------------------------------
-// Relocation (spec 4.4)
+// Frontier map (N1/N5)
 // ----------------------------------------------------------------------------
 
-Output GoalSelector::onPlanningOccGrid(double now, const GridInput& grid) {
-  Output out;
-  PlanningSource& s = planning_src_;
-  s.width = grid.width;
-  s.height = grid.height;
-  s.resolution = grid.resolution;
-  s.inv_resolution = 1.0 / grid.resolution;  // as OccGrid2D::fromOccupancyGrid
-  s.origin_x = grid.origin_x;
-  s.origin_y = grid.origin_y;
-  const size_t n = static_cast<size_t>(std::max(0, grid.width)) * std::max(0, grid.height);
-  s.occupied.assign(n, false);
-  s.unknown.assign(n, true);  // cells missing from a short message count as unknown
-  for (size_t i = 0; i < n && i < grid.data.size(); ++i) {
-    s.occupied[i] = (grid.data[i] >= 100);
-    s.unknown[i] = (grid.data[i] < 0);
+std::shared_ptr<const OccGrid2D> GoalSelector::buildFrontierGrid(const OccGrid2D& g,
+                                                                    std::vector<uint8_t>& passable) const {
+  const int W = g.width();
+  const int H = g.height();
+  const auto& occ = g.occupiedData();
+  const auto& unk = g.unknownData();
+  const size_t n = static_cast<size_t>(W) * H;
+
+  std::vector<int8_t> values(n, map2d::kFree);
+  for (size_t i = 0; i < n; ++i) {
+    if (occ[i])
+      values[i] = map2d::kOccupied;
+    else if (unk[i])
+      values[i] = map2d::kUnknown;
   }
-  s.valid = grid.width > 0 && grid.height > 0 && grid.resolution > 0.0;
 
-  if (!state_initialized_ || !s.valid) return out;
+  // Unknown band from the raw values (before occupied inflation); it never marks cells occupied.
+  std::vector<uint8_t> unknown_band;
+  map2d::inflateUnknown(values, W, H, g.resolution(),
+                        std::max(0.0f, static_cast<float>(params_.unknown_inflation_2d_m)),
+                        unknown_band);
 
-  rebuildRelocationMap();
-  invalidateFrontiersInBand(now, out);
-  rerelocateCurrent(out);
-  return out;
-}
+  // Occupied band: cells within inflation_2d_m of an occupied cell become occupied.
+  std::vector<uint8_t> inflated_only;
+  map2d::inflate(values, inflated_only, W, H, g.resolution(),
+                 std::max(0.0f, static_cast<float>(params_.inflation_2d_m)));
 
-map2d::WindowGeometry GoalSelector::planningWindow(double& map_res) const {
-  // Planner window geometry (MIGHTY::computeMapSize / HGPManager::updateMap / MapUtil::readMap).
-  const Eigen::Vector3d pos(pose_.x, pose_.y, pose_.z);
-  Eigen::Vector3d g_term = pos;  // no commitment: window is the minimum one
-  if (current_.kind != GoalKind::kNone) {
-    g_term = current_.published;  // the planner's G_term is the relocated goal
-    if (params_.force_goal_z) g_term.z() = params_.default_goal_z;  // planner forces the goal z
+  // Remaining non-occupied cells in the unknown band become unknown. Those cells are known free
+  // (the band excludes real unknown), so flag them passable: the detector's reachability walk may
+  // cross them, but never real unknown or the occupied band.
+  passable.assign(n, 0);
+  for (size_t i = 0; i < n; ++i) {
+    if (unknown_band[i] && values[i] != map2d::kOccupied) {
+      values[i] = map2d::kUnknown;
+      passable[i] = 1;
+    }
   }
-  const Eigen::Vector3d G = projectPointToSphere(pos, g_term, params_.horizon);
 
-  const double dynamic_buffer = params_.map_buffer;
-  const double dist_x = std::abs(pos[0] - G[0]);
-  const double dist_y = std::abs(pos[1] - G[1]);
-  const double wdx = std::max(dist_x + 2 * dynamic_buffer, params_.min_wdx);
-  const double wdy = std::max(dist_y + 2 * dynamic_buffer, params_.min_wdy);
-
-  // HGPManager uses par.res for the cell count; the MapUtil is constructed with
-  // float(factor_hgp * res) and uses that as its resolution for everything else.
-  const int cells_x = map2d::windowCells(wdx, params_.res);
-  const int cells_y = map2d::windowCells(wdy, params_.res);
-  map_res = static_cast<double>(static_cast<float>(params_.factor_hgp * params_.res));
-  return map2d::windowGeometry(pos.x(), pos.y(), cells_x, cells_y, map_res, params_.inflation_hgp);
+  return OccGrid2D::fromTristate(W, H, g.resolution(), g.originX(), g.originY(), values);
 }
-
-void GoalSelector::rebuildRelocationMap() {
-  if (!planning_src_.valid || !state_initialized_) return;
-  double map_res = 0.0;
-  const map2d::WindowGeometry win = planningWindow(map_res);
-
-  map2d::SourceGrid src;
-  src.width = planning_src_.width;
-  src.height = planning_src_.height;
-  src.resolution = planning_src_.resolution;
-  src.inv_resolution = planning_src_.inv_resolution;
-  src.origin_x = planning_src_.origin_x;
-  src.origin_y = planning_src_.origin_y;
-  src.occupied = &planning_src_.occupied;
-  src.unknown = &planning_src_.unknown;
-
-  map2d::Grid2D g;
-  g.dim_x = win.dim_x;
-  g.dim_y = win.dim_y;
-  g.res = map_res;
-  g.origin_x = win.origin_x;
-  g.origin_y = win.origin_y;
-  map2d::buildFromOccupancy(src, g.dim_x, g.dim_y, g.res, g.origin_x, g.origin_y, g.values);
-  // MapUtil::setInflation2D stores max(0, float(inflation_2d_m)).
-  map2d::inflate(g, std::max(0.0f, static_cast<float>(params_.inflation_2d_m)));
-  reloc_map_ = std::move(g);
-}
-
-GoalSelector::RelocResult GoalSelector::relocate(const Eigen::Vector3d& goal) const {
-  RelocResult r;
-  r.position = goal;
-  if (!params_.relocate_occupied_goal) return r;
-  if (reloc_map_.values.empty()) return r;  // no map yet: trust the goal (as the planner did)
-
-  const double step = params_.res > 0.0 ? params_.res : 0.1;
-  const map2d::SanitizeResult s =
-      map2d::sanitizeGoal2D(reloc_map_.view(), goal, params_.goal_relocation_clearance_m, step);
-  switch (s.outcome) {
-    case map2d::GoalOutcome::kUnchanged:
-      break;
-    case map2d::GoalOutcome::kRelocated:
-      r.position = s.goal;
-      break;
-    case map2d::GoalOutcome::kDropped:
-      r.ok = false;
-      break;
-  }
-  return r;
-}
-
-void GoalSelector::ensureBandMap() {
-  if (!params_.expl_enabled || !occ_grid_2d_ || !state_initialized_) return;
-
-  // Rebuild only when the raw grid or the window changed (the window follows the robot / goal).
-  double map_res = 0.0;
-  const map2d::WindowGeometry win = planningWindow(map_res);
-  if (!band_map_.values.empty() && band_src_ == occ_grid_2d_.get() && band_map_.dim_x == win.dim_x &&
-      band_map_.dim_y == win.dim_y && band_map_.origin_x == win.origin_x &&
-      band_map_.origin_y == win.origin_y && band_map_.res == map_res)
-    return;
-
-  // Real obstacles only: occupied cells of occ_2d (unknown and free are not obstacles).
-  map2d::SourceGrid src;
-  src.width = occ_grid_2d_->width();
-  src.height = occ_grid_2d_->height();
-  src.resolution = occ_grid_2d_->resolution();
-  src.inv_resolution = occ_grid_2d_->invResolution();
-  src.origin_x = occ_grid_2d_->originX();
-  src.origin_y = occ_grid_2d_->originY();
-  src.occupied = &occ_grid_2d_->occupiedData();
-  src.unknown = &occ_grid_2d_->unknownData();
-
-  map2d::Grid2D g;
-  g.dim_x = win.dim_x;
-  g.dim_y = win.dim_y;
-  g.res = map_res;
-  g.origin_x = win.origin_x;
-  g.origin_y = win.origin_y;
-  map2d::buildFromOccupancy(src, g.dim_x, g.dim_y, g.res, g.origin_x, g.origin_y, g.values);
-  map2d::inflate(g, std::max(0.0f, static_cast<float>(params_.expl_frontier_band_radius_m)));
-  band_map_ = std::move(g);
-  band_src_ = occ_grid_2d_.get();
-}
-
-void GoalSelector::invalidateFrontiersInBand(double now, Output& out) {
-  if (!params_.expl_enabled || !frontier_manager_) return;
-  ensureBandMap();
-  if (band_map_.values.empty()) return;
-
-  // D8b: ACTIVE / DORMANT frontiers whose centroid is within frontier_band_radius_m of a REAL
-  // obstacle (band map above). Cells outside the window are NOT in the band (is2DOccupied would
-  // report them occupied), so only in-bounds cells count.
-  const auto view = band_map_.view();
-  std::vector<uint64_t> to_invalidate;
-  for (const auto& r : frontier_manager_->records()) {
-    if (r.state != FrontierState::ACTIVE && r.state != FrontierState::DORMANT) continue;
-    const int cx = map2d::worldToCell(r.centroid_xy.x(), view.origin_x, view.res);
-    const int cy = map2d::worldToCell(r.centroid_xy.y(), view.origin_y, view.res);
-    if (cx < 0 || cx >= view.dim_x || cy < 0 || cy >= view.dim_y) continue;
-    if (map2d::is2DOccupied(view, cx, cy)) to_invalidate.push_back(r.id);
-  }
-  for (uint64_t id : to_invalidate) {
-    frontier_manager_->markInvalidated(id, now);
-  }
-  if (!to_invalidate.empty()) {
-    log(out, LogMessage::Level::kInfo,
-        fmt("Exploration: invalidated %zu frontier(s) in the occupied/inflated band",
-            to_invalidate.size()));
-  }
-}
-
-void GoalSelector::rerelocateCurrent(Output& out) {
-  if (!params_.relocate_occupied_goal) return;
-  if (current_.kind == GoalKind::kNone) return;
-
-  const RelocResult r = relocate(current_.published);  // from the stored (relocated) goal, as the planner does
-  if (!r.ok) return;  // keep the previous goal; the next map update may make a cell available
-  if ((r.position - current_.published).norm() <= 1e-6) return;
-
-  current_.published = r.position;
-  GoalCommand cmd;
-  cmd.position = r.position;
-  cmd.stamp_ns = current_.stamp_ns;  // same commitment -> same stamp (4.3)
-  cmd.kind = current_.kind;
-  cmd.relocated = (r.position - current_.target).norm() > 1e-6;
-  out.term_goal = cmd;
-  log(out, LogMessage::Level::kInfo,
-      fmt("Goal re-relocated to (%.2f,%.2f,%.2f) (stamp %lld)", r.position.x(), r.position.y(),
-          r.position.z(), static_cast<long long>(cmd.stamp_ns)));
-}
-
-// TODO(step 2): build a reachability-check map (inflated planning map) and flood-fill from the
-// robot, so only frontiers reachable on it are selected. Detection stays on the detection grid.
 
 }  // namespace goal_selector

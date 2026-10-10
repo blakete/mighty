@@ -53,8 +53,8 @@ GoalSelectorNode::GoalSelectorNode() : Node("goal_selector") {
 
   selector_ = std::make_unique<GoalSelector>(par_);
 
-  // Gate (spec 4): the manual-goal path (state, term_goal_rviz, planner_status,
-  // planning_occ_2d_topic, term_goal) needs only a ground robot with 2D planning; frontier,
+  // Gate (spec 4): the manual-goal path (state, term_goal_rviz, planner_status, term_goal)
+  // needs only a ground robot with 2D planning; frontier,
   // visited-map, peer and return-home subscriptions and the select timer also need
   // exploration.enabled.
   if (!(vehicle_type_ == "ground_robot" && use_2d_planning_)) {
@@ -91,9 +91,6 @@ GoalSelectorNode::GoalSelectorNode() : Node("goal_selector") {
   sub_state_ = this->create_subscription<dynus_interfaces::msg::State>(
       "state", critical_qos,
       std::bind(&GoalSelectorNode::stateCallback, this, std::placeholders::_1), options);
-  sub_planning_occ_2d_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
-      "planning_occ_2d_topic", map_qos,
-      std::bind(&GoalSelectorNode::planningOcc2DCallback, this, std::placeholders::_1), options);
   sub_term_goal_rviz_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
       "term_goal_rviz", critical_qos,
       std::bind(&GoalSelectorNode::manualGoalCallback, this, std::placeholders::_1), options);
@@ -168,18 +165,8 @@ void GoalSelectorNode::declareParameters() {
   this->declare_parameter("use_2d_planning", false);
   this->declare_parameter("map_frame_id", "map");
   this->declare_parameter("goal_radius", 0.5);
-  this->declare_parameter("relocate_occupied_goal", true);
-  this->declare_parameter("goal_relocation_clearance_m", 1.0);
-  this->declare_parameter("horizon", 20.0);
-  this->declare_parameter("map_buffer", 6.0);
-  this->declare_parameter("min_wdx", 10.0);
-  this->declare_parameter("min_wdy", 10.0);
-  this->declare_parameter("mighty_map_res", 0.1);
-  this->declare_parameter("factor_hgp", 1.0);
-  this->declare_parameter("inflation_hgp", 0.5);
   this->declare_parameter("inflation_2d_m", 0.0);
-  this->declare_parameter("force_goal_z", true);
-  this->declare_parameter("default_goal_z", 2.5);
+  this->declare_parameter("unknown_inflation_2d_m", 0.5);
 
   // exploration.* (min_obstacle_distance_m is not carried over, D3)
   this->declare_parameter("exploration.enabled", false);
@@ -229,7 +216,6 @@ void GoalSelectorNode::declareParameters() {
   this->declare_parameter("exploration.visited_map.fuse_into_local", true);
   this->declare_parameter("exploration.visited_map.detect_on_visited_map", true);
   this->declare_parameter("exploration.visualization.publish_markers", true);
-  this->declare_parameter("exploration.frontier_band_radius_m", 0.5);
   this->declare_parameter("exploration.minpos.enabled", false);
   this->declare_parameter("exploration.minpos.peer_timeout_sec", 5.0);
   this->declare_parameter("exploration.minpos.peer_publish_rate_hz", 5.0);
@@ -246,18 +232,8 @@ void GoalSelectorNode::readParameters() {
   use_2d_planning_ = b("use_2d_planning");
   par_.map_frame_id = this->get_parameter("map_frame_id").as_string();
   par_.goal_radius = d("goal_radius");
-  par_.relocate_occupied_goal = b("relocate_occupied_goal");
-  par_.goal_relocation_clearance_m = d("goal_relocation_clearance_m");
-  par_.horizon = d("horizon");
-  par_.map_buffer = d("map_buffer");
-  par_.min_wdx = d("min_wdx");
-  par_.min_wdy = d("min_wdy");
-  par_.res = d("mighty_map_res");
-  par_.factor_hgp = d("factor_hgp");
-  par_.inflation_hgp = d("inflation_hgp");
   par_.inflation_2d_m = d("inflation_2d_m");
-  par_.force_goal_z = b("force_goal_z");
-  par_.default_goal_z = d("default_goal_z");
+  par_.unknown_inflation_2d_m = d("unknown_inflation_2d_m");
 
   par_.expl_enabled = b("exploration.enabled");
   par_.expl_select_rate_hz = d("exploration.select_rate_hz");
@@ -306,7 +282,6 @@ void GoalSelectorNode::readParameters() {
   par_.expl_fuse_persistent_into_local = b("exploration.visited_map.fuse_into_local");
   par_.expl_detect_on_visited_map = b("exploration.visited_map.detect_on_visited_map");
   par_.expl_publish_markers = b("exploration.visualization.publish_markers");
-  par_.expl_frontier_band_radius_m = d("exploration.frontier_band_radius_m");
   par_.expl_use_minpos = b("exploration.minpos.enabled");
   par_.expl_peer_timeout_sec = d("exploration.minpos.peer_timeout_sec");
   par_.expl_peer_publish_rate_hz = d("exploration.minpos.peer_publish_rate_hz");
@@ -321,14 +296,8 @@ void GoalSelectorNode::printParameters() const {
               par_.map_frame_id.c_str());
   RCLCPP_INFO(lg, "Exploration enabled: %d  select_rate_hz: %.2f  default_goal_z: %.2f",
               par_.expl_enabled, par_.expl_select_rate_hz, par_.expl_default_goal_z);
-  RCLCPP_INFO(lg, "Relocate occupied goal: %d  clearance: %.2f m  goal_radius: %.2f m",
-              par_.relocate_occupied_goal, par_.goal_relocation_clearance_m, par_.goal_radius);
-  RCLCPP_INFO(lg,
-              "Window: horizon=%.1f map_buffer=%.1f min_wdx=%.1f min_wdy=%.1f mighty_map_res=%.3f "
-              "factor_hgp=%.2f inflation_hgp=%.2f inflation_2d_m=%.2f force_goal_z=%d "
-              "default_goal_z=%.2f",
-              par_.horizon, par_.map_buffer, par_.min_wdx, par_.min_wdy, par_.res, par_.factor_hgp,
-              par_.inflation_hgp, par_.inflation_2d_m, par_.force_goal_z, par_.default_goal_z);
+  RCLCPP_INFO(lg, "goal_radius: %.2f m  inflation_2d_m: %.2f  unknown_inflation_2d_m: %.2f",
+              par_.goal_radius, par_.inflation_2d_m, par_.unknown_inflation_2d_m);
   RCLCPP_INFO(lg, "Unreachable thresh: %d  stuck_timeout: %.1f s  preempt: %d  minpos: %d",
               par_.expl_unreachable_consec_thresh, par_.expl_stuck_timeout_sec,
               par_.expl_preempt_enabled, par_.expl_use_minpos);
@@ -366,10 +335,6 @@ void GoalSelectorNode::occ2DCallback(const nav_msgs::msg::OccupancyGrid::SharedP
   apply(selector_->onOccGrid(this->now().seconds(), toGridInput(*msg)));  // markers first
   // Then drive selection immediately (as occ2DCallback called exploreSelectCallback()).
   apply(selector_->onSelectTick(this->now().seconds()));
-}
-
-void GoalSelectorNode::planningOcc2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
-  apply(selector_->onPlanningOccGrid(this->now().seconds(), toGridInput(*msg)));
 }
 
 void GoalSelectorNode::manualGoalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {

@@ -170,6 +170,49 @@ void inflate(std::vector<int8_t>& values, std::vector<uint8_t>& inflated_only, i
   }
 }
 
+void inflateUnknown(const std::vector<int8_t>& values, int dim_x, int dim_y, double res,
+                    float radius_m, std::vector<uint8_t>& band) {
+  const int dimX = dim_x;
+  const int dimY = dim_y;
+  const size_t n2d = static_cast<size_t>(dimX) * dimY;
+  band.assign(n2d, 0);
+  if (radius_m <= 0.0f || res <= 0.0 || values.size() != n2d) return;
+
+  const double r_cells = radius_m / res;
+  const int r = static_cast<int>(std::floor(r_cells + 1e-6));
+  if (r < 1) return;
+  const double r2 = r_cells * r_cells + 1e-6;
+  std::vector<std::pair<int, int>> offsets;
+  for (int dy = -r; dy <= r; ++dy) {
+    for (int dx = -r; dx <= r; ++dx) {
+      if ((dx != 0 || dy != 0) && dx * dx + dy * dy <= r2) offsets.emplace_back(dx, dy);
+    }
+  }
+
+  // Seed only from unknown cells with a known 4-neighbour (same shortcut as inflate: the nearest
+  // unknown cell to any known cell is always one of these).
+  for (int y = 0; y < dimY; ++y) {
+    for (int x = 0; x < dimX; ++x) {
+      const size_t idx = static_cast<size_t>(x) + static_cast<size_t>(dimX) * y;
+      if (values[idx] != kUnknown) continue;
+      if (!((x > 0 && values[idx - 1] != kUnknown) ||
+            (x + 1 < dimX && values[idx + 1] != kUnknown) ||
+            (y > 0 && values[idx - dimX] != kUnknown) ||
+            (y + 1 < dimY && values[idx + dimX] != kUnknown))) {
+        continue;
+      }
+      for (const auto& o : offsets) {
+        const int nx = x + o.first;
+        const int ny = y + o.second;
+        if (nx < 0 || nx >= dimX || ny < 0 || ny >= dimY) continue;
+        const size_t n = static_cast<size_t>(nx) + static_cast<size_t>(dimX) * ny;
+        if (values[n] == kUnknown) continue;
+        band[n] = 1;
+      }
+    }
+  }
+}
+
 // ----------------------------------------------------------------------------
 // Queries
 // ----------------------------------------------------------------------------

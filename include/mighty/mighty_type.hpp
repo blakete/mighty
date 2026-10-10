@@ -263,7 +263,7 @@ struct parameters {
   double hgp_stop_distance_m{0.0};
   int trim_min_unknown_run_cells{3};  // [cells] executed path is cut only at an UNKNOWN run this long (see HGPManager::solveHGP)
   double inflation_2d_m{0.0};          // [m] 2D planning-map inflation radius (MapUtil::inflate2DMap); 0 = off
-  double unknown_clearance_2d_m{0.0};  // [m] path handed to L-BFGS stops this far inside the mapper grid's edge; 0 = off
+  double unknown_inflation_2d_m{0.5};  // [m] executed path ends this far back (arc length) from the edge of unknown; selector: unknown-band radius; 0 = no back-off
 
   // Debug flags
   bool debug_verbose;

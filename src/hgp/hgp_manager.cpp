@@ -281,17 +281,14 @@ bool HGPManager::solveHGP(const Vec3f& start_sent, const Vec3f& start_vel, const
     start_for_search(2) = static_cast<float>(par_.default_goal_z);
     goal_for_search(2) = static_cast<float>(par_.default_goal_z);
 
-    // Free start/goal in the 2D map — ground points would otherwise block them.
-    // The goal box keeps inflation cells: a goal inside the clearance band must
-    // stay blocked so plan() rejects it.
+    // Free the start in the 2D map — ground points would otherwise block it.
+    // The goal is never freed or moved: a goal on an occupied or occupied-band cell
+    // makes plan() fail; a goal in UNKNOWN is plannable (A* prices it via w_unknown).
     // Leaving the start inside the band is handled by A*'s start exemption instead.
     if (map_util_for_planning_->has2DMap()) {
       Veci<3> si = map_util_for_planning_->floatToInt(start_for_search);
       map_util_for_planning_->free2DCell(si(0), si(1), 2.0f * res_);
       map_util_for_planning_->setFreeVoxelAndSurroundings(si, 2.0f * res_);
-      Veci<3> gi = map_util_for_planning_->floatToInt(goal_for_search);
-      map_util_for_planning_->free2DCell(gi(0), gi(1), 2.0f * res_, /*keep_inflation=*/true);
-      map_util_for_planning_->setFreeVoxelAndSurroundings(gi, 2.0f * res_);
     }
   }
 
@@ -326,7 +323,10 @@ bool HGPManager::solveHGP(const Vec3f& start_sent, const Vec3f& start_vel, const
   // 1-cell speckle would park the robot mid-island. The path then ends at the last
   // known-free sample before the run, i.e. at the edge of what has been observed,
   // and grows with the map as the robot advances (the global path itself still
-  // reaches the goal through unknown, priced by w_unknown).
+  // reaches the goal through unknown, priced by w_unknown). When the cut is an
+  // unknown run, the path additionally ends par_.unknown_inflation_2d_m BACK along
+  // it (arc length) from the start of that run, never behind the path's first point;
+  // <= 0 = no back-off.
   if (is_ground_robot_ && map_util_for_planning_->has2DMap() && path.size() > 1) {
     const auto& mu = map_util_for_planning_;
     const double res = mu->getRes();
@@ -334,6 +334,12 @@ bool HGPManager::solveHGP(const Vec3f& start_sent, const Vec3f& start_vel, const
     vec_Vecf<3> free_path;
     free_path.push_back(path[0]);
     bool cut = false;
+    // Run state carries across waypoints so a run straddling one is still counted;
+    // run_start_keep = free_path size when the run began (points after it are dropped).
+    int run = 0;
+    Vecf<3> last_free = path[0];
+    Vecf<3> run_start = path[0];
+    size_t run_start_keep = 1;
     for (size_t i = 1; i < path.size() && !cut; i++) {
       const Veci<3> wi = mu->floatToInt(path[i]);
       // Stop at the first waypoint on a real obstacle. Inflation-only cells are
@@ -343,14 +349,14 @@ bool HGPManager::solveHGP(const Vec3f& start_sent, const Vec3f& start_vel, const
       const Vecf<3> a = path[i - 1];
       const Vecf<3> b = path[i];
       const int n = std::max(1, static_cast<int>(std::ceil((b - a).norm() / res)));
-      int run = 0;
-      Vecf<3> last_free = a;
-      Vecf<3> run_start = a;
       for (int s = 1; s <= n; ++s) {
         const Vecf<3> p = a + (b - a) * (static_cast<decimal_t>(s) / n);
         const Veci<3> pi = mu->floatToInt(p);
         if (mu->is2DUnknown(pi(0), pi(1))) {
-          if (run == 0) run_start = last_free;
+          if (run == 0) {
+            run_start = last_free;
+            run_start_keep = free_path.size();
+          }
           if (++run >= min_run) {
             cut = true;
             break;
@@ -361,52 +367,36 @@ bool HGPManager::solveHGP(const Vec3f& start_sent, const Vec3f& start_vel, const
         }
       }
       if (cut) {
+        free_path.resize(run_start_keep);
         if ((run_start - free_path.back()).norm() > 0.5 * res) free_path.push_back(run_start);
       } else {
         free_path.push_back(b);
       }
     }
-    if (free_path.size() >= 2) {
-      path = free_path;
-    }
-  }
-
-  // Unknown ring (option B): A* may plan through the window cells outside the
-  // mapper's grid (priced by w_unknown), but the path handed on to L-BFGS stops
-  // unknown_clearance_2d_m inside that grid's edge. raw_path is untouched, so
-  // original_hgp_path_marker still shows the full route into the ring.
-  double cov_x0, cov_y0, cov_x1, cov_y1;
-  if (is_ground_robot_ && par_.unknown_clearance_2d_m > 0.0 && path.size() > 1 &&
-      map_util_for_planning_->get2DCoverage(cov_x0, cov_y0, cov_x1, cov_y1)) {
-    const double c = par_.unknown_clearance_2d_m;
-    cov_x0 += c;
-    cov_y0 += c;
-    cov_x1 -= c;
-    cov_y1 -= c;
-    auto inside = [&](const Vecf<3>& p) {
-      return p.x() >= cov_x0 && p.x() <= cov_x1 && p.y() >= cov_y0 && p.y() <= cov_y1;
-    };
-    if (cov_x0 < cov_x1 && cov_y0 < cov_y1 && inside(path.front())) {
-      vec_Vecf<3> clipped;
-      clipped.push_back(path.front());
-      for (size_t i = 1; i < path.size(); ++i) {
-        if (inside(path[i])) {
-          clipped.push_back(path[i]);
-          continue;
+    const bool backoff = cut && par_.unknown_inflation_2d_m > 0.0;
+    if (backoff) {
+      // Walk back over the kept polyline; if the back-off consumes it all, only the
+      // start point is left (a one-point path: the local planner then has nothing to
+      // optimise and the robot waits).
+      double remaining = par_.unknown_inflation_2d_m;
+      while (free_path.size() >= 2) {
+        const Vecf<3> tail = free_path.back();
+        const Vecf<3> prev = free_path[free_path.size() - 2];
+        const double seg = (tail - prev).norm();
+        if (seg > remaining) {
+          free_path.back() = tail + (prev - tail) * (remaining / seg);
+          break;
         }
-        // Segment a->b leaves the box: keep the point where it crosses the edge.
-        const Vecf<3> a = path[i - 1];
-        const Vecf<3> d = path[i] - a;
-        decimal_t t = 1.0;
-        if (d.x() > 0) t = std::min(t, (cov_x1 - a.x()) / d.x());
-        if (d.x() < 0) t = std::min(t, (cov_x0 - a.x()) / d.x());
-        if (d.y() > 0) t = std::min(t, (cov_y1 - a.y()) / d.y());
-        if (d.y() < 0) t = std::min(t, (cov_y0 - a.y()) / d.y());
-        const Vecf<3> exit = a + d * std::max<decimal_t>(0.0, t);
-        if ((exit - clipped.back()).norm() > 1e-6) clipped.push_back(exit);
-        break;
+        remaining -= seg;
+        free_path.pop_back();
       }
-      if (clipped.size() >= 2) path = clipped;
+      // A sub-cell remainder is no path: collapse it to the start (the robot waits).
+      double kept = 0.0;
+      for (size_t k = 1; k < free_path.size(); ++k) kept += (free_path[k] - free_path[k - 1]).norm();
+      if (kept < res) free_path.resize(1);
+    }
+    if (free_path.size() >= 2 || backoff) {
+      path = free_path;
     }
   }
 

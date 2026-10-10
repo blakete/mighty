@@ -135,6 +135,13 @@ inline void inflate(Grid2D& g, float inflation_m) {
   inflate(g.values, g.inflated_only, g.dim_x, g.dim_y, g.res, inflation_m);
 }
 
+/** @brief Unknown band: `band` is resized to dim_x*dim_y and set to 1 for every NON-unknown cell
+ *  within radius_m of an unknown cell (cell centre to cell centre, same distance convention as
+ *  inflate), 0 elsewhere (unknown cells themselves are 0). `values` is not modified and nothing is
+ *  marked occupied. radius_m <= 0 (or less than one cell) gives an all-zero band. */
+void inflateUnknown(const std::vector<int8_t>& values, int dim_x, int dim_y, double res,
+                    float radius_m, std::vector<uint8_t>& band);
+
 // ----------------------------------------------------------------------------
 // Queries
 // ----------------------------------------------------------------------------

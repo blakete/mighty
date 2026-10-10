@@ -16,12 +16,18 @@ inline size_t flatIdx(int ix, int iy, int width) {
   return static_cast<size_t>(iy) * width + ix;
 }
 
-// Spiral search outward from (cx, cy) for the nearest FREE cell within
-// `max_radius_cells`. Returns true on success and writes the result into
-// (*ox, *oy). Naive O(R²) scan — fine for the small radii we use here.
-bool snapToFree(const OccGrid2D& grid, int cx, int cy, int max_radius_cells,
-                int* ox, int* oy) {
-  if (grid.isFree(cx, cy)) {
+// Spiral search outward from (cx, cy) for the nearest walkable cell within
+// `max_radius_cells` (FREE, or flagged in `passable` when given). Returns true
+// on success and writes the result into (*ox, *oy). Naive O(R²) scan — fine
+// for the small radii we use here.
+bool snapToFree(const OccGrid2D& grid, const std::vector<uint8_t>* passable,
+                int cx, int cy, int max_radius_cells, int* ox, int* oy) {
+  auto walkable = [&](int x, int y) {
+    if (grid.isFree(x, y)) return true;
+    return passable != nullptr && grid.inBounds(x, y) &&
+           (*passable)[flatIdx(x, y, grid.width())] != 0;
+  };
+  if (walkable(cx, cy)) {
     *ox = cx;
     *oy = cy;
     return true;
@@ -33,7 +39,7 @@ bool snapToFree(const OccGrid2D& grid, int cx, int cy, int max_radius_cells,
         if (std::max(std::abs(dx), std::abs(dy)) != r) continue;
         int nx = cx + dx;
         int ny = cy + dy;
-        if (grid.isFree(nx, ny)) {
+        if (walkable(nx, ny)) {
           *ox = nx;
           *oy = ny;
           return true;
@@ -48,27 +54,29 @@ bool snapToFree(const OccGrid2D& grid, int cx, int cy, int max_radius_cells,
 
 std::vector<FrontierCluster> FrontierDetector::detect(
     const OccGrid2D& grid, const Eigen::Vector2d& robot_xy,
-    const VisitedMap* visited_map) const {
+    const VisitedMap* visited_map,
+    const std::vector<uint8_t>* passable) const {
   std::vector<FrontierCluster> out;
 
   const int W = grid.width();
   const int H = grid.height();
   if (W <= 0 || H <= 0) return out;
+  const size_t N = static_cast<size_t>(W) * H;
+  if (passable != nullptr && passable->size() != N) passable = nullptr;  // dim mismatch: ignore
 
-  // ---- Snap robot pose to nearest FREE cell ----
+  // ---- Snap robot pose to nearest walkable cell (FREE, or passable) ----
   int rx, ry;
   grid.worldToGrid(robot_xy.x(), robot_xy.y(), rx, ry);
   const int snap_cells = std::max(
       0, static_cast<int>(std::ceil(params_.robot_snap_radius_m
                                     / grid.resolution())));
   int seed_x = -1, seed_y = -1;
-  if (!snapToFree(grid, rx, ry, snap_cells, &seed_x, &seed_y)) {
+  if (!snapToFree(grid, passable, rx, ry, snap_cells, &seed_x, &seed_y)) {
     // Robot not in or near any free cell — bail out silently. Caller may log.
     return out;
   }
 
-  // ---- Pass A: BFS over known-free cells, tag frontier seeds ----
-  const size_t N = static_cast<size_t>(W) * H;
+  // ---- Pass A: BFS over walkable cells, tag frontier seeds ----
   std::vector<uint8_t> visited(N, 0);
   std::vector<uint8_t> is_frontier(N, 0);
 
@@ -111,7 +119,9 @@ std::vector<FrontierCluster> FrontierDetector::detect(
       has_unknown_nbr = true;
       break;
     }
-    bool is_seed = has_unknown_nbr && !onBorder(cx, cy);
+    // Only FREE cells can be frontier seeds; passable (non-FREE) cells are walked through but
+    // never tagged.
+    bool is_seed = has_unknown_nbr && !onBorder(cx, cy) && grid.isFree(cx, cy);
 
     // Reject frontier cells that have any OCCUPIED neighbor within
     // obstacle_clearance_cells. Frontiers hugging walls are usually noise
@@ -149,14 +159,14 @@ std::vector<FrontierCluster> FrontierDetector::detect(
 
     if (is_seed) is_frontier[flatIdx(cx, cy, W)] = 1;
 
-    // Expand BFS through known-free cells only.
+    // Expand BFS through FREE cells, plus cells flagged in `passable` when given.
     for (int i = 0; i < 8; ++i) {
       const int nx = cx + kDx8[i];
       const int ny = cy + kDy8[i];
       if (!grid.inBounds(nx, ny)) continue;
       const size_t nidx = flatIdx(nx, ny, W);
       if (visited[nidx]) continue;
-      if (!grid.isFree(nx, ny)) continue;
+      if (!grid.isFree(nx, ny) && !(passable != nullptr && (*passable)[nidx])) continue;
       visited[nidx] = 1;
       q.push({nx, ny});
     }

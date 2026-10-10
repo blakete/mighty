@@ -152,8 +152,6 @@ mighty_node:
         free_start_factor: 1.0                          # [-] Radius factor for start freeing
         use_free_goal: false                            # [-] Free the goal voxel if occupied
         free_goal_factor: 2.0                           # [-] Radius factor for goal freeing
-        relocate_occupied_goal: true                    # [-] If a clicked/commanded goal lands in an occupied 2D cell, relocate it (see sanitizeTerminalGoal2D)
-        goal_relocation_clearance_m: 1.0                # [m] Min clearance from occupied cells enforced on the relocated goal (disk check, not just the single landing cell)
         global_planner_heuristic_weight: 2.0             # [-] A* heuristic weight (higher = greedier)
         heat_weight: 1.0                                # [-] Overall heat map weight in A* cost
         max_dist_vertexes: 0.5                          # [m] Max distance between path vertices

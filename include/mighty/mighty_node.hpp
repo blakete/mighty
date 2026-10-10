@@ -111,9 +111,9 @@ class MIGHTY_NODE : public rclcpp::Node {
   void occupancyMapCallback(const sensor_msgs::msg::PointCloud2::ConstPtr& map_msg);
   void unknownMapCallback(const sensor_msgs::msg::PointCloud2::ConstPtr& unk_msg);
   void esdfCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
-  // Planning-only occupancy (large UNKNOWN components -> OCCUPIED by the mapper). Feeds
-  // the HGP/A* planner via setOccGrid2D + updateMap2DOnly.
-  void planningOcc2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
+  // Raw tri-state occ_2d (free / unknown / occupied). Feeds the HGP/A* planner via
+  // setOccGrid2D + updateMap2DOnly; unknown stays unknown (priced by w_unknown).
+  void occ2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
   void goalReachedCheckCallback();
   void convertDynTrajMsg2DynTraj(const dynus_interfaces::msg::DynTraj& msg,
                                  std::shared_ptr<dynTraj>& traj, double current_time);
@@ -165,7 +165,7 @@ class MIGHTY_NODE : public rclcpp::Node {
   void publishHeatCloud();
   void publishGround2DOccupied();
   /** @brief Publish MIGHTY's inflated 2D planning map as an OccupancyGrid on
-   *  planning_map_2d, stamped and framed like the planning_occ_2d_topic message it
+   *  planning_map_2d, stamped and framed like the occ_2d_topic message it
    *  was built from so the two overlay 1:1. Values: 100 real obstacle,
    *  99 inflation band, 0 free, -1 unknown. */
   void publishPlanningMap2D(const std_msgs::msg::Header& source_header, double z);
@@ -257,14 +257,14 @@ class MIGHTY_NODE : public rclcpp::Node {
   // esdf_grid_ is written by esdfCallback() on cb_group_map_ and read by
   // replanCallback() on cb_group_replan_ -- a different callback group, and
   // (per main()) MultiThreadedExecutor actually runs them concurrently. Unlike
-  // planning_occ_grid_2d_ (confined to one callback group),
+  // occ_grid_2d_ (confined to one callback group),
   // this one crosses groups, so it needs its own lock.
   std::mutex mtx_esdf_grid_;
   std::shared_ptr<const class EsdfGrid2D> esdf_grid_;
 
-  // planning_occ_2d_topic -> planning_occ_grid_2d_ : HGP/A* planner (ground robot only).
-  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr sub_planning_occ_2d_;
-  std::shared_ptr<const class OccGrid2D> planning_occ_grid_2d_;
+  // occ_2d_topic (raw) -> occ_grid_2d_ : HGP/A* planner (ground robot only).
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr sub_occ_2d_;
+  std::shared_ptr<const class OccGrid2D> occ_grid_2d_;
 
   // Wall-clock seconds of the last visualization publish in replanCallback.
   // The replan loop runs at 100 Hz which is fine for control but floods RViz

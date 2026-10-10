@@ -1,7 +1,7 @@
 /**
  * @file goal_selector.hpp
  * @brief ROS-free core of the goal selector (frontier exploration, manual override, return-home,
- *        goal relocation, planner-status feedback).
+ *        planner-status feedback).
  *
  * GoalSelector contains no rclcpp, no clock, no publishers and no threads. Everything it needs is
  * passed in as arguments and everything it wants done is returned as values:
@@ -23,39 +23,29 @@
  * Commitments and stamps (spec 4.3)
  *   A "commitment" is one frontier, one manual goal or one return-home goal. The selector stamps it
  *   when it commits: stamp_ns = round(now * 1e9), forced to be strictly greater than the previous
- *   commitment's stamp (and never 0), even if `now` does not advance. A re-relocation of the same
- *   commitment republishes with the same stamp.
+ *   commitment's stamp (and never 0), even if `now` does not advance. Goals are published exactly as given
+ *   (no relocation): the planner plans through unknown space, and an occupied goal gives FAILED.
  *
  * Planner status feedback (spec 3, decision D8)
  *   Statuses whose goal_stamp is 0 or differs from the current commitment's stamp are ignored.
  *   FAILED increments the unreachable counter; SKIPPED is neutral; SUCCESS/PARTIAL reset it;
  *   REACHED completes the commitment.
  *
- * Manual override (spec 4.2)
- *   onManualGoal() relocates + commits immediately. While a manual goal is active no frontier is
- *   selected, preempted or released by the watchdog / pursuit timeout. REACHED for its stamp
- *   releases it. FAILED statuses reaching the threshold only log a warning and raise
- *   manualGoalUnreachable(); the goal is never released or resent.
+ * Manual override (spec 4.2, N4)
+ *   onManualGoal() commits immediately. While a manual goal is active no frontier is selected,
+ *   preempted or released by the watchdog / pursuit timeout. REACHED for its stamp releases it.
+ *   FAILED statuses reaching the threshold only log a warning and raise manualGoalUnreachable();
+ *   the goal is never released or resent for that. A manual goal does have the stuck watchdog (same
+ *   parameters as for frontiers, armed after the robot first moves): on fire it is released, and
+ *   exploration resumes if enabled (checked in onState(), so it also works with exploration off).
  *
- * Relocation (spec 4.4)
- *   On every onPlanningOccGrid() (and when a goal is committed) the selector rebuilds the planner's
- *   2D window map from the latest planning_occ_2d grid with the planner's window geometry and
- *   inflation_2d_m (map2d library). ALL goal kinds (frontier, manual, return-home) are relocated on it,
- *   switched by relocate_occupied_goal (false: published unrelocated, never re-relocated). The current
- *   goal is re-relocated on every rebuild from its last published (relocated) position, as the planner
- *   does from its stored G_term (also after REACHED), and republished with the same stamp if it moved.
- *   Relocation failure publishes the unrelocated goal (D10).
- *   The window is centred on the robot and sized from the robot->goal distance, where "goal" is the
- *   current commitment's published (relocated) position, projected on the horizon sphere exactly as
- *   the planner does; with no commitment the goal is taken to be the robot position.
- *
- * Frontier band (D8b, revised)
- *   A separate band map is built from the raw occ_2d grid: only occupied cells are obstacles (unknown
- *   is NOT; planning_occ_2d fills unknown space as occupied, so it cannot be used), on the same
- *   window geometry, inflated by expl_frontier_band_radius_m. ACTIVE / DORMANT frontiers whose centroid
- *   is in that band (in-window only) are invalidated via markInvalidated on every planning-grid
- *   update and before every selection. The band map is rebuilt lazily when the raw grid or the window
- *   changes. Not built when exploration is disabled.
+ * Frontier map (New Plan N1/N5)
+ *   Detection and every FrontierManager call run on a derived grid built from the detect grid
+ *   (visited-fused grid or raw occ_2d window): cells within inflation_2d_m of an OCCUPIED cell
+ *   become occupied; the remaining non-occupied cells within unknown_inflation_2d_m of an UNKNOWN
+ *   cell (computed on the detect grid's raw values) become UNKNOWN. A frontier is therefore a
+ *   reachable free cell outside both bands that is adjacent to the unknown band, and the manager's
+ *   VISITED verification tests the unknown band rather than raw unknown.
  */
 #pragma once
 
@@ -148,27 +138,11 @@ struct SelectorParams {
   double expl_peer_visit_radius_m{2.0};
   // Visualization
   bool   expl_publish_markers{true};
-  // D8b: frontiers whose centroid is within this radius of a REAL obstacle (occupied cell of occ_2d;
-  // unknown is not an obstacle) are invalidated. Hw value 0.5 = the planner's inflation_2d_m.
-  double expl_frontier_band_radius_m{0.5};
 
   // --- shared with the planner's YAML ---
   double goal_radius{0.5};                   ///< return-home re-arm distance
-  bool   relocate_occupied_goal{true};
-  double goal_relocation_clearance_m{1.0};
-  // Planner window geometry (spec 4.4). NOTE: `res` is the planner parameter `mighty_map_res`.
-  double horizon{20.0};
-  double map_buffer{6.0};
-  double min_wdx{10.0};
-  double min_wdy{10.0};
-  double res{0.1};
-  double factor_hgp{1.0};
-  double inflation_hgp{0.5};
-  double inflation_2d_m{0.0};
-  // Goal z handling. Only used to reproduce the planner's window (the planner keeps its own z
-  // handling: force_goal_z / z_min / z_max are applied by the planner, not here).
-  bool   force_goal_z{true};
-  double default_goal_z{2.5};
+  double inflation_2d_m{0.0};                ///< occupied inflation of the frontier map
+  double unknown_inflation_2d_m{0.5};        ///< unknown-band width of the frontier map
 };
 
 // ----------------------------------------------------------------------------
@@ -205,7 +179,6 @@ struct GoalCommand {
   Eigen::Vector3d position{Eigen::Vector3d::Zero()};
   int64_t stamp_ns{0};
   GoalKind kind{GoalKind::kNone};
-  bool relocated{false};  ///< position differs from the commitment's stored target
 };
 
 struct LogMessage {
@@ -235,7 +208,8 @@ class GoalSelector {
 
   // ---- inputs -----------------------------------------------------------------------------
 
-  /** @brief New robot pose (`state`). Returns the throttled peer-pose broadcast, if due.
+  /** @brief New robot pose (`state`). Returns the throttled peer-pose broadcast, if due, and runs
+   *  the manual-goal stuck watchdog (which may release the goal and resume exploration).
    *  The first call marks the state as initialised (selection and detection wait for it). */
   Output onState(double now, const Pose& pose);
 
@@ -245,19 +219,14 @@ class GoalSelector {
    *  are published before selection as in the planner. The grid is taken by value (fusion edits it). */
   Output onOccGrid(double now, GridInput grid);
 
-  /** @brief planning_occ_2d_topic grid: rebuild the relocation map (spec 4.4), invalidate frontiers
-   *  in the real-obstacle band (D8b), re-relocate the current goal and
-   *  republish it with the same stamp if it moved. */
-  Output onPlanningOccGrid(double now, const GridInput& grid);
-
   /** @brief Exploration select tick (exploreSelectCallback), called at expl_select_rate_hz. */
   Output onSelectTick(double now);
 
   /** @brief One planner_status message. goal_stamp_ns is the message's goal_stamp in nanoseconds. */
   Output onPlannerStatus(double now, PlannerStatus status, int64_t goal_stamp_ns);
 
-  /** @brief Manual goal from term_goal_rviz. Relocated and committed immediately; overrides
-   *  exploration until REACHED for its stamp. */
+  /** @brief Manual goal from term_goal_rviz. Committed immediately (as given); overrides
+   *  exploration until REACHED for its stamp or the stuck watchdog releases it. */
   Output onManualGoal(double now, double x, double y, double z);
 
   /** @brief /exploration/return_home trigger. */
@@ -286,10 +255,8 @@ class GoalSelector {
 
   GoalKind currentKind() const { return current_.kind; }
   int64_t currentStampNs() const { return current_.stamp_ns; }
-  /** @brief The stored (unrelocated) target of the current commitment. */
+  /** @brief The target published for the current commitment. */
   const Eigen::Vector3d& currentTarget() const { return current_.target; }
-  /** @brief The position last published for the current commitment. */
-  const Eigen::Vector3d& currentPublished() const { return current_.published; }
 
   const FrontierManager& frontierManager() const { return *frontier_manager_; }
   FrontierManager& frontierManager() { return *frontier_manager_; }
@@ -298,8 +265,6 @@ class GoalSelector {
   Pose pose() const { return pose_; }
   /** @brief origin.z of the latest raw occ_2d grid (visited-map plane), or expl_default_goal_z. */
   double occ2dOriginZ() const { return occ2d_origin_z_.value_or(params_.expl_default_goal_z); }
-  /** @brief Relocation map built from the latest planning grid (empty before the first rebuild). */
-  const map2d::Grid2D& relocationMap() const { return reloc_map_; }
   /** @brief True if a raw occ_2d grid has been received. */
   bool hasOccGrid() const { return occ_grid_2d_ != nullptr; }
 
@@ -307,35 +272,24 @@ class GoalSelector {
   struct Commitment {
     GoalKind kind{GoalKind::kNone};
     int64_t stamp_ns{0};
-    Eigen::Vector3d target{Eigen::Vector3d::Zero()};     // stored, unrelocated
-    Eigen::Vector3d published{Eigen::Vector3d::Zero()};  // last published (possibly relocated)
-    };
-
-  struct PlanningSource {
-    bool valid{false};
-    int width{0}, height{0};
-    double resolution{0.0}, inv_resolution{0.0}, origin_x{0.0}, origin_y{0.0};
-    std::vector<bool> occupied, unknown;
-  };
-
-  struct RelocResult {
-    bool ok{true};     // false = relocation failed (goal would be dropped)
-    Eigen::Vector3d position{Eigen::Vector3d::Zero()};
+    Eigen::Vector3d target{Eigen::Vector3d::Zero()};  // as published
   };
 
   int64_t nextStampNs(double now);
   void log(Output& out, LogMessage::Level level, std::string text) const;
 
-  // commit a goal: new stamp, relocate (non-frontier kinds), fill out.term_goal
+  // commit a goal: new stamp, fill out.term_goal
   void commit(GoalKind kind, const Eigen::Vector3d& target, double now, Output& out);
 
-  // relocation (spec 4.4)
-  map2d::WindowGeometry planningWindow(double& map_res) const;
-  void rebuildRelocationMap();
-  void ensureBandMap();
-  RelocResult relocate(const Eigen::Vector3d& goal) const;
-  void invalidateFrontiersInBand(double now, Output& out);
-  void rerelocateCurrent(Output& out);
+  // frontier map (N1/N5): inflate occupied, mark the unknown band UNKNOWN. `passable` is filled
+  // with the unknown-band cells (known free, outside the occupied band, not real unknown): the
+  // detector walks through them for reachability but they are never frontier cells.
+  std::shared_ptr<const OccGrid2D> buildFrontierGrid(const OccGrid2D& detect_grid,
+                                                     std::vector<uint8_t>& passable) const;
+
+  // stuck watchdog shared by frontier and manual pursuit: tracks progress, true once when it fires
+  bool stuckWatchdogFired(double now);
+  void armStuckWatchdog(double now);
 
   // moved exploration logic
   void selectAndCommit(double now, Output& out);          // exploreSelectCallback
@@ -349,7 +303,8 @@ class GoalSelector {
   PeerTracker peer_tracker_;
 
   std::shared_ptr<const OccGrid2D> occ_grid_2d_;
-  std::shared_ptr<const OccGrid2D> current_detect_grid_;
+  std::shared_ptr<const OccGrid2D> frontier_grid_;  // derived from the detect grid (N1/N5)
+  std::vector<uint8_t> frontier_passable_;          // walkable-but-UNKNOWN mask for frontier_grid_
   std::optional<double> occ2d_origin_z_;
 
   Pose pose_;
@@ -365,6 +320,7 @@ class GoalSelector {
   uint64_t current_explore_id_{0};
   int unreachable_consec_count_{0};
   double explore_committed_at_t_{-1.0};
+  // Stuck watchdog state (frontier or manual pursuit; the two are mutually exclusive).
   Eigen::Vector2d explore_last_progress_xy_{Eigen::Vector2d::Zero()};
   double explore_last_progress_t_{-1.0};
   bool explore_has_moved_{false};
@@ -377,10 +333,6 @@ class GoalSelector {
   double last_diag_log_t_{-1.0e18};
   double last_defer_log_t_{-1.0e18};
 
-  PlanningSource planning_src_;
-  map2d::Grid2D reloc_map_;
-  map2d::Grid2D band_map_;                  // real-obstacle band (occ_2d), same window as reloc_map_
-  const OccGrid2D* band_src_{nullptr};      // raw grid band_map_ was built from
 };
 
 }  // namespace goal_selector

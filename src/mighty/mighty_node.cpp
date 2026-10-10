@@ -84,7 +84,7 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
     cb_groups_re_[i] = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
   }
   // MutuallyExclusive (NOT Reentrant): every callback on this group mutates shared map state
-  // (esdf_grid_, planning_occ_grid_2d_) without internal locking, so the group is serialized.
+  // (esdf_grid_, occ_grid_2d_) without internal locking, so the group is serialized.
   this->cb_group_map_ =
       this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   this->cb_group_replan_ =
@@ -293,14 +293,14 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
     RCLCPP_INFO(this->get_logger(), "ESDF: Subscribed to esdf_2d_topic (d_safe=%.1f m, weight=%.0f)",
                 par_.esdf_d_safe, par_.esdf_weight);
 
-    // Planning occupancy (large-UNKNOWN-as-OCCUPIED) for HGP/A* ONLY. Same map QoS and
-    // same mutually-exclusive map callback group as occ_2d. Relative topic -> resolves to
-    // <ns>/planning_occ_2d_topic (no namespace hard-coded).
-    sub_planning_occ_2d_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
-        "planning_occ_2d_topic", map_qos,
-        std::bind(&MIGHTY_NODE::planningOcc2DCallback, this, std::placeholders::_1), options_map);
+    // RAW 2D occupancy (free / unknown -1 / occupied) for HGP/A*. Same map QoS and
+    // same mutually-exclusive map callback group as the ESDF. Relative topic -> resolves to
+    // <ns>/occ_2d_topic (no namespace hard-coded).
+    sub_occ_2d_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
+        "occ_2d_topic", map_qos,
+        std::bind(&MIGHTY_NODE::occ2DCallback, this, std::placeholders::_1), options_map);
     RCLCPP_INFO(this->get_logger(),
-                "Occ2D planning: subscribed to planning_occ_2d_topic for HGP/A*");
+                "Occ2D: subscribed to raw occ_2d_topic for HGP/A*");
   }
 }
 
@@ -370,7 +370,7 @@ void MIGHTY_NODE::declareParameters() {
   this->declare_parameter("max_expand", 10000);
   this->declare_parameter("hgp_stop_distance_m", 0.0);
   this->declare_parameter("inflation_2d_m", 0.0);
-  this->declare_parameter("unknown_clearance_2d_m", 0.0);
+  this->declare_parameter("unknown_inflation_2d_m", 0.5);
   this->declare_parameter("trim_min_unknown_run_cells", 3);
   this->declare_parameter("use_free_start", false);
   this->declare_parameter("free_start_factor", 1.0);
@@ -657,7 +657,7 @@ void MIGHTY_NODE::setParameters() {
   par_.max_expand = this->get_parameter("max_expand").as_int();
   par_.hgp_stop_distance_m = this->get_parameter("hgp_stop_distance_m").as_double();
   par_.inflation_2d_m = this->get_parameter("inflation_2d_m").as_double();
-  par_.unknown_clearance_2d_m = this->get_parameter("unknown_clearance_2d_m").as_double();
+  par_.unknown_inflation_2d_m = this->get_parameter("unknown_inflation_2d_m").as_double();
   par_.trim_min_unknown_run_cells =
       static_cast<int>(this->get_parameter("trim_min_unknown_run_cells").as_int());
   par_.max_num_expansion = par_.max_expand;
@@ -934,8 +934,8 @@ void MIGHTY_NODE::printParameters() {
   RCLCPP_INFO(this->get_logger(), "Free Start Factor: %f", par_.free_start_factor);
   RCLCPP_INFO(this->get_logger(), "Use Free Goal?: %d", par_.use_free_goal);
   RCLCPP_INFO(this->get_logger(), "Free Goal Factor: %f", par_.free_goal_factor);
-  RCLCPP_INFO(this->get_logger(), "2D Inflation: %f m, Unknown Clearance 2D: %f m",
-              par_.inflation_2d_m, par_.unknown_clearance_2d_m);
+  RCLCPP_INFO(this->get_logger(), "2D Inflation: %f m, Unknown Inflation 2D: %f m",
+              par_.inflation_2d_m, par_.unknown_inflation_2d_m);
   RCLCPP_INFO(this->get_logger(), "max_dist_vertexes: %f", par_.max_dist_vertexes);
   RCLCPP_INFO(this->get_logger(), "w_unknown: %f", par_.w_unknown);
   RCLCPP_INFO(this->get_logger(), "trim_min_unknown_run_cells: %d", par_.trim_min_unknown_run_cells);
@@ -2905,10 +2905,10 @@ void MIGHTY_NODE::esdfCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg
   esdf_grid_ = grid;
 }
 
-void MIGHTY_NODE::planningOcc2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
-  // Planning-only occupancy: the mapper has already converted large connected UNKNOWN components
-  // to OCCUPIED for HGP/A*. The mapper refreshes this map every cycle, so MIGHTY adds no
-  // persistence/clearing logic.
+void MIGHTY_NODE::occ2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
+  // Raw occupancy (free / unknown -1 / occupied): unknown stays unknown here (A* crosses it
+  // at w_unknown per step, the prefix trim stops at it). The mapper refreshes this map every
+  // cycle, so MIGHTY adds no persistence/clearing logic.
   // Coverage vs planner window (logged once per grid-size change). The planner's
   // robot-centred window is >= min_wdx x min_wdy and grows to contain the goal;
   // any part of it the mapper does not cover is UNKNOWN in the tri-state 2D map
@@ -2923,7 +2923,7 @@ void MIGHTY_NODE::planningOcc2DCallback(const nav_msgs::msg::OccupancyGrid::Shar
       logged_cov_x = cov_x;
       logged_cov_y = cov_y;
       RCLCPP_INFO(this->get_logger(),
-                  "planning_occ_2d coverage %.1f x %.1f m (res %.2f); planner window >= %.1f x %.1f m "
+                  "occ_2d coverage %.1f x %.1f m (res %.2f); planner window >= %.1f x %.1f m "
                   "(min_wdx/min_wdy), horizon %.1f m, w_unknown %.2f",
                   cov_x, cov_y, msg->info.resolution, par_.min_wdx, par_.min_wdy, par_.horizon,
                   par_.w_unknown);
@@ -2936,8 +2936,8 @@ void MIGHTY_NODE::planningOcc2DCallback(const nav_msgs::msg::OccupancyGrid::Shar
       }
     }
   }
-  planning_occ_grid_2d_ = OccGrid2D::fromOccupancyGrid(*msg);
-  mighty_ptr_->setOccGrid2D(planning_occ_grid_2d_);
+  occ_grid_2d_ = OccGrid2D::fromOccupancyGrid(*msg);
+  mighty_ptr_->setOccGrid2D(occ_grid_2d_);
   if (par_.use_hardware && par_.use_2d_planning && par_.vehicle_type == "ground_robot") {
     mighty_ptr_->updateMap2DOnly();
     publishPlanningMap2D(msg->header, msg->info.origin.position.z);
