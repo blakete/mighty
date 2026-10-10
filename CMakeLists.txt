@@ -224,6 +224,25 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_graph_search_unknown_cost
     rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
+  # planner New Plan tests
+  # 2D global path / goal handling / PARTIAL, and the executable-prefix trim, driven through
+  # HGPManager::solveHGP on hand-built tri-state grids.
+  ament_add_gtest(test_planner_unknown_paths
+    src/test/test_planner_unknown_paths.cpp
+    src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp
+    src/mighty/utils.cpp)
+  target_link_libraries(test_planner_unknown_paths ${PCL_LIBRARIES} map2d)
+  ament_target_dependencies(test_planner_unknown_paths
+    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
+
+  ament_add_gtest(test_planner_prefix_trim
+    src/test/test_planner_prefix_trim.cpp
+    src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp
+    src/mighty/utils.cpp)
+  target_link_libraries(test_planner_prefix_trim ${PCL_LIBRARIES} map2d)
+  ament_target_dependencies(test_planner_prefix_trim
+    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
+
   ament_add_gtest(test_frontier_detector
     src/test/test_frontier_detector.cpp
     src/mighty/frontier_detector.cpp)
@@ -235,6 +254,24 @@ if(BUILD_TESTING)
     src/mighty/frontier_detector.cpp
     src/mighty/frontier_manager.cpp)
   ament_target_dependencies(test_frontier_manager
+    rclcpp Eigen3 nav_msgs)
+
+  # frontier map / ranking tests (New Plan)
+  ament_add_gtest(test_map2d_inflate_unknown
+    src/test/test_map2d_inflate_unknown.cpp)
+  target_link_libraries(test_map2d_inflate_unknown map2d)
+
+  ament_add_gtest(test_frontier_map_new_plan
+    src/test/test_frontier_map_new_plan.cpp)
+  target_link_libraries(test_frontier_map_new_plan goal_selector_core)
+  ament_target_dependencies(test_frontier_map_new_plan
+    rclcpp Eigen3 nav_msgs)
+
+  ament_add_gtest(test_frontier_ranking
+    src/test/test_frontier_ranking.cpp
+    src/mighty/frontier_detector.cpp
+    src/mighty/frontier_manager.cpp)
+  ament_target_dependencies(test_frontier_ranking
     rclcpp Eigen3 nav_msgs)
 
   ament_add_gtest(test_gradient_check
@@ -254,6 +291,17 @@ if(BUILD_TESTING)
     rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3
     decomp_ros_msgs sensor_msgs std_msgs decomp_rviz_plugins decomp_test_node
     tf2_geometry_msgs)
+
+  # goal_selector tests (lifecycle/contract)
+  ament_add_gtest(test_goal_selector_lifecycle
+    src/test/test_goal_selector_lifecycle.cpp)
+  target_link_libraries(test_goal_selector_lifecycle goal_selector_core)
+  ament_target_dependencies(test_goal_selector_lifecycle Eigen3 nav_msgs)
+
+  ament_add_gtest(test_goal_selector_contract
+    src/test/test_goal_selector_contract.cpp)
+  target_link_libraries(test_goal_selector_contract goal_selector_core)
+  ament_target_dependencies(test_goal_selector_contract Eigen3 nav_msgs)
 endif()
 
 ament_package()
