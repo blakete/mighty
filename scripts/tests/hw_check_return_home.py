@@ -9,6 +9,10 @@ SETUP: stack running with exploration.enabled: true; the robot has been explorin
 "Exploration: starting from (x, y, z)"). Start this monitor, then trigger the return:
     ros2 topic pub --once /exploration/return_home std_msgs/msg/Empty "{}"
 (or let the frontiers run out). The monitor can also send the trigger itself: --send-trigger-after 20.
+AUTOMATIC RETURN HOME can be switched off (hw_goal_selector.yaml exploration.return_home.enabled, false
+for the 2026-10 hardware tests; spec §11 item 23). The monitor reads that switch: when it is off,
+"let the frontiers run out" does NOT send the robot home (the selector goes idle), so only the
+/exploration/return_home trigger can exercise this test -- use --send-trigger-after or publish it.
 Give the start pose with --home X Y (read it from that log line); without it the pose of the first
 state message seen by this monitor is used, which is only right if you start the monitor at the
 start position.
@@ -23,6 +27,9 @@ CRITERIA
                        frontier goal and lies within --home-tol 0.3 m of home) a term_goal at home
                        is published within --trigger-sec (default 5 s). x, y equal to home within
                        --home-tol (no relocation, spec N5). INCONCLUSIVE if no trigger/home goal.
+                       With automatic return home OFF: a home goal with no trigger seen is a FAIL
+                       (the selector must go idle instead), and "no home goal, no trigger" is
+                       INCONCLUSIVE (not applicable without the trigger).
   no-frontier-goals    PASS: no other term_goal (frontier or otherwise) is published between the home
                        goal and arrival ("return_home trigger stops new frontier goals").
   arrival              PASS: planner_status REACHED with goal_stamp == the home goal's stamp, and the
@@ -58,7 +65,15 @@ def main():
     ap.add_argument('--arrive-tol', type=float, default=0.8)
     ap.add_argument('--quiet-sec', type=float, default=20.0)
     ap.add_argument('--retrigger-wait', type=float, default=60.0)
+    ap.add_argument('--auto-return', choices=['auto', 'on', 'off'], default='auto',
+                    help='automatic return home (exploration.return_home.enabled); auto = read it from '
+                         '/cfg/hw_goal_selector.yaml')
     a, ros_args = ap.parse_known_args()
+    if a.auto_return == 'auto':
+        v = C.load_param('exploration.return_home.enabled', True, '/cfg/hw_goal_selector.yaml')
+        auto_return = v if isinstance(v, bool) else str(v).lower() == 'true'
+    else:
+        auto_return = a.auto_return == 'on'
     a.duration = a.duration or a.timeout
     rclpy.init(args=ros_args)
     n = L.Live(a.ns, 'hw_check_return_home')
@@ -107,13 +122,21 @@ def main():
 
     L.run(n, flag, tick)
     tick()
-    rep = C.Report('HW: return home', dict(ns=a.ns, home=home))
+    rep = C.Report('HW: return home', dict(ns=a.ns, home=home, auto_return=auto_return))
     hg = st['home_goal']
     trig = [r for r in n.return_home]
     if hg is None:
+        why = ('automatic return home is OFF, so only the /exploration/return_home trigger sends the robot '
+               'home (not applicable without it; use --send-trigger-after). ' if not auto_return and not trig
+               else 'no trigger sent, or frontiers did not run out, or --home wrong. ')
         rep.check('home-goal-published', C.INCONCLUSIVE,
-                  'no home term_goal observed (no trigger sent, or frontiers did not run out, or --home wrong). '
-                  f'triggers seen: {len(trig)}; term_goals: {len(n.tg)}', ref='notes B')
+                  f'no home term_goal observed ({why}triggers seen: {len(trig)}; term_goals: {len(n.tg)})',
+                  ref='notes B; spec §11 item 23')
+    elif not auto_return and not [r for r in trig if r <= hg[0] + 0.2]:
+        rep.check('home-goal-published', C.FAIL,
+                  f'home goal at ({hg[2]:.2f}, {hg[3]:.2f}) published WITHOUT a trigger although automatic '
+                  'return home is off (exploration.return_home.enabled=false): the selector should have gone idle',
+                  ref='spec §11 item 23')
     else:
         lat = None
         if trig:

@@ -450,6 +450,43 @@ TEST(GoalSelectorLifecycle, ReturnHome_WhenNoFrontiersLeft) {
   EXPECT_FALSE(h.sel.explorationActive());
 }
 
+// Scenario: automatic return home is switched off (exploration.return_home.enabled = false, the
+// setting for the 2026-10 hardware tests). The only frontier disappears (map update) while the robot
+// is 1.5 m from it. Expected: NO return-home goal; the selector goes idle where it is (no latch).
+// When a new frontier appears later (the right door opens), exploration resumes and commits it.
+// Why: user decision 2026-10-10 ("turn off go-home behaviour for the upcoming hardware tests"),
+// spec 13; hw_goal_selector.yaml exploration.return_home.enabled.
+TEST(GoalSelectorLifecycle, ReturnHome_DisabledGoesIdleAndResumesOnNewFrontier) {
+  SelectorParams p = BaseParams();
+  p.expl_return_home_enabled = false;
+  Harness h(p);
+  h.setMap(LeftOnly());
+  h.setRobot(kStartX, kStartY);
+  h.cycle();
+  ASSERT_EQ(h.goals.size(), 1u);
+  ASSERT_TRUE(GoalNear(h.goals[0], kLeftX, kCorridorY));
+
+  h.advance(1.0);
+  h.setRobot(3.75, kStartY);
+  h.setMap(ExploredLeft());
+  h.cycle();
+  EXPECT_EQ(h.goals.size(), 1u) << "no return-home goal when automatic return home is off";
+  EXPECT_FALSE(h.sel.homeReturnRequested());
+  EXPECT_FALSE(h.sel.explorationActive());
+
+  // A later idle tick stays idle (no goal spam).
+  h.advance(1.0);
+  h.cycle();
+  EXPECT_EQ(h.goals.size(), 1u);
+
+  // A new frontier appears away from the start: exploration resumes without returning home first.
+  h.advance(1.0);
+  h.setMap(RightOpened());
+  h.cycle();
+  ASSERT_EQ(h.goals.size(), 2u);
+  EXPECT_EQ(h.goals[1].kind, GoalKind::kFrontier);
+}
+
 // Scenario: after the return-home commit the robot is en route (outside goal_radius of the start).
 // A new frontier appears (the right door opens). The latch holds: no frontier goal and no second
 // return-home goal while en route. When the robot arrives (within goal_radius 0.5 of the start) the

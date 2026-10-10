@@ -429,7 +429,15 @@ void GoalSelector::selectAndCommit(double now, Output& out) {
     next = frontier_manager_->selectNextGoal(robot_pose, *frontier_grid_);
   }
   if (!next) {
-    if (exploration_active_) {
+    // A frontier pursuit that ended in REACHED (exploration_active_ already cleared) counts the same
+    // as one still in progress: with no frontier left, go home.
+    if ((exploration_active_ || frontier_reached_pending_) && !params_.expl_return_home_enabled) {
+      // Automatic return home switched off: stay where we are (idle) until a frontier appears.
+      log(out, LogMessage::Level::kInfo,
+          fmt("[mighty] No frontiers left. Robot at (%.2f, %.2f, %.2f). Automatic return home is off "
+              "(exploration.return_home.enabled=false): idle",
+              pose_.x, pose_.y, pose_.z));
+    } else if (exploration_active_ || frontier_reached_pending_) {
       log(out, LogMessage::Level::kInfo,
           fmt("[mighty] No frontiers left. Robot now at (%.2f, %.2f, %.2f). Returning to captured "
               "start (%.2f, %.2f, %.2f)",
@@ -443,6 +451,7 @@ void GoalSelector::selectAndCommit(double now, Output& out) {
       home_return_requested_ = true;
     }
     exploration_active_ = false;
+    frontier_reached_pending_ = false;
     // exploration_start_captured_ is intentionally NOT reset here (see the planner original):
     // only a manual goal (true session boundary) resets it.
     return;
@@ -467,6 +476,7 @@ void GoalSelector::selectAndCommit(double now, Output& out) {
 
   current_explore_id_ = next->id;
   exploration_active_ = true;
+  frontier_reached_pending_ = false;
   explore_committed_at_t_ = now;
   unreachable_consec_count_ = 0;
   armStuckWatchdog(now);  // fresh for this pursuit
@@ -503,6 +513,7 @@ Output GoalSelector::onManualGoal(double now, double x, double y, double z) {
     frontier_manager_->clearPursuit(current_explore_id_);  // release without invalidating (§11.10)
   }
   exploration_active_ = false;
+  frontier_reached_pending_ = false;
   exploration_start_captured_ = false;
   unreachable_consec_count_ = 0;
   home_return_requested_ = false;
@@ -535,6 +546,7 @@ Output GoalSelector::onReturnHome(double now) {
                          params_.expl_default_goal_z),
          now, out);
   exploration_active_ = false;
+  frontier_reached_pending_ = false;
   log(out, LogMessage::Level::kInfo,
       fmt("Return-home: heading to (%.2f, %.2f, %.2f)", exploration_start_pos_.x(),
           exploration_start_pos_.y(), params_.expl_default_goal_z));
@@ -595,6 +607,9 @@ Output GoalSelector::onPlannerStatus(double now, PlannerStatus status, int64_t g
       if (frontier_pursuit) {
         frontier_manager_->markVisited(current_explore_id_);
         exploration_active_ = false;
+        // Remember that the session's frontier was completed, so the next select tick still sends
+        // the robot home if no frontier is left (same as a frontier cleared by a map update).
+        frontier_reached_pending_ = true;
         unreachable_consec_count_ = 0;
       }
       // A manual goal that just completed releases the override.

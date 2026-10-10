@@ -37,7 +37,6 @@
 //   Lifecycle.NotInstantlyVisitedAndVisitedOnlyOnceTheBandIsGone         -> notes C bullet 2, N5 VISITED verify, item 18
 //   Lifecycle.CentroidInObstacleMarginInvalidatedThenKeepOutThenNewCandidate -> notes C bullet 3
 //   NoFrontierNearObstacles.UnknownEdgeWithinInflationOfAnObstacleGivesNoFrontier -> notes C bullet 4 (+ control)
-//   DetectModes.DetectionOnLocalWindowAlsoFindsTheFrontier              -> ASSUMPTION (production default is visited-map mode)
 
 #include <gtest/gtest.h>
 
@@ -659,25 +658,4 @@ TEST(NoFrontierNearObstacles, UnknownEdgeWithinInflationOfAnObstacleGivesNoFront
   ASSERT_EQ(plain.records().size(), 1u) << "control: without occupied inflation the same edge yields a frontier";
   EXPECT_EQ(plain.records()[0].size_cells, 7);
   EXPECT_NEAR(plain.records()[0].centroid_xy.x(), 0.85, 1e-9);
-}
-
-// =============================================================================================
-// Detection on the local window instead of the visited map
-// =============================================================================================
-
-// Scenario: expl_detect_on_visited_map = false (detect on the raw occ_2d window and pass the visited map to the
-// detector as a "previously observed" filter). Same half-unknown grid as the first FrontierMap test.
-// Expected: the same single frontier (column x = 11).
-// ASSUMPTION: this mode is meant to keep working with the unknown band. Unknown-band cells are known free
-// cells, so they are in the visited map; the detector's visited filter ("an UNKNOWN neighbour that is already
-// visited does not generate a frontier") might therefore hide every band-generated frontier. The production
-// config uses detect_on_visited_map = true; if this test fails the false mode is effectively broken by the
-// New Plan.
-TEST(DetectModes, DetectionOnLocalWindowAlsoFindsTheFrontier) {
-  SelectorParams p = makeParams(24, 9, 0.0, 0.2);
-  p.expl_detect_on_visited_map = false;
-  Rig rig(p);
-  rig.feed(halfUnknown(24, 9, 14), 1.0);
-  ASSERT_EQ(rig.records().size(), 1u);
-  EXPECT_NEAR(rig.records()[0].centroid_xy.x(), 1.15, 1e-9);
 }

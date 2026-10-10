@@ -19,6 +19,7 @@ goal_selector:
         manual_goal.start_timeout_sec: 15.0             # [s] release a manual goal if the robot has not moved more than exploration.manager.stuck_move_thresh_m within this long of the commit (e.g. goal on an obstacle, planner FAILED forever). Exploration resumes if enabled. 0 disables this start check; afterwards the normal stuck_timeout_sec applies
 
         # --- Frontier-Based Exploration ---
+        exploration.return_home.enabled: false          # [-] true: when no frontier is left, drive back to the start pose (latched until arrival). false: go idle where the robot is; exploration resumes when a new frontier appears. The /exploration/return_home topic still works either way. Off for the 2026-10 hardware tests (return-home behaviour to be revisited, spec §13)
         # Hardware default: OFF. Flip exploration.enabled to true to autonomously
         # drive to frontiers detected on occ_2d_topic. See plan: snazzy-moseying-donut.md
         exploration.enabled: false
@@ -92,7 +93,7 @@ goal_selector:
         exploration.visited_map.resolution_m: 0.10
         exploration.visited_map.publish: true
         exploration.visited_map.fuse_into_local: true  # disabled to stop stale observations re-seeding phantom FREE inside closed rooms
-        exploration.visited_map.detect_on_visited_map: true  # run frontier WFD on the persistent map so revisited corridors still surface their far-end frontier
+        exploration.visited_map.detect_on_visited_map: true  # MUST be true (false unsupported since the New Plan, spec §13); run frontier WFD on the persistent map so revisited corridors still surface their far-end frontier
         # MinPos multi-robot frontier allocation: rank-based peer-aware assignment so
         # several rovers de-duplicate their frontiers.
         #

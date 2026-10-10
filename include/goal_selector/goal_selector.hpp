@@ -125,6 +125,9 @@ struct SelectorParams {
   double expl_stuck_move_thresh_m{0.15};
   // Manual goal: release if the robot has not started moving within this long of the commit
   double manual_start_timeout_sec{15.0};
+  // Automatic return home when no frontier is left (exploration.return_home.enabled). false: the
+  // selector goes idle where it is instead. The /exploration/return_home trigger still works.
+  bool expl_return_home_enabled{true};
   // Persistent visited map
   double expl_visited_map_center_x{0.0};
   double expl_visited_map_center_y{0.0};
@@ -342,6 +345,9 @@ class GoalSelector {
   int64_t last_stamp_ns_{0};
 
   bool exploration_active_{false};
+  // Set when a frontier pursuit ended in REACHED: lets the next select tick return home if no
+  // frontier remains (exploration_active_ is cleared by REACHED).
+  bool frontier_reached_pending_{false};
   bool manual_goal_active_{false};
   bool home_return_requested_{false};
   bool manual_unreachable_{false};

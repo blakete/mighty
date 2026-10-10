@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <stdexcept>
 
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
@@ -216,6 +217,7 @@ void GoalSelectorNode::declareParameters() {
   this->declare_parameter("exploration.manager.stuck_timeout_sec", 5.0);
   this->declare_parameter("exploration.manager.stuck_move_thresh_m", 0.15);
   this->declare_parameter("manual_goal.start_timeout_sec", 15.0);
+  this->declare_parameter("exploration.return_home.enabled", true);
   this->declare_parameter("exploration.visited_map.center_x", 0.0);
   this->declare_parameter("exploration.visited_map.center_y", 0.0);
   this->declare_parameter("exploration.visited_map.width_m", 100.0);
@@ -283,6 +285,7 @@ void GoalSelectorNode::readParameters() {
   par_.expl_stuck_timeout_sec = d("exploration.manager.stuck_timeout_sec");
   par_.expl_stuck_move_thresh_m = d("exploration.manager.stuck_move_thresh_m");
   par_.manual_start_timeout_sec = d("manual_goal.start_timeout_sec");
+  par_.expl_return_home_enabled = b("exploration.return_home.enabled");
   par_.expl_visited_map_center_x = d("exploration.visited_map.center_x");
   par_.expl_visited_map_center_y = d("exploration.visited_map.center_y");
   par_.expl_visited_map_width_m = d("exploration.visited_map.width_m");
@@ -291,6 +294,14 @@ void GoalSelectorNode::readParameters() {
   par_.expl_publish_visited_map = b("exploration.visited_map.publish");
   par_.expl_fuse_persistent_into_local = b("exploration.visited_map.fuse_into_local");
   par_.expl_detect_on_visited_map = b("exploration.visited_map.detect_on_visited_map");
+  // detect_on_visited_map = false is unsupported since the New Plan (spec §13): the visited-map filter
+  // hides the unknown band, so no frontier would ever be found. Refuse to start instead of exploring nothing.
+  if (!par_.expl_detect_on_visited_map) {
+    RCLCPP_FATAL(this->get_logger(),
+                 "exploration.visited_map.detect_on_visited_map=false is not supported (no frontiers would "
+                 "be found with the unknown band); set it to true.");
+    throw std::runtime_error("exploration.visited_map.detect_on_visited_map=false is not supported");
+  }
   par_.expl_publish_markers = b("exploration.visualization.publish_markers");
   par_.expl_use_minpos = b("exploration.minpos.enabled");
   par_.expl_peer_timeout_sec = d("exploration.minpos.peer_timeout_sec");
@@ -312,6 +323,7 @@ void GoalSelectorNode::printParameters() const {
               par_.expl_unreachable_consec_thresh, par_.expl_stuck_timeout_sec,
               par_.expl_preempt_enabled, par_.expl_use_minpos);
   RCLCPP_INFO(lg, "Manual goal start_timeout: %.1f s", par_.manual_start_timeout_sec);
+  RCLCPP_INFO(lg, "Automatic return home: %s", par_.expl_return_home_enabled ? "on" : "off");
 }
 
 // ----------------------------------------------------------------------------

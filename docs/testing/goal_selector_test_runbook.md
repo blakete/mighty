@@ -79,6 +79,7 @@ displays above, monitor started BEFORE the action. All monitors print live event
   (or let the monitor do it: `--send-trigger-after 20`). For the latch re-arm: after arrival drive the robot away
   (manual goal) and publish the trigger again.
 - Command: `python3 hw_check_return_home.py --ns RR08 --home X Y --out /tmp/rh.json`
+- Automatic return home is OFF in `hw_goal_selector.yaml` for the 2026-10 tests (`exploration.return_home.enabled: false`, spec §11 item 23). The monitor reads it: with it off, running out of frontiers does not send the robot home, so trigger the return with `--send-trigger-after 20` or `ros2 topic pub --once /exploration/return_home std_msgs/msg/Empty "{}"`. A home goal published without a trigger is then a FAIL.
 - Pass: home term_goal within 5 s of the trigger and equal to home within 0.3 m; no other term_goal until
   arrival; REACHED with its stamp and robot within 0.8 m; no repeated home goal for 20 s after arrival; a second
   trigger yields a new home goal. Without a second trigger only the first half is judged (stated in the output).
