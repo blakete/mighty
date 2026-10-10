@@ -76,6 +76,7 @@ def generate_launch_description():
     map_size_y_arg = DeclareLaunchArgument('map_size_y', default_value='20.0')
     map_size_z_arg = DeclareLaunchArgument('map_size_z', default_value='6.0')
     odometry_topic_arg = DeclareLaunchArgument('odometry_topic', default_value='visual_slam/odom')
+    config_file_arg = DeclareLaunchArgument('config_file', default_value='', description='Override planner config yaml (bare filename in mighty/config, or absolute path; empty = auto-select mighty.yaml / mighty_ground_robot.yaml)')
     only_nodes_arg = DeclareLaunchArgument('only_nodes', default_value='',
         description='Comma-separated subset of this file\'s nodes to start; empty = all. '
                     'Keys are the nodes\' real ROS names: mighty_node, mpc, and on hardware '
@@ -116,8 +117,15 @@ def generate_launch_description():
         # The path to the urdf file - select based on robot type
         urdf_filename = 'p3at.urdf.xacro' if use_ground_robot else 'quadrotor.urdf.xacro'
         urdf_path=PathJoinSubstitution([FindPackageShare('mighty'), 'urdf', urdf_filename])
-        config_filename = 'mighty_ground_robot.yaml' if use_ground_robot else 'mighty.yaml'
-        parameters_path=os.path.join(get_package_share_directory('mighty'), 'config', config_filename)
+        # Planner config: explicit override wins (bare filename resolved against
+        # mighty/config, or an absolute path used as-is); else auto-select by robot type.
+        config_file_override = LaunchConfiguration('config_file').perform(context)
+        if config_file_override:
+            parameters_path = config_file_override if os.path.isabs(config_file_override) \
+                else os.path.join(get_package_share_directory('mighty'), 'config', config_file_override)
+        else:
+            config_filename = 'mighty_ground_robot.yaml' if use_ground_robot else 'mighty.yaml'
+            parameters_path = os.path.join(get_package_share_directory('mighty'), 'config', config_filename)
 
         # Get the dict of parameters from the yaml file
         with open(parameters_path, 'r') as file:
@@ -442,6 +450,7 @@ def generate_launch_description():
         formation_self_offset_arg,
         formation_neighbor_ids_arg,
         formation_neighbor_offsets_arg,
+        config_file_arg,
         only_nodes_arg,
         OpaqueFunction(function=launch_setup)
     ])
