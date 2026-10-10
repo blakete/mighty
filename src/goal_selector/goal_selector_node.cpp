@@ -78,6 +78,13 @@ GoalSelectorNode::GoalSelectorNode() : Node("goal_selector") {
 
   // Publishers
   pub_term_goal_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("term_goal", critical_qos);
+  // Visualisation, QoS as the planner's planning_map_2d / point_G_term.
+  pub_selector_map_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>(
+      "selector_map_2d", rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local());
+  rclcpp::QoS viz_qos(rclcpp::KeepLast(1));
+  viz_qos.best_effort().durability_volatile();
+  pub_selector_goal_ =
+      this->create_publisher<geometry_msgs::msg::PointStamped>("point_selector_goal", viz_qos);
   if (par_.expl_enabled) {
     pub_frontiers_ =
         this->create_publisher<visualization_msgs::msg::MarkerArray>("exploration/frontiers", 10);
@@ -98,14 +105,15 @@ GoalSelectorNode::GoalSelectorNode() : Node("goal_selector") {
       "planner_status", critical_qos,
       std::bind(&GoalSelectorNode::plannerStatusCallback, this, std::placeholders::_1), options);
 
+  // Always subscribed: with exploration off the grid is only stored for selector_map_2d.
+  sub_occ_2d_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
+      "occ_2d_topic", map_qos,
+      std::bind(&GoalSelectorNode::occ2DCallback, this, std::placeholders::_1), options);
+
   if (!par_.expl_enabled) {
     RCLCPP_INFO(this->get_logger(), "Exploration disabled: manual-goal path only");
     return;
   }
-
-  sub_occ_2d_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
-      "occ_2d_topic", map_qos,
-      std::bind(&GoalSelectorNode::occ2DCallback, this, std::placeholders::_1), options);
 
   // MinPos peer pose / visited-map sharing (global topics, all agents pub+sub)
   if (par_.expl_use_minpos) {
@@ -332,8 +340,11 @@ void GoalSelectorNode::stateCallback(const dynus_interfaces::msg::State::SharedP
 }
 
 void GoalSelectorNode::occ2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
+  last_occ_header_ = msg->header;
   apply(selector_->onOccGrid(this->now().seconds(), toGridInput(*msg)));  // markers first
+  maybePublishSelectorMap();
   // Then drive selection immediately (as occ2DCallback called exploreSelectCallback()).
+  // (A no-op with exploration off.)
   apply(selector_->onSelectTick(this->now().seconds()));
 }
 
@@ -402,6 +413,40 @@ void GoalSelectorNode::publishGoal(const GoalCommand& cmd) {
   g.pose.position.z = cmd.position.z();
   g.pose.orientation.w = 1.0;
   pub_term_goal_->publish(g);
+
+  geometry_msgs::msg::PointStamped p;
+  p.header.frame_id = g.header.frame_id;
+  p.header.stamp = this->now();
+  p.point = g.pose.position;
+  pub_selector_goal_->publish(p);
+}
+
+void GoalSelectorNode::maybePublishSelectorMap() {
+  // At most 1 Hz; the grid is only derived and converted when it is going to be published.
+  const double t = this->now().seconds();
+  if (t - last_selector_map_pub_t_ < 1.0) return;
+  SelectorMap sm;
+  if (!selector_->selectorMap(sm)) return;
+  last_selector_map_pub_t_ = t;
+
+  nav_msgs::msg::OccupancyGrid msg;
+  // Exploring: the visited map's geometry in the map frame; otherwise the raw grid's header.
+  if (par_.expl_enabled) {
+    msg.header.stamp = this->now();
+  } else {
+    msg.header = last_occ_header_;
+  }
+  if (par_.expl_enabled || msg.header.frame_id.empty()) msg.header.frame_id = par_.map_frame_id;
+  msg.info.map_load_time = msg.header.stamp;
+  msg.info.resolution = static_cast<float>(sm.resolution);
+  msg.info.width = static_cast<uint32_t>(sm.width);
+  msg.info.height = static_cast<uint32_t>(sm.height);
+  msg.info.origin.position.x = sm.origin_x;
+  msg.info.origin.position.y = sm.origin_y;
+  msg.info.origin.position.z = sm.origin_z;
+  msg.info.origin.orientation.w = 1.0;
+  msg.data = std::move(sm.data);
+  pub_selector_map_->publish(msg);
 }
 
 void GoalSelectorNode::publishExplorationCurrentGoal(const Eigen::Vector3d& p) {

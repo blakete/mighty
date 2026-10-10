@@ -187,6 +187,19 @@ struct LogMessage {
   std::string text;
 };
 
+/** @brief The selector's inflated map for visualisation (selector_map_2d), in the planner's
+ *  planning_map_2d encoding: 0 free, 100 obstacle, 99 occupied band (inflation_2d_m), 50 unknown
+ *  band (unknown_inflation_2d_m), -1 real unknown. Row-major, index = x + width * y. */
+struct SelectorMap {
+  int width{0};
+  int height{0};
+  double resolution{0.0};
+  double origin_x{0.0};
+  double origin_y{0.0};
+  double origin_z{0.0};
+  std::vector<int8_t> data;
+};
+
 struct Output {
   std::optional<GoalCommand> term_goal;               ///< publish on term_goal
   std::optional<Eigen::Vector3d> exploration_current_goal;  ///< publish on exploration/current_goal
@@ -216,7 +229,8 @@ class GoalSelector {
   /** @brief Raw occ_2d_topic grid: visited-map fusion/absorb, frontier detection, manager update,
    *  throttled visited-map publish / broadcast, markers, 
    *  (as occ2DCallback did) EXCEPT the selection pass: call onSelectTick() right after, so markers
-   *  are published before selection as in the planner. The grid is taken by value (fusion edits it). */
+   *  are published before selection as in the planner. The grid is taken by value (fusion edits it).
+   *  With exploration off it only stores the grid (for selectorMap()) and returns an empty Output. */
   Output onOccGrid(double now, GridInput grid);
 
   /** @brief Exploration select tick (exploreSelectCallback), called at expl_select_rate_hz. */
@@ -265,6 +279,10 @@ class GoalSelector {
   Pose pose() const { return pose_; }
   /** @brief origin.z of the latest raw occ_2d grid (visited-map plane), or expl_default_goal_z. */
   double occ2dOriginZ() const { return occ2d_origin_z_.value_or(params_.expl_default_goal_z); }
+  /** @brief Fill `m` with the derived (inflated) grid the selector uses for frontiers: the latest
+   *  frontier grid when exploring, else the same grid built from the latest raw occ_2d grid.
+   *  Computed on call (the node throttles it). False if no grid has been received. */
+  bool selectorMap(SelectorMap& m) const;
   /** @brief True if a raw occ_2d grid has been received. */
   bool hasOccGrid() const { return occ_grid_2d_ != nullptr; }
 
@@ -284,8 +302,11 @@ class GoalSelector {
   // frontier map (N1/N5): inflate occupied, mark the unknown band UNKNOWN. `passable` is filled
   // with the unknown-band cells (known free, outside the occupied band, not real unknown): the
   // detector walks through them for reachability but they are never frontier cells.
+  // `inflated_only` is filled with the occupied-band cells (occupied only through inflation); with
+  // `passable` it carries the band information the collapsed grid loses (selectorMap()).
   std::shared_ptr<const OccGrid2D> buildFrontierGrid(const OccGrid2D& detect_grid,
-                                                     std::vector<uint8_t>& passable) const;
+                                                     std::vector<uint8_t>& passable,
+                                                     std::vector<uint8_t>& inflated_only) const;
 
   // stuck watchdog shared by frontier and manual pursuit: tracks progress, true once when it fires
   bool stuckWatchdogFired(double now);
@@ -305,6 +326,7 @@ class GoalSelector {
   std::shared_ptr<const OccGrid2D> occ_grid_2d_;
   std::shared_ptr<const OccGrid2D> frontier_grid_;  // derived from the detect grid (N1/N5)
   std::vector<uint8_t> frontier_passable_;          // walkable-but-UNKNOWN mask for frontier_grid_
+  std::vector<uint8_t> frontier_inflated_only_;     // occupied-band mask for frontier_grid_
   std::optional<double> occ2d_origin_z_;
 
   Pose pose_;

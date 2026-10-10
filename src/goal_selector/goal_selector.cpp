@@ -148,10 +148,17 @@ void GoalSelector::maybePublishVisitedMap(double now, Output& out) {
 
 Output GoalSelector::onOccGrid(double now, GridInput grid) {
   Output out;
-  if (!params_.expl_enabled) return out;
 
   // Remember the mapper's ground-plane z so the visited map renders at the same height.
   occ2d_origin_z_ = grid.origin_z;
+
+  // Exploration off: only keep the latest grid (for selectorMap()); no fusion, detection or
+  // visited-map work.
+  if (!params_.expl_enabled) {
+    occ_grid_2d_ = OccGrid2D::fromTristate(grid.width, grid.height, grid.resolution, grid.origin_x,
+                                           grid.origin_y, grid.data);
+    return out;
+  }
 
   // Persistent-map fusion: cells that arrive UNKNOWN but were previously observed are restored
   // from the visited map before the grid is consumed (static environments only; parameter-gated).
@@ -195,7 +202,7 @@ Output GoalSelector::onOccGrid(double now, GridInput grid) {
   } else {
     detect_src = occ_grid_2d_;
   }
-  frontier_grid_ = buildFrontierGrid(*detect_src, frontier_passable_);
+  frontier_grid_ = buildFrontierGrid(*detect_src, frontier_passable_, frontier_inflated_only_);
   const auto& detect_grid = *frontier_grid_;
   const VisitedMap* visited_filter =
       params_.expl_detect_on_visited_map ? nullptr : visited_map_.get();
@@ -576,7 +583,8 @@ Output GoalSelector::onPlannerStatus(double now, PlannerStatus status, int64_t g
 // ----------------------------------------------------------------------------
 
 std::shared_ptr<const OccGrid2D> GoalSelector::buildFrontierGrid(const OccGrid2D& g,
-                                                                    std::vector<uint8_t>& passable) const {
+                                                                    std::vector<uint8_t>& passable,
+                                                                    std::vector<uint8_t>& inflated_only) const {
   const int W = g.width();
   const int H = g.height();
   const auto& occ = g.occupiedData();
@@ -598,7 +606,6 @@ std::shared_ptr<const OccGrid2D> GoalSelector::buildFrontierGrid(const OccGrid2D
                         unknown_band);
 
   // Occupied band: cells within inflation_2d_m of an occupied cell become occupied.
-  std::vector<uint8_t> inflated_only;
   map2d::inflate(values, inflated_only, W, H, g.resolution(),
                  std::max(0.0f, static_cast<float>(params_.inflation_2d_m)));
 
@@ -614,6 +621,39 @@ std::shared_ptr<const OccGrid2D> GoalSelector::buildFrontierGrid(const OccGrid2D
   }
 
   return OccGrid2D::fromTristate(W, H, g.resolution(), g.originX(), g.originY(), values);
+}
+
+bool GoalSelector::selectorMap(SelectorMap& m) const {
+  // Exploring: the grid the detector last used. Otherwise (or before the first detection cycle):
+  // the same derivation from the latest raw grid.
+  std::shared_ptr<const OccGrid2D> g = frontier_grid_;
+  const std::vector<uint8_t>* passable = &frontier_passable_;
+  const std::vector<uint8_t>* inflated_only = &frontier_inflated_only_;
+  std::vector<uint8_t> passable_raw, inflated_only_raw;
+  if (!g) {
+    if (!occ_grid_2d_) return false;
+    g = buildFrontierGrid(*occ_grid_2d_, passable_raw, inflated_only_raw);
+    passable = &passable_raw;
+    inflated_only = &inflated_only_raw;
+  }
+
+  const size_t n = static_cast<size_t>(g->width()) * g->height();
+  const auto& occ = g->occupiedData();
+  const auto& unk = g->unknownData();
+  m.width = g->width();
+  m.height = g->height();
+  m.resolution = g->resolution();
+  m.origin_x = g->originX();
+  m.origin_y = g->originY();
+  m.origin_z = occ2dOriginZ();
+  m.data.assign(n, 0);
+  for (size_t i = 0; i < n; ++i) {
+    if (occ[i])
+      m.data[i] = (*inflated_only)[i] ? 99 : 100;  // 99 = band, so RViz's costmap scheme shows it
+    else if (unk[i])
+      m.data[i] = (*passable)[i] ? 50 : -1;        // 50 = unknown band, -1 = real unknown
+  }
+  return true;
 }
 
 }  // namespace goal_selector
