@@ -98,12 +98,24 @@ Output GoalSelector::onState(double now, const Pose& pose) {
 
   // Manual-goal stuck watchdog (N4): runs here (not on the select tick) so it also works with
   // exploration disabled, where there is no select timer.
-  if (manual_goal_active_ && stuckWatchdogFired(now)) {
-    log(out, LogMessage::Level::kWarn,
-        fmt("Manual goal (stamp %lld) stuck (no motion > %.2f m for %.1f s) -> releasing it%s",
-            static_cast<long long>(current_.stamp_ns), params_.expl_stuck_move_thresh_m,
-            params_.expl_stuck_timeout_sec,
-            params_.expl_enabled ? ", resuming exploration" : ", idle"));
+  // Two checks: start timeout (never moved after commit), then the normal stuck watchdog.
+  const bool manual_start_timeout = manual_goal_active_ && manualStartTimeoutFired(now);
+  const bool manual_stuck = manual_goal_active_ && !manual_start_timeout && stuckWatchdogFired(now);
+  if (manual_start_timeout || manual_stuck) {
+    if (manual_start_timeout) {
+      log(out, LogMessage::Level::kWarn,
+          fmt("Manual goal (stamp %lld) start timeout (no motion > %.2f m within %.1f s of commit) "
+              "-> releasing it%s",
+              static_cast<long long>(current_.stamp_ns), params_.expl_stuck_move_thresh_m,
+              params_.manual_start_timeout_sec,
+              params_.expl_enabled ? ", resuming exploration" : ", idle"));
+    } else {
+      log(out, LogMessage::Level::kWarn,
+          fmt("Manual goal (stamp %lld) stuck (no motion > %.2f m for %.1f s) -> releasing it%s",
+              static_cast<long long>(current_.stamp_ns), params_.expl_stuck_move_thresh_m,
+              params_.expl_stuck_timeout_sec,
+              params_.expl_enabled ? ", resuming exploration" : ", idle"));
+    }
     manual_goal_active_ = false;
     manual_unreachable_ = false;
     unreachable_consec_count_ = 0;
@@ -263,6 +275,27 @@ void GoalSelector::armStuckWatchdog(double now) {
   explore_last_progress_xy_ = Eigen::Vector2d(pose_.x, pose_.y);
   explore_last_progress_t_ = now;
   explore_has_moved_ = false;
+}
+
+// Manual start check: armed at commit (from the commit pose); fires once if the robot has not moved
+// more than stuck_move_thresh_m within manual_goal.start_timeout_sec. Moving past the threshold
+// marks the pursuit as started (explore_has_moved_, clock restarted) and hands over to
+// stuckWatchdogFired(). start_timeout_sec <= 0 disables the check.
+bool GoalSelector::manualStartTimeoutFired(double now) {
+  if (explore_has_moved_) return false;
+  const Eigen::Vector2d xy(pose_.x, pose_.y);
+  if ((xy - explore_last_progress_xy_).norm() > params_.expl_stuck_move_thresh_m) {
+    explore_last_progress_xy_ = xy;
+    explore_last_progress_t_ = now;
+    explore_has_moved_ = true;
+    return false;
+  }
+  if (params_.manual_start_timeout_sec <= 0.0 || explore_last_progress_t_ < 0.0) return false;
+  if (now - explore_last_progress_t_ >= params_.manual_start_timeout_sec) {
+    explore_last_progress_t_ = -1.0;
+    return true;
+  }
+  return false;
 }
 
 bool GoalSelector::stuckWatchdogFired(double now) {
@@ -476,7 +509,7 @@ Output GoalSelector::onManualGoal(double now, double x, double y, double z) {
 
   commit(GoalKind::kManual, Eigen::Vector3d(x, y, z), now, out);
   manual_goal_active_ = true;
-  armStuckWatchdog(now);  // N4: manual goals share the frontier stuck watchdog
+  armStuckWatchdog(now);  // N4: start timer runs from the commit pose, then the stuck watchdog
   log(out, LogMessage::Level::kInfo,
       fmt("Manual goal (%.2f, %.2f, %.2f) committed (stamp %lld)", x, y, z,
           static_cast<long long>(current_.stamp_ns)));

@@ -215,6 +215,7 @@ void GoalSelectorNode::declareParameters() {
   this->declare_parameter("exploration.manager.preempt_min_commit_sec", 2.0);
   this->declare_parameter("exploration.manager.stuck_timeout_sec", 5.0);
   this->declare_parameter("exploration.manager.stuck_move_thresh_m", 0.15);
+  this->declare_parameter("manual_goal.start_timeout_sec", 15.0);
   this->declare_parameter("exploration.visited_map.center_x", 0.0);
   this->declare_parameter("exploration.visited_map.center_y", 0.0);
   this->declare_parameter("exploration.visited_map.width_m", 100.0);
@@ -281,6 +282,7 @@ void GoalSelectorNode::readParameters() {
   par_.expl_preempt_min_commit_sec = d("exploration.manager.preempt_min_commit_sec");
   par_.expl_stuck_timeout_sec = d("exploration.manager.stuck_timeout_sec");
   par_.expl_stuck_move_thresh_m = d("exploration.manager.stuck_move_thresh_m");
+  par_.manual_start_timeout_sec = d("manual_goal.start_timeout_sec");
   par_.expl_visited_map_center_x = d("exploration.visited_map.center_x");
   par_.expl_visited_map_center_y = d("exploration.visited_map.center_y");
   par_.expl_visited_map_width_m = d("exploration.visited_map.width_m");
@@ -309,6 +311,7 @@ void GoalSelectorNode::printParameters() const {
   RCLCPP_INFO(lg, "Unreachable thresh: %d  stuck_timeout: %.1f s  preempt: %d  minpos: %d",
               par_.expl_unreachable_consec_thresh, par_.expl_stuck_timeout_sec,
               par_.expl_preempt_enabled, par_.expl_use_minpos);
+  RCLCPP_INFO(lg, "Manual goal start_timeout: %.1f s", par_.manual_start_timeout_sec);
 }
 
 // ----------------------------------------------------------------------------

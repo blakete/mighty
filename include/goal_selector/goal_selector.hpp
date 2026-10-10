@@ -35,9 +35,11 @@
  *   onManualGoal() commits immediately. While a manual goal is active no frontier is selected,
  *   preempted or released by the watchdog / pursuit timeout. REACHED for its stamp releases it.
  *   FAILED statuses reaching the threshold only log a warning and raise manualGoalUnreachable();
- *   the goal is never released or resent for that. A manual goal does have the stuck watchdog (same
- *   parameters as for frontiers, armed after the robot first moves): on fire it is released, and
- *   exploration resumes if enabled (checked in onState(), so it also works with exploration off).
+ *   the goal is never released or resent for that. A manual goal has two release checks (both in
+ *   onState(), so they work with exploration off): a start timeout, timed from the commit pose, if
+ *   the robot has not moved more than stuck_move_thresh_m within manual_goal.start_timeout_sec
+ *   (<= 0 disables); and, once it has moved, the frontier stuck watchdog (stuck_timeout_sec /
+ *   stuck_move_thresh_m, unchanged). Either releases the goal; exploration resumes if enabled.
  *
  * Frontier map (New Plan N1/N5)
  *   Detection and every FrontierManager call run on a derived grid built from the detect grid
@@ -121,6 +123,8 @@ struct SelectorParams {
   // Stuck watchdog
   double expl_stuck_timeout_sec{5.0};
   double expl_stuck_move_thresh_m{0.15};
+  // Manual goal: release if the robot has not started moving within this long of the commit
+  double manual_start_timeout_sec{15.0};
   // Persistent visited map
   double expl_visited_map_center_x{0.0};
   double expl_visited_map_center_y{0.0};
@@ -311,6 +315,8 @@ class GoalSelector {
   // stuck watchdog shared by frontier and manual pursuit: tracks progress, true once when it fires
   bool stuckWatchdogFired(double now);
   void armStuckWatchdog(double now);
+  // manual goals only: true once if the robot never started moving within the start timeout
+  bool manualStartTimeoutFired(double now);
 
   // moved exploration logic
   void selectAndCommit(double now, Output& out);          // exploreSelectCallback
@@ -342,7 +348,8 @@ class GoalSelector {
   uint64_t current_explore_id_{0};
   int unreachable_consec_count_{0};
   double explore_committed_at_t_{-1.0};
-  // Stuck watchdog state (frontier or manual pursuit; the two are mutually exclusive).
+  // Stuck watchdog state (frontier or manual pursuit; the two are mutually exclusive). For a manual
+  // goal, explore_has_moved_ == false means the start-timeout check is still pending.
   Eigen::Vector2d explore_last_progress_xy_{Eigen::Vector2d::Zero()};
   double explore_last_progress_t_{-1.0};
   bool explore_has_moved_{false};
