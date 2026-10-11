@@ -110,6 +110,9 @@ if(BUILD_SIMULATION)
   target_link_libraries(imu_plugin ${GAZEBO_LIBRARIES})
   ament_target_dependencies(imu_plugin sensor_msgs gazebo_ros)
 
+  add_library(disable_physics SHARED src/sim/disable_physics.cpp)
+  target_link_libraries(disable_physics ${GAZEBO_LIBRARIES})
+
   add_executable(dynamic_forest_node src/sim/dynamic_forest_node.cpp)
   ament_target_dependencies(dynamic_forest_node
     rclcpp
@@ -152,6 +155,7 @@ if(BUILD_SIMULATION)
   install(TARGETS
     move_model
     imu_plugin
+    disable_physics
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib
     RUNTIME DESTINATION bin
