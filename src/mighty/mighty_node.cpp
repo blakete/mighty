@@ -720,6 +720,7 @@ void MIGHTY_NODE::declareParameters() {
 
   // 2D ground robot planning parameters
   this->declare_parameter("use_2d_planning", false);
+  this->declare_parameter("map_2d_only", false);
   this->declare_parameter("robot_height", 0.5);
   this->declare_parameter("obstacle_min_height", 0.3);
   this->declare_parameter("use_column_any_occupied", true);
@@ -1090,6 +1091,7 @@ void MIGHTY_NODE::setParameters() {
 
   // 2D ground robot planning parameters
   par_.use_2d_planning = this->get_parameter("use_2d_planning").as_bool();
+  par_.map_2d_only = this->get_parameter("map_2d_only").as_bool();
   par_.robot_height = this->get_parameter("robot_height").as_double();
   par_.obstacle_min_height = this->get_parameter("obstacle_min_height").as_double();
   par_.use_column_any_occupied = this->get_parameter("use_column_any_occupied").as_bool();
@@ -3285,7 +3287,8 @@ void MIGHTY_NODE::planningOcc2DCallback(const nav_msgs::msg::OccupancyGrid::Shar
   }
   planning_occ_grid_2d_ = OccGrid2D::fromOccupancyGrid(*msg);
   mighty_ptr_->setOccGrid2D(planning_occ_grid_2d_);
-  if (par_.use_hardware && par_.use_2d_planning && par_.vehicle_type == "ground_robot") {
+  if ((par_.use_hardware || par_.map_2d_only) && par_.use_2d_planning &&
+      par_.vehicle_type == "ground_robot") {
     mighty_ptr_->updateMap2DOnly();
   }
 }

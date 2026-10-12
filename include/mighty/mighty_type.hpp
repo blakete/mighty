@@ -279,6 +279,7 @@ struct parameters {
 
   // 2D ground robot planning parameters
   bool use_2d_planning{false};         // Master toggle for 2D ground planning
+  bool map_2d_only{false};             // Map from the 2D grids alone (no 3D mapper clouds); hardware always is
   double robot_height{0.5};            // [m] Robot height for obstacle column detection
   double obstacle_min_height{0.3};     // [m] Min height span in column to classify as obstacle
   bool use_column_any_occupied{true};  // [-] Any occupied voxel in column → 2D occupied
