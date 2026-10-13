@@ -11,6 +11,9 @@
 #
 #   pass2_laptop.sh <augmented bag dir> [rover env file, default rover.RR08.env]
 #
+# /$R/persistent_map/grid (the mapper's growing accumulated grid) is replayed too, for the goal
+# selector's exploration.persistent_map.* option. Bags without it just skip it.
+#
 # GOTCHA: MPC takes its pose from dlio/odom_node/pose (mpc.yaml pose_topic), NOT
 # from /state or TF — leave that topic out and every cmd_vel_auto is exactly 0.
 #
@@ -54,8 +57,8 @@ rclpy.init(); c=C(); t0=time.time()
 while time.time()-t0<int(os.environ['W']): rclpy.spin_once(c, timeout_sec=0.2)
 print('laptop outputs:', c.n); print('max |cmd_vel_auto| (lin+ang):', round(c.vmax,3)); print('distinct exploration goals:', len(c.goals))
 PY"
-T="/tf /tf_static /$R/dlio/odom_node/odom /$R/dlio/odom_node/pose /$R/occ_2d_topic /$R/esdf_2d_topic /$R/planning_occ_2d_topic"
-PAIRS="/tf=tf2_msgs/msg/TFMessage /tf_static=tf2_msgs/msg/TFMessage /$R/dlio/odom_node/odom=nav_msgs/msg/Odometry /$R/dlio/odom_node/pose=geometry_msgs/msg/PoseStamped /$R/occ_2d_topic=nav_msgs/msg/OccupancyGrid /$R/esdf_2d_topic=nav_msgs/msg/OccupancyGrid /$R/planning_occ_2d_topic=nav_msgs/msg/OccupancyGrid"
+T="/tf /tf_static /$R/dlio/odom_node/odom /$R/dlio/odom_node/pose /$R/occ_2d_topic /$R/esdf_2d_topic /$R/planning_occ_2d_topic /$R/persistent_map/grid"
+PAIRS="/tf=tf2_msgs/msg/TFMessage /tf_static=tf2_msgs/msg/TFMessage /$R/dlio/odom_node/odom=nav_msgs/msg/Odometry /$R/dlio/odom_node/pose=geometry_msgs/msg/PoseStamped /$R/occ_2d_topic=nav_msgs/msg/OccupancyGrid /$R/esdf_2d_topic=nav_msgs/msg/OccupancyGrid /$R/planning_occ_2d_topic=nav_msgs/msg/OccupancyGrid /$R/persistent_map/grid=nav_msgs/msg/OccupancyGrid"
 REMAP=""; for t in $T; do REMAP="$REMAP $t:=/replay$t"; done
 docker exec -d replay2 bash -c "source /opt/ros/humble/setup.bash && exec python3 /relay.py $PAIRS > /tmp/relay.log 2>&1"
 sleep 3
