@@ -9,7 +9,9 @@
  *
  * Topics (relative names resolve in the robot namespace, e.g. /RR04):
  *   sub  state                    dynus_interfaces/State         critical_qos (reliable, KeepLast(10), volatile)
- *   sub  occ_2d_topic             nav_msgs/OccupancyGrid         SensorDataQoS
+ *   sub  occ_2d_topic_name        nav_msgs/OccupancyGrid         SensorDataQoS (default occ_2d_topic)
+ *   sub  persistent_map_topic_name nav_msgs/OccupancyGrid        reliable transient_local (only with
+ *                                                                 exploration.persistent_map.enabled)
  *   sub  term_goal_rviz           geometry_msgs/PoseStamped      reliable, KeepLast(10), volatile
  *   sub  planner_status           goal_selector_msgs/PlannerStatus  critical_qos (reliable)
  *   pub  term_goal                geometry_msgs/PoseStamped      critical_qos (as the planner's subscription)
@@ -63,6 +65,7 @@ class GoalSelectorNode : public rclcpp::Node {
   // callbacks
   void stateCallback(const dynus_interfaces::msg::State::SharedPtr msg);
   void occ2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
+  void persistentMapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
   void manualGoalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
   void plannerStatusCallback(const goal_selector_msgs::msg::PlannerStatus::SharedPtr msg);
   void selectTimerCallback();
@@ -87,6 +90,9 @@ class GoalSelectorNode : public rclcpp::Node {
 
   rclcpp::Subscription<dynus_interfaces::msg::State>::SharedPtr sub_state_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr sub_occ_2d_;
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr sub_persistent_map_;
+  std::string occ_2d_topic_{"occ_2d_topic"};
+  std::string persistent_map_topic_{"persistent_map/grid"};
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_term_goal_rviz_;
   rclcpp::Subscription<goal_selector_msgs::msg::PlannerStatus>::SharedPtr sub_planner_status_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_peer_pose_;

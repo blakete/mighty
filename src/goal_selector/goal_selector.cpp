@@ -142,6 +142,7 @@ void GoalSelector::onPeerVisitedMap(const std::string& sender_id, const GridInpu
 // ----------------------------------------------------------------------------
 
 void GoalSelector::maybePublishVisitedMap(double now, Output& out) {
+  if (params_.expl_persistent_map_enabled) return;  // the VisitedMap is unused (never absorbed)
   // Publish the persistent occupancy map ~1 Hz (each publish copies the whole buffer).
   if (visited_map_ && params_.expl_publish_visited_map) {
     if (now - last_visited_publish_t_ >= 1.0) {
@@ -158,6 +159,54 @@ void GoalSelector::maybePublishVisitedMap(double now, Output& out) {
   }
 }
 
+void GoalSelector::detectAndUpdate(double now, const std::shared_ptr<const OccGrid2D>& detect_src,
+                                   const OccGrid2D& diag_src, Output& out) {
+  const Eigen::Vector3d robot_pose(pose_.x, pose_.y, pose_.yaw);
+  const Eigen::Vector2d robot_xy(pose_.x, pose_.y);
+
+  frontier_grid_ = buildFrontierGrid(*detect_src, frontier_passable_, frontier_inflated_only_);
+  const auto& detect_grid = *frontier_grid_;
+  const VisitedMap* visited_filter =
+      params_.expl_detect_on_visited_map ? nullptr : visited_map_.get();
+  auto clusters = frontier_detector_->detect(detect_grid, robot_xy, visited_filter, &frontier_passable_);
+
+  // (The ESDF clearance filter is dropped, D3. FrontierManager::update INVALIDATES a record whose
+  //  centroid falls in the occupied band only when the record is not re-matched this cycle; a
+  //  matched record keeps its centroid even in the band.)
+
+  const auto active_peers = params_.expl_use_minpos
+                                ? peer_tracker_.getActivePeers(now, params_.expl_peer_timeout_sec)
+                                : std::vector<PeerPose>{};
+  frontier_manager_->update(clusters, detect_grid, robot_pose, now, active_peers);
+
+  maybePublishVisitedMap(now, out);
+
+  // Throttled (2 s) diagnostic of the cell-state distribution.
+  if (now - last_diag_log_t_ >= 2.0) {
+    last_diag_log_t_ = now;
+    int n_unknown = 0, n_free = 0, n_occ = 0;
+    const auto& occ = diag_src.occupiedData();
+    const auto& unk = diag_src.unknownData();
+    for (size_t i = 0; i < occ.size(); ++i) {
+      if (unk[i])
+        ++n_unknown;
+      else if (occ[i])
+        ++n_occ;
+      else
+        ++n_free;
+    }
+    log(out, LogMessage::Level::kInfo,
+        fmt("[expl] grid %dx%d  free=%d  occ=%d  unknown=%d  fresh=%zu  db=%zu", diag_src.width(),
+            diag_src.height(), n_free, n_occ, n_unknown, clusters.size(),
+            frontier_manager_->size()));
+  }
+
+  // Markers reflect the state before selection (as the planner did). The caller then drives the
+  // selection immediately with onSelectTick(), so the robot starts moving as soon as the first
+  // frontier exists (the planner called exploreSelectCallback() at this point).
+  if (params_.expl_publish_markers) out.publish_markers = true;
+}
+
 Output GoalSelector::onOccGrid(double now, GridInput grid) {
   Output out;
 
@@ -167,6 +216,14 @@ Output GoalSelector::onOccGrid(double now, GridInput grid) {
   // Exploration off: only keep the latest grid (for selectorMap()); no fusion, detection or
   // visited-map work.
   if (!params_.expl_enabled) {
+    occ_grid_2d_ = OccGrid2D::fromTristate(grid.width, grid.height, grid.resolution, grid.origin_x,
+                                           grid.origin_y, grid.data);
+    return out;
+  }
+
+  // Persistent-map mode: detection is driven by onPersistentGrid. The live grid is only stored
+  // (selection gate, selectorMap fallback); the VisitedMap is not fused, absorbed or published.
+  if (params_.expl_persistent_map_enabled) {
     occ_grid_2d_ = OccGrid2D::fromTristate(grid.width, grid.height, grid.resolution, grid.origin_x,
                                            grid.origin_y, grid.data);
     return out;
@@ -198,9 +255,6 @@ Output GoalSelector::onOccGrid(double now, GridInput grid) {
 
   if (!(occ_grid_2d_ && frontier_detector_ && frontier_manager_ && state_initialized_)) return out;
 
-  const Eigen::Vector3d robot_pose(pose_.x, pose_.y, pose_.yaw);
-  const Eigen::Vector2d robot_xy(pose_.x, pose_.y);
-
   // Absorb the freshly observed cells into the visited bitmap *before* detection.
   if (visited_map_) visited_map_->absorb(*occ_grid_2d_);
 
@@ -214,47 +268,54 @@ Output GoalSelector::onOccGrid(double now, GridInput grid) {
   } else {
     detect_src = occ_grid_2d_;
   }
-  frontier_grid_ = buildFrontierGrid(*detect_src, frontier_passable_, frontier_inflated_only_);
-  const auto& detect_grid = *frontier_grid_;
-  const VisitedMap* visited_filter =
-      params_.expl_detect_on_visited_map ? nullptr : visited_map_.get();
-  auto clusters = frontier_detector_->detect(detect_grid, robot_xy, visited_filter, &frontier_passable_);
+  detectAndUpdate(now, detect_src, *occ_grid_2d_, out);
+  return out;
+}
 
-  // (The ESDF clearance filter is dropped, D3. FrontierManager::update INVALIDATES a record whose
-  //  centroid falls in the occupied band only when the record is not re-matched this cycle; a
-  //  matched record keeps its centroid even in the band.)
-
-  const auto active_peers = params_.expl_use_minpos
-                                ? peer_tracker_.getActivePeers(now, params_.expl_peer_timeout_sec)
-                                : std::vector<PeerPose>{};
-  frontier_manager_->update(clusters, detect_grid, robot_pose, now, active_peers);
-
-  maybePublishVisitedMap(now, out);
-
-  // Throttled (2 s) diagnostic of the cell-state distribution.
-  if (now - last_diag_log_t_ >= 2.0) {
-    last_diag_log_t_ = now;
-    int n_unknown = 0, n_free = 0, n_occ = 0;
-    const auto& occ = occ_grid_2d_->occupiedData();
-    const auto& unk = occ_grid_2d_->unknownData();
-    for (size_t i = 0; i < occ.size(); ++i) {
-      if (unk[i])
-        ++n_unknown;
-      else if (occ[i])
-        ++n_occ;
-      else
-        ++n_free;
-    }
-    log(out, LogMessage::Level::kInfo,
-        fmt("[expl] grid %dx%d  free=%d  occ=%d  unknown=%d  fresh=%zu  db=%zu", occ_grid_2d_->width(),
-            occ_grid_2d_->height(), n_free, n_occ, n_unknown, clusters.size(),
-            frontier_manager_->size()));
+Output GoalSelector::onPersistentGrid(double now, GridInput grid) {
+  Output out;
+  if (!params_.expl_enabled || !params_.expl_persistent_map_enabled) return out;
+  if (!(frontier_detector_ && frontier_manager_ && state_initialized_)) return out;
+  if (grid.width <= 0 || grid.height <= 0 || grid.resolution <= 0.0 ||
+      grid.data.size() < static_cast<size_t>(grid.width) * static_cast<size_t>(grid.height)) {
+    return out;
   }
 
-  // Markers reflect the state before selection (as the planner did). The caller then drives the
-  // selection immediately with onSelectTick(), so the robot starts moving as soon as the first
-  // frontier exists (the planner called exploreSelectCallback() at this point).
-  if (params_.expl_publish_markers) out.publish_markers = true;
+  // The grid grows and its origin moves, so nothing here assumes a fixed extent. Radius mode crops
+  // the raw cells before building the OccGrid2D, so the cost follows the window, not the map. The
+  // crop edge is not a frontier: the detector's border_margin_cells keeps it out.
+  if (!params_.expl_persistent_detect_whole_map) {
+    const double r = params_.expl_persistent_detect_radius_m;
+    const double res = grid.resolution;
+    const int x0 = std::max(0, static_cast<int>(std::floor((pose_.x - r - grid.origin_x) / res)));
+    const int y0 = std::max(0, static_cast<int>(std::floor((pose_.y - r - grid.origin_y) / res)));
+    const int x1 = std::min(grid.width - 1,
+                            static_cast<int>(std::floor((pose_.x + r - grid.origin_x) / res)));
+    const int y1 = std::min(grid.height - 1,
+                            static_cast<int>(std::floor((pose_.y + r - grid.origin_y) / res)));
+    if (x1 < x0 || y1 < y0) {
+      log(out, LogMessage::Level::kWarn,
+          fmt("[expl] persistent grid does not cover the robot at (%.2f, %.2f) -> no detection",
+              pose_.x, pose_.y));
+      return out;
+    }
+    const int w = x1 - x0 + 1;
+    const int h = y1 - y0 + 1;
+    std::vector<int8_t> window(static_cast<size_t>(w) * h);
+    for (int iy = 0; iy < h; ++iy) {
+      const auto src = grid.data.begin() + static_cast<size_t>(y0 + iy) * grid.width + x0;
+      std::copy(src, src + w, window.begin() + static_cast<size_t>(iy) * w);
+    }
+    grid.origin_x += x0 * res;
+    grid.origin_y += y0 * res;
+    grid.width = w;
+    grid.height = h;
+    grid.data = std::move(window);
+  }
+
+  auto src = OccGrid2D::fromTristate(grid.width, grid.height, grid.resolution, grid.origin_x,
+                                     grid.origin_y, grid.data);
+  detectAndUpdate(now, src, *src, out);
   return out;
 }
 

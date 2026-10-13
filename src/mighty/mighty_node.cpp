@@ -288,19 +288,19 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
     // profile, unlike QoSInitialization::from_rmw which only sets history+depth.
     auto map_qos = rclcpp::SensorDataQoS();
     sub_esdf_2d_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
-        "esdf_2d_topic", map_qos,
+        par_.esdf_2d_topic_name, map_qos,
         std::bind(&MIGHTY_NODE::esdfCallback, this, std::placeholders::_1), options_map);
-    RCLCPP_INFO(this->get_logger(), "ESDF: Subscribed to esdf_2d_topic (d_safe=%.1f m, weight=%.0f)",
-                par_.esdf_d_safe, par_.esdf_weight);
+    RCLCPP_INFO(this->get_logger(), "ESDF: Subscribed to %s (d_safe=%.1f m, weight=%.0f)",
+                par_.esdf_2d_topic_name.c_str(), par_.esdf_d_safe, par_.esdf_weight);
 
     // RAW 2D occupancy (free / unknown -1 / occupied) for HGP/A*. Same map QoS and
     // same mutually-exclusive map callback group as the ESDF. Relative topic -> resolves to
     // <ns>/occ_2d_topic (no namespace hard-coded).
     sub_occ_2d_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
-        "occ_2d_topic", map_qos,
+        par_.occ_2d_topic_name, map_qos,
         std::bind(&MIGHTY_NODE::occ2DCallback, this, std::placeholders::_1), options_map);
     RCLCPP_INFO(this->get_logger(),
-                "Occ2D: subscribed to raw occ_2d_topic for HGP/A*");
+                "Occ2D: subscribed to raw %s for HGP/A*", par_.occ_2d_topic_name.c_str());
   }
 }
 
@@ -559,6 +559,8 @@ void MIGHTY_NODE::declareParameters() {
 
   // ESDF-based obstacle avoidance (ground robot only)
   this->declare_parameter("use_esdf_cost", false);
+  this->declare_parameter("esdf_2d_topic_name", std::string("esdf_2d_topic"));
+  this->declare_parameter("occ_2d_topic_name", std::string("occ_2d_topic"));
   this->declare_parameter("esdf_weight", 1e+3);
   this->declare_parameter("esdf_d_safe", 1.0);
   this->declare_parameter("esdf_truncation_distance", 10);
@@ -867,6 +869,8 @@ void MIGHTY_NODE::setParameters() {
   par_.ground_slab_margin = this->get_parameter("ground_slab_margin").as_double();
 
   par_.use_esdf_cost = this->get_parameter("use_esdf_cost").as_bool();
+  par_.esdf_2d_topic_name = this->get_parameter("esdf_2d_topic_name").as_string();
+  par_.occ_2d_topic_name = this->get_parameter("occ_2d_topic_name").as_string();
   par_.esdf_weight = this->get_parameter("esdf_weight").as_double();
   par_.esdf_d_safe = this->get_parameter("esdf_d_safe").as_double();
   par_.esdf_truncation_distance = this->get_parameter("esdf_truncation_distance").as_int();

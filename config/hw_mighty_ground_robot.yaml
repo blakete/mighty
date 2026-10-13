@@ -239,8 +239,8 @@ mighty_node:
         # --- Map Internals ---
         map_buffer: 0.0                                 # [m] Buffer for goal & A point
         center_shift_factor: 0.5                        # [-] Map center shift factor
-        min_wdx: 30.0                                   # [m] Min map window width
-        min_wdy: 30.0                                   # [m] Min map window depth
+        min_wdx: 15.0 #30.0                                   # [m] Min map window width
+        min_wdy: 15.0 #30.0                                   # [m] Min map window depth
         min_wdz: 0.10                                   # [m] Match map res — 2D ground-robot mode only needs a single z-layer
 
         # --- Communication Delay ---
@@ -284,6 +284,8 @@ mighty_node:
 
         # --- ESDF-Based Obstacle Avoidance (ground robot only) ---
         use_esdf_cost: true                             # [-] Enable ESDF distance cost in L-BFGS
+        esdf_2d_topic_name: "esdf_2d_topic"             # [-] ESDF grid topic, relative to the robot namespace
+        occ_2d_topic_name: "occ_2d_topic"               # [-] raw 2D occupancy grid topic (planner A*, and the goal selector via the layered params), relative to the namespace
         esdf_weight: 5.0e+4                             # [-] ESDF cost weight in objective
         esdf_d_safe: 0.7                                # [m] Safety distance threshold
         esdf_truncation_distance: 15                    # [voxels] Must match mapper's distance_grid_2d.truncation_distance

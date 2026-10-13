@@ -108,12 +108,27 @@ GoalSelectorNode::GoalSelectorNode() : Node("goal_selector") {
 
   // Always subscribed: with exploration off the grid is only stored for selector_map_2d.
   sub_occ_2d_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
-      "occ_2d_topic", map_qos,
+      occ_2d_topic_, map_qos,
       std::bind(&GoalSelectorNode::occ2DCallback, this, std::placeholders::_1), options);
 
   if (!par_.expl_enabled) {
     RCLCPP_INFO(this->get_logger(), "Exploration disabled: manual-goal path only");
     return;
+  }
+
+  if (par_.expl_persistent_map_enabled) {
+    // The mapper publishes the persistent grid reliable + transient_local (depth 1): match it so a
+    // late-starting selector gets the latest grid at once.
+    rclcpp::QoS persistent_qos(rclcpp::KeepLast(1));
+    persistent_qos.reliable().transient_local();
+    sub_persistent_map_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
+        persistent_map_topic_, persistent_qos,
+        std::bind(&GoalSelectorNode::persistentMapCallback, this, std::placeholders::_1), options);
+    const std::string scope = par_.expl_persistent_detect_whole_map
+                                  ? "whole map"
+                                  : "radius " + std::to_string(par_.expl_persistent_detect_radius_m) + " m";
+    RCLCPP_INFO(this->get_logger(), "Persistent map: detecting frontiers on '%s' (%s)",
+                persistent_map_topic_.c_str(), scope.c_str());
   }
 
   // MinPos peer pose / visited-map sharing (global topics, all agents pub+sub)
@@ -226,6 +241,11 @@ void GoalSelectorNode::declareParameters() {
   this->declare_parameter("exploration.visited_map.publish", true);
   this->declare_parameter("exploration.visited_map.fuse_into_local", true);
   this->declare_parameter("exploration.visited_map.detect_on_visited_map", true);
+  this->declare_parameter("exploration.persistent_map.enabled", false);
+  this->declare_parameter("exploration.persistent_map.detect_whole_map", false);
+  this->declare_parameter("exploration.persistent_map.detect_radius_m", 30.0);
+  this->declare_parameter("occ_2d_topic_name", std::string("occ_2d_topic"));
+  this->declare_parameter("persistent_map_topic_name", std::string("persistent_map/grid"));
   this->declare_parameter("exploration.visualization.publish_markers", true);
   this->declare_parameter("exploration.minpos.enabled", false);
   this->declare_parameter("exploration.minpos.peer_timeout_sec", 5.0);
@@ -302,6 +322,17 @@ void GoalSelectorNode::readParameters() {
                  "be found with the unknown band); set it to true.");
     throw std::runtime_error("exploration.visited_map.detect_on_visited_map=false is not supported");
   }
+  par_.expl_persistent_map_enabled = b("exploration.persistent_map.enabled");
+  par_.expl_persistent_detect_whole_map = b("exploration.persistent_map.detect_whole_map");
+  par_.expl_persistent_detect_radius_m = d("exploration.persistent_map.detect_radius_m");
+  if (par_.expl_persistent_map_enabled && !par_.expl_persistent_detect_whole_map &&
+      par_.expl_persistent_detect_radius_m <= 0.0) {
+    RCLCPP_FATAL(this->get_logger(),
+                 "exploration.persistent_map.detect_radius_m must be > 0 unless detect_whole_map is true");
+    throw std::runtime_error("exploration.persistent_map.detect_radius_m must be > 0");
+  }
+  occ_2d_topic_ = this->get_parameter("occ_2d_topic_name").as_string();
+  persistent_map_topic_ = this->get_parameter("persistent_map_topic_name").as_string();
   par_.expl_publish_markers = b("exploration.visualization.publish_markers");
   par_.expl_use_minpos = b("exploration.minpos.enabled");
   par_.expl_peer_timeout_sec = d("exploration.minpos.peer_timeout_sec");
@@ -360,6 +391,12 @@ void GoalSelectorNode::occ2DCallback(const nav_msgs::msg::OccupancyGrid::SharedP
   maybePublishSelectorMap();
   // Then drive selection immediately (as occ2DCallback called exploreSelectCallback()).
   // (A no-op with exploration off.)
+  apply(selector_->onSelectTick(this->now().seconds()));
+}
+
+void GoalSelectorNode::persistentMapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
+  apply(selector_->onPersistentGrid(this->now().seconds(), toGridInput(*msg)));  // markers first
+  maybePublishSelectorMap();
   apply(selector_->onSelectTick(this->now().seconds()));
 }
 

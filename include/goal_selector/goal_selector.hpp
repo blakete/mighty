@@ -137,6 +137,12 @@ struct SelectorParams {
   bool   expl_publish_visited_map{true};
   bool   expl_fuse_persistent_into_local{true};
   bool   expl_detect_on_visited_map{true};
+  // Persistent-map detection source (the mapper's growing accumulated grid). When enabled, frontier
+  // detection runs on each persistent grid (onPersistentGrid) instead of on the VisitedMap /
+  // sliding occ_2d, and the VisitedMap is neither fused, absorbed nor published.
+  bool   expl_persistent_map_enabled{false};
+  bool   expl_persistent_detect_whole_map{false};  ///< true: detect over the whole grid; false: radius
+  double expl_persistent_detect_radius_m{30.0};    ///< [m] half-side of the square window around the robot
   // MinPos
   bool   expl_use_minpos{false};
   double expl_peer_timeout_sec{5.0};
@@ -240,6 +246,12 @@ class GoalSelector {
    *  With exploration off it only stores the grid (for selectorMap()) and returns an empty Output. */
   Output onOccGrid(double now, GridInput grid);
 
+  /** @brief Persistent (accumulated, growing) grid. Only used with expl_persistent_map_enabled: runs
+   *  frontier detection and the manager update on it (whole grid, or the square window of half-side
+   *  expl_persistent_detect_radius_m around the robot), then the same flags as onOccGrid. Call
+   *  onSelectTick() right after. Ignored if the option is off, exploration is off or no state yet. */
+  Output onPersistentGrid(double now, GridInput grid);
+
   /** @brief Exploration select tick (exploreSelectCallback), called at expl_select_rate_hz. */
   Output onSelectTick(double now);
 
@@ -324,6 +336,10 @@ class GoalSelector {
   // moved exploration logic
   void selectAndCommit(double now, Output& out);          // exploreSelectCallback
   void maybePublishVisitedMap(double now, Output& out);
+  // Shared tail of onOccGrid / onPersistentGrid: frontier grid, detection, manager update, diag log,
+  // marker flag. `diag_src` is the grid whose cell counts are logged.
+  void detectAndUpdate(double now, const std::shared_ptr<const OccGrid2D>& detect_src,
+                       const OccGrid2D& diag_src, Output& out);
 
   SelectorParams params_;
 

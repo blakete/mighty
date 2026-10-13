@@ -22,13 +22,22 @@ goal_selector:
         exploration.return_home.enabled: false          # [-] true: when no frontier is left, drive back to the start pose (latched until arrival). false: go idle where the robot is; exploration resumes when a new frontier appears. The /exploration/return_home topic still works either way. Off for the 2026-10 hardware tests (return-home behaviour to be revisited, spec §13)
         # Hardware default: OFF. Flip exploration.enabled to true to autonomously
         # drive to frontiers detected on occ_2d_topic. See plan: snazzy-moseying-donut.md
-        exploration.enabled: false
+        exploration.enabled: true
         exploration.select_rate_hz: 1.0
         exploration.default_goal_z: 0.0
         exploration.detector.cluster_min_cells: 6
         exploration.detector.border_margin_cells: 1
         exploration.detector.obstacle_clearance_cells: 0   # occupied band (inflation_2d_m) already keeps frontiers clear of obstacles
         exploration.detector.robot_snap_radius_m: 0.5
+        # --- Persistent-map frontier detection ---
+        # true: detect frontiers on the mapper's growing accumulated grid (persistent_map_topic_name)
+        # instead of the selector's own VisitedMap / the sliding occ_2d window. The VisitedMap is then
+        # not fused, absorbed or published. The live occ_2d_topic_name grid is still needed (selection
+        # waits for it). Detection runs when a persistent grid arrives (~0.5 Hz on RR04), not per occ_2d.
+        exploration.persistent_map.enabled: true
+        persistent_map_topic_name: "persistent_map/grid" # [-] relative to the robot namespace; reliable + transient_local
+        exploration.persistent_map.detect_whole_map: true # [-] true: detect over the whole grid (cost grows with the map). false: only the square window below
+        exploration.persistent_map.detect_radius_m: 30.0   # [m] half-side of the window around the robot (used when detect_whole_map is false; must be > 0)
         exploration.bounds.enabled: false
         # exploration.bounds.min_x: 3.0
         # exploration.bounds.max_x:  18.0

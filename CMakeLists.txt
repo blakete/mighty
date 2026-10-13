@@ -302,6 +302,11 @@ if(BUILD_TESTING)
     src/test/test_goal_selector_contract.cpp)
   target_link_libraries(test_goal_selector_contract goal_selector_core)
   ament_target_dependencies(test_goal_selector_contract Eigen3 nav_msgs)
+
+  ament_add_gtest(test_goal_selector_persistent_map
+    src/test/test_goal_selector_persistent_map.cpp)
+  target_link_libraries(test_goal_selector_persistent_map goal_selector_core)
+  ament_target_dependencies(test_goal_selector_persistent_map Eigen3 nav_msgs)
 endif()
 
 ament_package()

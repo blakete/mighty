@@ -288,6 +288,8 @@ struct parameters {
   double ground_slab_margin{0.3};  // [m] z margin for floor/ceiling virtual obstacles in corridors
 
   // ESDF-based obstacle avoidance (ground robot only)
+  std::string esdf_2d_topic_name{"esdf_2d_topic"};  // [-] ESDF grid topic (relative to the namespace)
+  std::string occ_2d_topic_name{"occ_2d_topic"};    // [-] raw 2D occupancy grid topic (relative)
   bool use_esdf_cost{false};            // [-] Enable ESDF distance cost in L-BFGS
   double esdf_weight{1e+3};            // [-] ESDF cost weight in objective
   double esdf_d_safe{1.0};             // [m] Safety distance threshold
