@@ -131,6 +131,20 @@ GoalSelectorNode::GoalSelectorNode() : Node("goal_selector") {
                 persistent_map_topic_.c_str(), scope.c_str());
   }
 
+  // Geofence no-go grid (published only while the fence is enforcing): frontiers in a no-go zone
+  // are invalidated before ranking. Its frame is the robot's odom; TF gives map -> odom.
+  if (par_.expl_geofence_enabled) {
+    tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
+    rclcpp::QoS fence_qos(rclcpp::KeepLast(1));
+    fence_qos.reliable().durability_volatile();
+    sub_fence_grid_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
+        fence_grid_topic_, fence_qos,
+        std::bind(&GoalSelectorNode::fenceGridCallback, this, std::placeholders::_1), options);
+    RCLCPP_INFO(this->get_logger(), "Geofence: dropping frontiers in no-go cells of '%s'",
+                fence_grid_topic_.c_str());
+  }
+
   // MinPos peer pose / visited-map sharing (global topics, all agents pub+sub)
   if (par_.expl_use_minpos) {
     auto peer_qos = rclcpp::QoS(10).reliable();
@@ -226,6 +240,10 @@ void GoalSelectorNode::declareParameters() {
   this->declare_parameter("exploration.manager.pursuit_timeout_min_sec", 10.0);
   this->declare_parameter("exploration.manager.invalidation_keep_out_radius_m", 1.5);
   this->declare_parameter("exploration.manager.invalidation_cooldown_sec", 30.0);
+  this->declare_parameter("exploration.geofence.enabled", true);
+  this->declare_parameter("exploration.geofence.topic_name", std::string("geofence/occ_2d"));
+  this->declare_parameter("exploration.geofence.margin_m", 0.3);
+  this->declare_parameter("exploration.geofence.max_age_sec", 1.0);
   this->declare_parameter("exploration.manager.preempt_enabled", false);
   this->declare_parameter("exploration.manager.preempt_margin", 2.0);
   this->declare_parameter("exploration.manager.preempt_min_commit_sec", 2.0);
@@ -299,6 +317,10 @@ void GoalSelectorNode::readParameters() {
   par_.expl_pursuit_timeout_min_sec = d("exploration.manager.pursuit_timeout_min_sec");
   par_.expl_invalidation_keep_out_radius_m = d("exploration.manager.invalidation_keep_out_radius_m");
   par_.expl_invalidation_cooldown_sec = d("exploration.manager.invalidation_cooldown_sec");
+  par_.expl_geofence_enabled = b("exploration.geofence.enabled");
+  fence_grid_topic_ = this->get_parameter("exploration.geofence.topic_name").as_string();
+  par_.expl_geofence_margin_m = d("exploration.geofence.margin_m");
+  par_.expl_geofence_max_age_sec = d("exploration.geofence.max_age_sec");
   par_.expl_preempt_enabled = b("exploration.manager.preempt_enabled");
   par_.expl_preempt_margin = d("exploration.manager.preempt_margin");
   par_.expl_preempt_min_commit_sec = d("exploration.manager.preempt_min_commit_sec");
@@ -355,6 +377,9 @@ void GoalSelectorNode::printParameters() const {
               par_.expl_preempt_enabled, par_.expl_use_minpos);
   RCLCPP_INFO(lg, "Manual goal start_timeout: %.1f s", par_.manual_start_timeout_sec);
   RCLCPP_INFO(lg, "Automatic return home: %s", par_.expl_return_home_enabled ? "on" : "off");
+  RCLCPP_INFO(lg, "Geofence no-go filter: %s (topic %s, margin %.2f m, max age %.1f s)",
+              par_.expl_geofence_enabled ? "on" : "off", fence_grid_topic_.c_str(),
+              par_.expl_geofence_margin_m, par_.expl_geofence_max_age_sec);
 }
 
 // ----------------------------------------------------------------------------
@@ -392,6 +417,30 @@ void GoalSelectorNode::occ2DCallback(const nav_msgs::msg::OccupancyGrid::SharedP
   // Then drive selection immediately (as occ2DCallback called exploreSelectCallback()).
   // (A no-op with exploration off.)
   apply(selector_->onSelectTick(this->now().seconds()));
+}
+
+void GoalSelectorNode::fenceGridCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
+  // map_frame_id -> grid frame, latest available. On failure skip this grid: the core's copy
+  // then goes stale and the filter fails open (the planner's grid still holds the fence).
+  Transform2D t;
+  if (msg->header.frame_id != par_.map_frame_id) {
+    geometry_msgs::msg::TransformStamped tf;
+    try {
+      tf = tf_buffer_->lookupTransform(msg->header.frame_id, par_.map_frame_id, tf2::TimePointZero);
+    } catch (const tf2::TransformException& e) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 10000,
+                           "Geofence: no transform %s -> %s (%s); not filtering frontiers",
+                           par_.map_frame_id.c_str(), msg->header.frame_id.c_str(), e.what());
+      return;
+    }
+    const auto& q = tf.transform.rotation;
+    double roll, pitch, yaw;
+    tf2::Matrix3x3(tf2::Quaternion(q.x, q.y, q.z, q.w)).getRPY(roll, pitch, yaw);
+    t.x = tf.transform.translation.x;
+    t.y = tf.transform.translation.y;
+    t.yaw = yaw;
+  }
+  selector_->onFenceGrid(this->now().seconds(), toGridInput(*msg), t);
 }
 
 void GoalSelectorNode::persistentMapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {

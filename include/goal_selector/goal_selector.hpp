@@ -116,6 +116,13 @@ struct SelectorParams {
   double expl_pursuit_timeout_min_sec{10.0};
   double expl_invalidation_keep_out_radius_m{1.5};
   double expl_invalidation_cooldown_sec{30.0};
+  // Geofence no-go filter (exploration.geofence.*): a frontier whose centroid is within
+  // expl_geofence_margin_m of a no-go cell of the geofence grid (onFenceGrid) is INVALIDATED.
+  // Fail-open: no grid, a grid older than expl_geofence_max_age_sec, or a centroid outside the
+  // grid's window -> no filtering.
+  bool   expl_geofence_enabled{true};
+  double expl_geofence_margin_m{0.3};
+  double expl_geofence_max_age_sec{1.0};
   // Preemption
   bool   expl_preempt_enabled{false};
   double expl_preempt_margin{2.0};
@@ -177,6 +184,17 @@ struct GridInput {
   double origin_z{0.0};
   std::vector<int8_t> data;  ///< row-major, index = x + width * y
 };
+
+/** @brief 2D rigid transform taking a point in map_frame_id into another frame:
+ *  p_out = R(yaw) * p + (x, y). */
+struct Transform2D {
+  double x{0.0}, y{0.0}, yaw{0.0};
+};
+
+/** @brief True if any cell of `g` within margin_m of (x, y) (disk, cell-centre distance) is
+ *  occupied (>= 50; the geofence publishes 100 for no-go). Floor cell convention. Cells outside
+ *  the grid's window and unknown (-1) cells give no opinion. (x, y) in the grid's frame. */
+bool nogoNear(const GridInput& g, double x, double y, double margin_m);
 
 /** @brief Mirrors goal_selector_msgs/PlannerStatus constants. */
 enum class PlannerStatus : uint8_t { kSuccess = 0, kFailed = 1, kPartial = 2, kReached = 3, kSkipped = 4 };
@@ -254,6 +272,12 @@ class GoalSelector {
 
   /** @brief Exploration select tick (exploreSelectCallback), called at expl_select_rate_hz. */
   Output onSelectTick(double now);
+
+  /** @brief Geofence no-go grid (e.g. /<R>/geofence/occ_2d, in the robot's odom frame) and the
+   *  transform taking map_frame_id points into that grid's frame (map -> fence, from TF). Stored
+   *  and applied at the next detection pass (onOccGrid / onPersistentGrid); see the
+   *  expl_geofence_* params. */
+  void onFenceGrid(double now, GridInput grid, const Transform2D& map_to_fence);
 
   /** @brief One planner_status message. goal_stamp_ns is the message's goal_stamp in nanoseconds. */
   Output onPlannerStatus(double now, PlannerStatus status, int64_t goal_stamp_ns);
@@ -349,6 +373,11 @@ class GoalSelector {
   PeerTracker peer_tracker_;
 
   std::shared_ptr<const OccGrid2D> occ_grid_2d_;
+  // Latest geofence no-go grid (onFenceGrid), its map -> fence transform and arrival time.
+  std::optional<GridInput> fence_grid_;
+  Transform2D map_to_fence_;
+  double fence_t_{-1.0};
+  void invalidateNogoFrontiers(double now, Output& out);
   std::shared_ptr<const OccGrid2D> frontier_grid_;  // derived from the detect grid (N1/N5)
   std::vector<uint8_t> frontier_passable_;          // walkable-but-UNKNOWN mask for frontier_grid_
   std::vector<uint8_t> frontier_inflated_only_;     // occupied-band mask for frontier_grid_

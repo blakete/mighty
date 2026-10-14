@@ -12,6 +12,8 @@
  *   sub  occ_2d_topic_name        nav_msgs/OccupancyGrid         SensorDataQoS (default occ_2d_topic)
  *   sub  persistent_map_topic_name nav_msgs/OccupancyGrid        reliable transient_local (only with
  *                                                                 exploration.persistent_map.enabled)
+ *   sub  exploration.geofence.topic_name  nav_msgs/OccupancyGrid  reliable, KeepLast(1) (only with
+ *                                 exploration.enabled + exploration.geofence.enabled; default geofence/occ_2d)
  *   sub  term_goal_rviz           geometry_msgs/PoseStamped      reliable, KeepLast(10), volatile
  *   sub  planner_status           goal_selector_msgs/PlannerStatus  critical_qos (reliable)
  *   pub  term_goal                geometry_msgs/PoseStamped      critical_qos (as the planner's subscription)
@@ -45,6 +47,8 @@
 #include <goal_selector_msgs/msg/planner_status.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 #include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/header.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
@@ -66,6 +70,7 @@ class GoalSelectorNode : public rclcpp::Node {
   void stateCallback(const dynus_interfaces::msg::State::SharedPtr msg);
   void occ2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
   void persistentMapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
+  void fenceGridCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
   void manualGoalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
   void plannerStatusCallback(const goal_selector_msgs::msg::PlannerStatus::SharedPtr msg);
   void selectTimerCallback();
@@ -91,8 +96,13 @@ class GoalSelectorNode : public rclcpp::Node {
   rclcpp::Subscription<dynus_interfaces::msg::State>::SharedPtr sub_state_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr sub_occ_2d_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr sub_persistent_map_;
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr sub_fence_grid_;
   std::string occ_2d_topic_{"occ_2d_topic"};
   std::string persistent_map_topic_{"persistent_map/grid"};
+  std::string fence_grid_topic_{"geofence/occ_2d"};
+  // map_frame_id -> fence grid frame (the robot's odom; map->odom moves once SLAM corrects it).
+  std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_term_goal_rviz_;
   rclcpp::Subscription<goal_selector_msgs::msg::PlannerStatus>::SharedPtr sub_planner_status_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_peer_pose_;

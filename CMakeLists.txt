@@ -48,6 +48,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_eigen REQUIRED)
 find_package(std_srvs REQUIRED)
@@ -98,7 +99,7 @@ set_target_properties(goal_selector_core PROPERTIES POSITION_INDEPENDENT_CODE ON
 
 add_executable(goal_selector src/goal_selector/goal_selector_node.cpp)
 target_link_libraries(goal_selector goal_selector_core)
-ament_target_dependencies(goal_selector rclcpp dynus_interfaces goal_selector_msgs geometry_msgs nav_msgs std_msgs visualization_msgs tf2 Eigen3)
+ament_target_dependencies(goal_selector rclcpp dynus_interfaces goal_selector_msgs geometry_msgs nav_msgs std_msgs visualization_msgs tf2 tf2_ros Eigen3)
 
 # Add odom to state converter
 add_executable(convert_odom_to_state src/mighty/convert_odom_to_state.cpp)
@@ -319,6 +320,11 @@ if(BUILD_TESTING)
     src/test/test_goal_selector_persistent_map.cpp)
   target_link_libraries(test_goal_selector_persistent_map goal_selector_core)
   ament_target_dependencies(test_goal_selector_persistent_map Eigen3 nav_msgs)
+
+  ament_add_gtest(test_goal_selector_geofence
+    src/test/test_goal_selector_geofence.cpp)
+  target_link_libraries(test_goal_selector_geofence goal_selector_core)
+  ament_target_dependencies(test_goal_selector_geofence Eigen3 nav_msgs)
 endif()
 
 ament_package()

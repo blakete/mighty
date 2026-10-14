@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <utility>
 
 namespace goal_selector {
 
@@ -19,6 +20,26 @@ std::string fmt(const char* f, ...) {
 }
 
 }  // namespace
+
+bool nogoNear(const GridInput& g, double x, double y, double margin_m) {
+  if (g.width <= 0 || g.height <= 0 || g.resolution <= 0.0 ||
+      g.data.size() < static_cast<size_t>(g.width) * static_cast<size_t>(g.height))
+    return false;
+  const int cx = static_cast<int>(std::floor((x - g.origin_x) / g.resolution));
+  const int cy = static_cast<int>(std::floor((y - g.origin_y) / g.resolution));
+  const int r = std::max(0, static_cast<int>(std::ceil(margin_m / g.resolution)));
+  const int r2 = r * r;
+  for (int dy = -r; dy <= r; ++dy) {
+    for (int dx = -r; dx <= r; ++dx) {
+      if (dx * dx + dy * dy > r2) continue;
+      const int ix = cx + dx;
+      const int iy = cy + dy;
+      if (ix < 0 || ix >= g.width || iy < 0 || iy >= g.height) continue;  // outside: no opinion
+      if (g.data[static_cast<size_t>(ix) + static_cast<size_t>(g.width) * iy] >= 50) return true;
+    }
+  }
+  return false;
+}
 
 // ----------------------------------------------------------------------------
 
@@ -178,6 +199,7 @@ void GoalSelector::detectAndUpdate(double now, const std::shared_ptr<const OccGr
                                 ? peer_tracker_.getActivePeers(now, params_.expl_peer_timeout_sec)
                                 : std::vector<PeerPose>{};
   frontier_manager_->update(clusters, detect_grid, robot_pose, now, active_peers);
+  invalidateNogoFrontiers(now, out);
 
   maybePublishVisitedMap(now, out);
 
@@ -322,6 +344,37 @@ Output GoalSelector::onPersistentGrid(double now, GridInput grid) {
 // ----------------------------------------------------------------------------
 // Select tick (exploreSelectCallback)
 // ----------------------------------------------------------------------------
+
+void GoalSelector::onFenceGrid(double now, GridInput grid, const Transform2D& map_to_fence) {
+  fence_grid_ = std::move(grid);
+  map_to_fence_ = map_to_fence;
+  fence_t_ = now;
+}
+
+// Frontiers in a geofence no-go zone can never be reached (the planner's grid holds the same
+// cells), so drop them before ranking instead of letting FAILED statuses invalidate them one by
+// one. Runs after every manager update, so a re-detected no-go frontier is dropped again.
+void GoalSelector::invalidateNogoFrontiers(double now, Output& out) {
+  if (!params_.expl_geofence_enabled || !fence_grid_ || !frontier_manager_) return;
+  if (now - fence_t_ > params_.expl_geofence_max_age_sec) return;  // stale: fail open
+
+  const double c = std::cos(map_to_fence_.yaw);
+  const double s = std::sin(map_to_fence_.yaw);
+  std::vector<std::pair<uint64_t, Eigen::Vector2d>> nogo;
+  for (const auto& r : frontier_manager_->records()) {
+    if (r.state != FrontierState::ACTIVE && r.state != FrontierState::DORMANT) continue;
+    const double fx = c * r.centroid_xy.x() - s * r.centroid_xy.y() + map_to_fence_.x;
+    const double fy = s * r.centroid_xy.x() + c * r.centroid_xy.y() + map_to_fence_.y;
+    if (nogoNear(*fence_grid_, fx, fy, params_.expl_geofence_margin_m))
+      nogo.emplace_back(r.id, r.centroid_xy);
+  }
+  for (const auto& [id, xy] : nogo) {
+    frontier_manager_->markInvalidated(id, now);
+    log(out, LogMessage::Level::kInfo,
+        fmt("Exploration: frontier %lu at (%.2f, %.2f) is in a geofence no-go zone -> invalidated",
+            static_cast<unsigned long>(id), xy.x(), xy.y()));
+  }
+}
 
 Output GoalSelector::onSelectTick(double now) {
   Output out;
