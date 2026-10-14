@@ -1823,7 +1823,7 @@ bool MIGHTY::sanitizeTerminalGoal2D(state& goal) {
   // Direction outward from the occupied goal toward free/unknown space.
   const Vec3f dir = (closest - goal.pos).normalized();
 
-  // `closest` is the nearest cell that is not occupied in the (inflated) planning
+  // `closest` is the nearest cell that is not occupied in the (inflated) 2D
   // map, so it already has the inflation_2d_m clearance. goal_relocation_clearance_m
   // adds standoff beyond that; with 0 the goal lands on `closest`.
   const double clearance = par_.goal_relocation_clearance_m;

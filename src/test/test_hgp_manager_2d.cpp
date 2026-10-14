@@ -137,3 +137,25 @@ TEST(HGPManager2D, GridSettersConcurrentWithMapUpdates) {
   EXPECT_TRUE(g.mgr.isMapInitialized());
   EXPECT_TRUE(g.mgr.checkIfPointOccupied2D(g.At(45.5, 45.5)));
 }
+
+// sanitizeTerminalGoal2D must see the latest map. The planning copy has the
+// goal box freed by solveHGP() and is a cycle old, so a goal that becomes a
+// real obstacle after it was set read free there and was never relocated.
+TEST(HGPManager2D, GoalHelpersReadLatestMapNotPlanningCopy) {
+  Ground2D g;
+  g.Build({{45, 45}});
+  // Stand in for setupHGPPlanner() + solveHGP()'s goal box (keep_inflation as there).
+  g.mgr.map_util_for_planning_ = std::make_shared<mighty::VoxelMapUtil>(*g.mgr.map_util_);
+  g.mgr.map_util_for_planning_->free2DCell(45, 45, 0.2f, /*keep_inflation=*/true);
+  ASSERT_FALSE(g.mgr.map_util_for_planning_->is2DOccupied(45, 45));
+  EXPECT_TRUE(g.mgr.checkIfPointOccupied2D(g.At(45.5, 45.5)))
+      << "real obstacle hidden only by the planning copy's goal box";
+
+  // A new obstacle appears; the planning copy is not refreshed.
+  g.Build({{45, 45}, {60, 60}});
+  EXPECT_TRUE(g.mgr.checkIfPointOccupied2D(g.At(60.5, 60.5)));
+  EXPECT_FALSE(g.mgr.isClearOfOccupied2D(g.At(62.5, 60.5), 0.3));
+  Vec3f closest;
+  ASSERT_TRUE(g.mgr.findClosestNonOccupied2DPoint(g.At(60.5, 60.5), closest));
+  EXPECT_GT((closest - g.At(60.5, 60.5)).norm(), 0.05) << "relocation moves the goal off it";
+}

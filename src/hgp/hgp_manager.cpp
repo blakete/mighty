@@ -209,20 +209,22 @@ bool HGPManager::checkIfPointOccupied(const Vec3f& point) {
   return mu->isOccupied(point_int);
 }
 
+// The three 2D goal helpers below (sanitizeTerminalGoal2D) read map_util_, not
+// map_util_for_planning_: the planning copy is last cycle's map with solveHGP()'s
+// start/goal boxes freed -- a goal that has since become an obstacle reads free
+// there -- and solveHGP() writes it without mtx_map_util_. map_util_ is only
+// written by updateMap() under mtx_map_util_ and always holds the latest
+// inflated 2D map.
 bool HGPManager::checkIfPointOccupied2D(const Vec3f& point) {
-  // Locked: see checkIfPointOccupied() above -- same race applies here.
   std::lock_guard<std::mutex> lock(mtx_map_util_);
-  const auto& mu = map_util_for_planning_ ? map_util_for_planning_ : map_util_;
   // Window test and cell read on the same map under one lock: a window shift
   // from updateMap() cannot land between them. Outside the window -> false.
-  return mu && mu->is2DOccupiedInWindow(point);
+  return map_util_ && map_util_->is2DOccupiedInWindow(point);
 }
 
 bool HGPManager::isClearOfOccupied2D(const Vec3f& point, double clearance_m) {
-  // Locked: see checkIfPointOccupied() above -- same race applies here.
   std::lock_guard<std::mutex> lock(mtx_map_util_);
-  const auto& mu = map_util_for_planning_ ? map_util_for_planning_ : map_util_;
-  return !mu || mu->is2DClearOfOccupied(point, clearance_m);
+  return !map_util_ || map_util_->is2DClearOfOccupied(point, clearance_m);
 }
 
 bool HGPManager::get2DPlanningMapSnapshot(std::vector<int8_t>& values,
@@ -321,8 +323,8 @@ bool HGPManager::solveHGP(const Vec3f& start_sent, const Vec3f& start_vel, const
 
     // Free start/goal in the 2D map — ground points would otherwise block them.
     // The goal box keeps inflation cells: a goal inside the clearance band must
-    // stay blocked, both so plan() rejects it and so the next cycle's
-    // sanitizeTerminalGoal (which reads this copy) still sees it and relocates it.
+    // stay blocked so plan() rejects it. (sanitizeTerminalGoal2D reads map_util_,
+    // not this copy, so it still sees the goal and relocates it.)
     // Leaving the start inside the band is handled by A*'s start exemption instead.
     if (map_util_for_planning_->has2DMap()) {
       Veci<3> si = map_util_for_planning_->floatToInt(start_for_search);
@@ -1468,13 +1470,13 @@ void HGPManager::findClosestNonOccupiedPoint(const Vec3f& point,
 
 bool HGPManager::findClosestNonOccupied2DPoint(const Vec3f& point,
                                                Vec3f& closest_non_occupied_point) {
+  // Reads map_util_: see checkIfPointOccupied2D().
   std::lock_guard<std::mutex> lock(mtx_map_util_);
-  const auto& mu = map_util_for_planning_ ? map_util_for_planning_ : map_util_;
-  if (!mu) {
+  if (!map_util_) {
     closest_non_occupied_point = point;
     return false;
   }
-  return mu->findClosestNonOccupied2DPoint(point, closest_non_occupied_point);
+  return map_util_->findClosestNonOccupied2DPoint(point, closest_non_occupied_point);
 }
 
 int HGPManager::countUnknownCells() const { return map_util_for_planning_->countUnknownCells(); }

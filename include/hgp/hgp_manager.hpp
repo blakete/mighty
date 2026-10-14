@@ -291,7 +291,8 @@ class HGPManager {
 
   /** @brief NEW BRANCH of findClosestNonOccupiedPoint(): searches the 2D
    *  ground-robot tri-state map instead of the 3D voxel map. See
-   *  checkIfPointOccupied2D() for why this is needed.
+   *  checkIfPointOccupied2D() for why this is needed. Like the other 2D goal
+   *  helpers, it reads the latest 2D map, not the planner's per-cycle copy.
    *  @param point Query position in world coordinates.
    *  @param closest_non_occupied_point Output position of the nearest non-occupied 2D cell.
    *  @return True if a non-occupied cell was found within the search radius.
