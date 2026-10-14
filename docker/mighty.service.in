@@ -19,9 +19,10 @@
 # node stays dead until hand-restart (Ctrl-C / Up / Enter in its pane), exactly
 # as drive/sensors/dlio.
 #
-# After=drive.service sensors.service dlio.service is ordering ONLY (deliberately
-# no Requires): the zenoh router lives in the drive stack, odometry + map->odom
-# come from dlio.service, and every pane spin-waits on the router itself, so a
+# After=drive.service sensors.service dlio.service mapping.service is ordering ONLY
+# (deliberately no Requires): the zenoh router lives in the drive stack, odometry +
+# map->odom come from dlio.service, the grids come from the Orin's elevation mapper
+# or (map fusion) mapping.service, and every pane spin-waits on the router itself, so a
 # sibling restart leaves the planner up and self-recovering. Under --monitor the
 # script also WAITS for the router rather than failing, because at boot
 # After=drive.service is satisfied before zenohd inside it is listening.
@@ -32,7 +33,7 @@
 
 [Unit]
 Description=MIGHTY hardware stack (containerized: planner + odom->state + MPC + RViz goal relay, host tmux 'hw_mighty')
-After=network-online.target docker.service drive.service sensors.service dlio.service
+After=network-online.target docker.service drive.service sensors.service dlio.service mapping.service
 Wants=network-online.target
 Requires=docker.service
 

@@ -26,6 +26,7 @@
 #include <hgp/utils.hpp>
 
 // Other includes
+#include <atomic>
 #include <mutex>
 
 #include <Eigen/Dense>
@@ -355,8 +356,16 @@ class HGPManager {
   const Eigen::Vector3d unitZ_ = Eigen::Vector3d::UnitZ();
 
   // Flags
-  bool map_initialized_ = false;
+  std::atomic<bool> map_initialized_{false};  // written by updateMap() (map thread), read
+                                              // via isMapInitialized() from goal/replan threads
   bool is_ground_robot_ = false;
+
+  // Mapper grids for the ground-robot 2D build and A* cost. Guarded by
+  // mtx_grids_: the setters run on the map thread (MIGHTY::updateMap2DOnly) and
+  // the replan thread (MIGHTY::generateGlobalPath). Readers take a snapshot
+  // first, so a grid replaced mid-build stays alive. Never held together with
+  // mtx_map_util_.
+  std::mutex mtx_grids_;
 
   // ESDF for ground robot A* cost
   std::shared_ptr<const EsdfGrid2D> esdf_grid_;
@@ -366,6 +375,17 @@ class HGPManager {
   // Binary 2D occupancy for ground robot A* planning
   std::shared_ptr<const class OccGrid2D> occ_grid_2d_;
 
+  struct Grids2D {
+    std::shared_ptr<const class OccGrid2D> occ;
+    std::shared_ptr<const EsdfGrid2D> esdf;
+    double esdf_weight = 0.0;
+    double esdf_d_safe = 0.0;
+  };
+  Grids2D get2DGridsSnapshot() {
+    std::lock_guard<std::mutex> lock(mtx_grids_);
+    return {occ_grid_2d_, esdf_grid_, esdf_weight_astar_, esdf_d_safe_astar_};
+  }
+
  public:
   /** @brief True if the last solveHGP A* search reached the exact goal (false: partial path). */
   bool reachedGoal() const { return planner_ptr_ && planner_ptr_->reachedGoal(); }
@@ -373,16 +393,22 @@ class HGPManager {
   /** @brief Check if 2D ground robot planning mode is active. */
   bool isGroundRobot() const { return is_ground_robot_; }
 
-  /** @brief Set binary 2D occupancy grid for ground robot A* planning. */
-  void setOccGrid2D(std::shared_ptr<const class OccGrid2D> grid) { occ_grid_2d_ = grid; }
+  /** @brief Set binary 2D occupancy grid for ground robot A* planning.
+   *  Locked: see mtx_grids_. */
+  void setOccGrid2D(std::shared_ptr<const class OccGrid2D> grid) {
+    std::lock_guard<std::mutex> lock(mtx_grids_);
+    occ_grid_2d_ = grid;
+  }
 
   /** @brief Set max distance between waypoints for 2D path resampling. */
   void setMaxDistVertexes2D(double d) {
     if (planner_ptr_) planner_ptr_->setMaxDistVertexes2D(d);
   }
 
-  /** @brief Set ESDF grid for distance-based A* cost (ground robot only). */
+  /** @brief Set ESDF grid for distance-based A* cost (ground robot only).
+   *  Locked: see mtx_grids_. */
   void setEsdfGrid(std::shared_ptr<const EsdfGrid2D> grid, double weight, double d_safe) {
+    std::lock_guard<std::mutex> lock(mtx_grids_);
     esdf_grid_ = grid;
     esdf_weight_astar_ = weight;
     esdf_d_safe_astar_ = d_safe;

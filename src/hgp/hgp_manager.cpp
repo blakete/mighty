@@ -132,8 +132,9 @@ void HGPManager::setupHGPPlanner(const std::string& global_planner, bool global_
   planner_ptr_->set2DMode(is_ground_robot_ && par_.use_2d_planning);
 
   // Pass ESDF grid for ground robot A* cost
-  if (is_ground_robot_ && esdf_grid_) {
-    planner_ptr_->setEsdfGrid(esdf_grid_, esdf_weight_astar_, esdf_d_safe_astar_);
+  const Grids2D grids = get2DGridsSnapshot();
+  if (is_ground_robot_ && grids.esdf) {
+    planner_ptr_->setEsdfGrid(grids.esdf, grids.esdf_weight, grids.esdf_d_safe);
   }
 
   // Corridor-center corner snap post-processing (ground robot only).
@@ -405,25 +406,18 @@ bool HGPManager::solveHGP(const Vec3f& start_sent, const Vec3f& start_vel, const
   // one cell from a (conservative UNKNOWN->OCCUPIED) wall in the planning map --
   // so the robot would drive right up to the obstacle and park there. Back off
   // the path TAIL until the last waypoint keeps >= hgp_stop_distance_m clearance
-  // from any occupied cell. Skipped when A* reached the actual goal (a real goal
-  // near a wall is never trimmed) and when hgp_stop_distance_m <= 0 (default).
+  // from any real occupied, unknown or out-of-window cell (has2DBlockerWithin).
+  // inflation_2d_m band cells are ignored: the clearance is measured from the
+  // wall, not from the band edge. Skipped when A* reached the actual goal (a real
+  // goal near a wall is never trimmed) and when hgp_stop_distance_m <= 0 (default).
   if (is_ground_robot_ && map_util_for_planning_->has2DMap() &&
       par_.hgp_stop_distance_m > 0.0 && path.size() > 1 &&
       !planner_ptr_->reachedGoal()) {
     const double res = map_util_for_planning_->getRes();
     const int r = std::max(1, static_cast<int>(std::ceil(par_.hgp_stop_distance_m / res)));
-    const int r2 = r * r;
     auto tooCloseToObstacle = [&](const Vecf<3>& wp) {
       const Veci<3> pi = map_util_for_planning_->floatToInt(wp);
-      for (int dy = -r; dy <= r; ++dy) {
-        for (int dx = -r; dx <= r; ++dx) {
-          if (dx * dx + dy * dy > r2) continue;
-          // get2DOccupancy() returns occupied for out-of-bounds too (conservative).
-          if (map_util_for_planning_->get2DOccupancy(pi(0) + dx, pi(1) + dy) != 0)
-            return true;
-        }
-      }
-      return false;
+      return map_util_for_planning_->has2DBlockerWithin(pi(0), pi(1), r);
     };
     const size_t before = path.size();
     while (path.size() > 1 && tooCloseToObstacle(path.back())) path.pop_back();
@@ -1353,7 +1347,11 @@ void HGPManager::updateMap(double wdx, double wdy, double wdz, const Vec3f& cent
   // Get the current time to see the computation time for readmap
   auto start_time = std::chrono::high_resolution_clock::now();
 
-  mtx_map_util_.lock();
+  // Snapshot the mapper grids before taking mtx_map_util_ (the two locks are
+  // never nested); the copies keep the grids alive for the whole build.
+  const Grids2D grids = get2DGridsSnapshot();
+
+  std::unique_lock<std::mutex> lock(mtx_map_util_);
   // Use round (not truncation) so wdz==res_ reliably gives ≥1 cell despite
   // floating-point rep of values like 0.15. Floor for x/y was already safe in
   // practice (windows are large) but rounding is more robust there too.
@@ -1364,12 +1362,12 @@ void HGPManager::updateMap(double wdx, double wdy, double wdz, const Vec3f& cent
 
   // Build 2D ground robot map
   if (is_ground_robot_) {
-    if (occ_grid_2d_) {
-      // Occ2D mode: binary occupancy from mapper + BFS distance-based heat ramp. No inflation.
-      map_util_->buildMap2DFromOcc2D(*occ_grid_2d_, esdf_d_safe_astar_, par_.static_heat_Hmax);
-    } else if (esdf_grid_) {
+    if (grids.occ) {
+      // Occ2D mode: tri-state occupancy from mapper + BFS distance-based heat ramp.
+      map_util_->buildMap2DFromOcc2D(*grids.occ, grids.esdf_d_safe, par_.static_heat_Hmax);
+    } else if (grids.esdf) {
       // ESDF fallback
-      map_util_->buildMap2DFromEsdf(*esdf_grid_, esdf_d_safe_astar_, par_.static_heat_Hmax);
+      map_util_->buildMap2DFromEsdf(*grids.esdf, grids.esdf_d_safe, par_.static_heat_Hmax);
     } else {
       // Final fallback: 3D point cloud projection
       map_util_->buildGroundMap2D(static_cast<float>(par_.obstacle_min_height),
@@ -1378,7 +1376,7 @@ void HGPManager::updateMap(double wdx, double wdy, double wdz, const Vec3f& cent
                                   static_cast<float>(par_.column_min_z));
     }
   }
-  mtx_map_util_.unlock();
+  lock.unlock();
 
   // Get the elapsed time for reading the map
   auto end_time = std::chrono::high_resolution_clock::now();

@@ -349,9 +349,18 @@ bool MIGHTY::needReplan(const state& local_state, const state& local_G_term,
   // Status transitions below are computed against local_G_term; they go through
   // changeDroneStatusForGoal() so they are dropped if a new goal arrived since
   // replan() read it (otherwise the new goal could be marked GOAL_REACHED at once).
-  // Compute the distance to the terminal goal
-  double dist_to_term_G = (local_state.pos - local_G_term.pos).norm();
-  double dist_from_last_plan_state_to_term_G = (last_plan_state.pos - local_G_term.pos).norm();
+  // Compute the distance to the terminal goal. Non-UAV vehicles measure it in
+  // xy only: the goal z is pinned to default_goal_z while the state z is raw
+  // odometry, so a z offset >= goal_radius would make GOAL_REACHED unreachable
+  // (and the MPC's own goal check is xy-only).
+
+  const bool planar = par_.vehicle_type != "uav";
+  auto dist = [planar](const Eigen::Vector3d& a, const Eigen::Vector3d& b) {
+    return planar ? (a - b).head<2>().norm() : (a - b).norm(); // planar: 2D distance, non-planar: 3D distance
+  };
+
+  double dist_to_term_G = dist(local_state.pos, local_G_term.pos);
+  double dist_from_last_plan_state_to_term_G = dist(last_plan_state.pos, local_G_term.pos);
 
   if (dist_to_term_G < par_.goal_radius) {
     changeDroneStatusForGoal(DroneStatus::GOAL_REACHED, goal_gen);
@@ -379,7 +388,7 @@ bool MIGHTY::needReplan(const state& local_state, const state& local_G_term,
       drone_status_ == DroneStatus::TRAVELING) {
     state G_now;
     getG(G_now);
-    const double dist_to_G = (local_state.pos - G_now.pos).norm();
+    const double dist_to_G = dist(local_state.pos, G_now.pos);  // xy: G z is default_goal_z too
     const double dist_G_to_term = (G_now.pos - local_G_term.pos).norm();
     const bool G_is_final = dist_G_to_term < 1e-3;
     if (!G_is_final && dist_to_G < par_.goal_radius) {
