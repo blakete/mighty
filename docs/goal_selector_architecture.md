@@ -15,7 +15,7 @@ Topic names: relative names (no leading `/`) resolve under the robot namespace, 
 flowchart LR
   subgraph P_mighty_node["process: MIGHTY planner"]
     direction TB
-    N_mighty_node["mighty_node<br/>(mighty / mighty)<br/>declares 201 parameters<br/>(waits for TF map and odom)"]
+    N_mighty_node["mighty_node<br/>(mighty / mighty)<br/>declares 204 parameters<br/>(waits for TF map and odom)"]
   end
   subgraph P_convert_odom_to_state["process: convert_odom_to_state"]
     direction TB
@@ -23,7 +23,7 @@ flowchart LR
   end
   subgraph P_goal_selector["process: goal_selector"]
     direction TB
-    N_goal_selector["goal_selector<br/>(mighty / goal_selector)<br/>declares 58 parameters"]
+    N_goal_selector["goal_selector<br/>(mighty / goal_selector)<br/>declares 73 parameters"]
   end
   subgraph P_mpc["process: MPC"]
     direction TB
@@ -66,22 +66,21 @@ flowchart LR
   N_goal_selector -.->|"/exploration/visited_maps<br/>nav_msgs/OccupancyGrid"| N_peers
   N_peers -.->|"/exploration/visited_maps<br/>nav_msgs/OccupancyGrid"| N_goal_selector
   N_dlio -->|"/tf<br/>tf2_msgs/TFMessage"| N_mighty_node
+  N_dlio -->|"/tf<br/>tf2_msgs/TFMessage"| N_goal_selector
   N_dlio -->|"/tf_static<br/>tf2_msgs/TFMessage"| N_mighty_node
+  N_dlio -->|"/tf_static<br/>tf2_msgs/TFMessage"| N_goal_selector
   N_mighty_node -->|"/trajs<br/>dynus_interfaces/DynTraj"| N_mighty_node
   N_peer_planners -->|"/trajs<br/>dynus_interfaces/DynTraj"| N_mighty_node
   N_mpc -->|"cmd_vel_auto<br/>geometry_msgs/Twist"| N_drive
   N_dlio -->|"dlio/odom_node/odom<br/>nav_msgs/Odometry"| N_convert_odom_to_state
   N_dlio -->|"dlio/odom_node/pose<br/>geometry_msgs/PoseStamped"| N_mapper
   N_dlio -->|"dlio/odom_node/pose<br/>geometry_msgs/PoseStamped"| N_mpc
-  N_mapper -->|"esdf_2d_topic<br/>nav_msgs/OccupancyGrid"| N_mighty_node
   N_mapper -->|"esdf_2d_topic<br/>nav_msgs/OccupancyGrid"| N_rviz
   N_goal_selector -.->|"exploration/current_goal<br/>geometry_msgs/PoseStamped"| N_rviz
   N_goal_selector -.->|"exploration/frontiers<br/>visualization_msgs/MarkerArray"| N_rviz
   N_goal_selector -.->|"exploration/visited_map<br/>nav_msgs/OccupancyGrid"| N_rviz
   N_sensors -->|"livox/lidar<br/>sensor_msgs/PointCloud2"| N_mapper
   N_mighty_node -->|"mpc_waypoints<br/>dynus_interfaces/SpeedyPath"| N_mpc
-  N_mapper -->|"occ_2d_topic<br/>nav_msgs/OccupancyGrid"| N_mighty_node
-  N_mapper -->|"occ_2d_topic<br/>nav_msgs/OccupancyGrid"| N_goal_selector
   N_mapper -->|"occ_2d_topic<br/>nav_msgs/OccupancyGrid"| N_rviz
   N_mighty_node -->|"planner_status<br/>goal_selector_msgs/PlannerStatus"| N_goal_selector
   N_convert_odom_to_state -->|"state<br/>dynus_interfaces/State"| N_mighty_node
@@ -100,6 +99,12 @@ flowchart LR
   N_goal_selector -->|"1 visualization topics<br/>(see table)"| N_rviz
   N_mighty_node -->|"33 visualization topics<br/>(see table)"| N_rviz
   NOPUB -.->|"/frame_align/#lt;ns#gt;/#lt;other_name#gt;<br/>geometry_msgs/TransformStamped"| N_mighty_node
+  NOPUB -.->|"#lt;gate_echo_topic_#gt;<br/>std_msgs/String"| N_goal_selector
+  NOPUB -.->|"#lt;goal_fence_topic_#gt;<br/>std_msgs/String"| N_goal_selector
+  NOPUB -.->|"#lt;occ_2d_topic_#gt;<br/>nav_msgs/OccupancyGrid"| N_goal_selector
+  NOPUB -.->|"#lt;par_.esdf_2d_topic_name#gt;<br/>nav_msgs/OccupancyGrid"| N_mighty_node
+  NOPUB -.->|"#lt;par_.occ_2d_topic_name#gt;<br/>nav_msgs/OccupancyGrid"| N_mighty_node
+  NOPUB -.->|"#lt;persistent_map_topic_#gt;<br/>nav_msgs/OccupancyGrid"| N_goal_selector
   NOPUB -.->|"occupancy_grid<br/>sensor_msgs/PointCloud2"| N_mighty_node
   NOPUB -.->|"predicted_trajs<br/>dynus_interfaces/DynTraj"| N_mighty_node
   F_config_mighty_yaml -.-|"layer 1"| N_mighty_node
@@ -114,26 +119,32 @@ flowchart LR
 
 | node | executable | sources scanned | parameter files in load order (later wins) | declared parameters |
 |---|---|---|---|---|
-| `mighty_node` | `mighty/mighty` | `src/mighty/mighty_node.cpp`<br>`src/mighty/mighty.cpp`<br>`src/hgp/hgp_manager.cpp`<br>`src/hgp/utils.cpp`<br>`src/hgp/hgp_planner.cpp`<br>`src/hgp/graph_search.cpp`<br>`src/mighty/utils.cpp`<br>`src/mighty/lbfgs_solver.cpp`<br>`src/mighty/lbfgs_solver_utils.cpp`<br>`src/map2d/map2d.cpp` | 1. `mighty_ground_robot.yaml` (inactive on hardware) [use_ground_robot]<br>2. `mighty.yaml` [not (use_ground_robot)]<br>3. `hw_mighty_ground_robot.yaml` [use_hardware and robot_type in [RED_ROVER, STAR_ROBOT]]<br>4. `hw_mighty.yaml` (inactive on hardware) [use_hardware and not (robot_type in [RED_ROVER, STAR_ROBOT])] | 201 |
+| `mighty_node` | `mighty/mighty` | `src/mighty/mighty_node.cpp`<br>`src/mighty/mighty.cpp`<br>`src/hgp/hgp_manager.cpp`<br>`src/hgp/utils.cpp`<br>`src/hgp/hgp_planner.cpp`<br>`src/hgp/graph_search.cpp`<br>`src/mighty/utils.cpp`<br>`src/mighty/lbfgs_solver.cpp`<br>`src/mighty/lbfgs_solver_utils.cpp`<br>`src/map2d/map2d.cpp` | 1. `mighty_ground_robot.yaml` (inactive on hardware) [use_ground_robot]<br>2. `mighty.yaml` [not (use_ground_robot)]<br>3. `hw_mighty_ground_robot.yaml` [use_hardware and robot_type in [RED_ROVER, STAR_ROBOT]]<br>4. `hw_mighty.yaml` (inactive on hardware) [use_hardware and not (robot_type in [RED_ROVER, STAR_ROBOT])] | 204 |
 | `convert_odom_to_state` | `mighty/convert_odom_to_state` | `src/mighty/convert_odom_to_state.cpp` | none | 0 |
-| `goal_selector` | `mighty/goal_selector` | `src/goal_selector/goal_selector_node.cpp`<br>`src/goal_selector/goal_selector.cpp`<br>`src/mighty/frontier_detector.cpp`<br>`src/mighty/frontier_manager.cpp`<br>`src/map2d/map2d.cpp` | 1. `mighty_ground_robot.yaml` (inactive on hardware) [use_ground_robot]<br>2. `mighty.yaml` [not (use_ground_robot)]<br>3. `hw_mighty_ground_robot.yaml` [use_hardware and robot_type in [RED_ROVER, STAR_ROBOT]]<br>4. `hw_mighty.yaml` (inactive on hardware) [use_hardware and not (robot_type in [RED_ROVER, STAR_ROBOT])]<br>5. `hw_goal_selector.yaml` [use_hardware] | 58 |
+| `goal_selector` | `mighty/goal_selector` | `src/goal_selector/goal_selector_node.cpp`<br>`src/goal_selector/goal_selector.cpp`<br>`src/goal_selector/goal_fence.cpp`<br>`src/mighty/frontier_detector.cpp`<br>`src/mighty/frontier_manager.cpp`<br>`src/map2d/map2d.cpp` | 1. `mighty_ground_robot.yaml` (inactive on hardware) [use_ground_robot]<br>2. `mighty.yaml` [not (use_ground_robot)]<br>3. `hw_mighty_ground_robot.yaml` [use_hardware and robot_type in [RED_ROVER, STAR_ROBOT]]<br>4. `hw_mighty.yaml` (inactive on hardware) [use_hardware and not (robot_type in [RED_ROVER, STAR_ROBOT])]<br>5. `hw_goal_selector.yaml` [use_hardware] | 73 |
 | `mpc` | `mpc/mpc_node` | (external code) | 1. `mpc.yaml` [use_hardware]<br>2. `mpc_sim.yaml` (inactive on hardware) [not (use_hardware)] | - |
 
-`mighty_node`: 201 declared parameters; provided by file (any layer may override): `mighty.yaml` 182, `hw_mighty_ground_robot.yaml` 188; declared but in no active file (code default only): 6.
+`mighty_node`: 204 declared parameters; provided by file (any layer may override): `mighty.yaml` 182, `hw_mighty_ground_robot.yaml` 190; declared but in no active file (code default only): 7.
 
-`goal_selector`: 58 declared parameters; provided by file (any layer may override): `mighty.yaml` 45, `hw_mighty_ground_robot.yaml` 5, `hw_goal_selector.yaml` 53; declared but in no active file (code default only): 1.
+`goal_selector`: 73 declared parameters; provided by file (any layer may override): `mighty.yaml` 45, `hw_mighty_ground_robot.yaml` 6, `hw_goal_selector.yaml` 67; declared but in no active file (code default only): 1.
 
 ## Topics
 
 | topic | message type | publisher(s) | subscriber(s) | QoS | source | notes |
 |---|---|---|---|---|---|---|
-| `/exploration/peer_poses` | `geometry_msgs/PoseStamped` | `goal_selector`<br>`peers` | `goal_selector`<br>`peers` | pub goal_selector: reliable, volatile, keep_last 10<br>pub peers: reliable, volatile, keep_last 10<br>sub goal_selector: reliable, volatile, keep_last 10<br>sub peers: reliable, volatile, keep_last 10 | `docs/external_nodes.yaml`<br>`src/goal_selector/goal_selector_node.cpp:122`<br>`src/goal_selector/goal_selector_node.cpp:123` | pub goal_selector only if `expl_enabled && expl_use_minpos`<br>sub goal_selector only if `expl_enabled && expl_use_minpos` |
-| `/exploration/return_home` | `std_msgs/Empty` | `operator` | `goal_selector` | pub operator: reliable, volatile, keep_last 1<br>sub goal_selector: reliable, volatile, keep_last 1 | `docs/external_nodes.yaml`<br>`src/goal_selector/goal_selector_node.cpp:146` | operator entry unverified<br>operator: one-shot trigger; no publisher exists in this repo (grep), so it is published by hand<br>sub goal_selector only if `expl_enabled` |
-| `/exploration/visited_maps` | `nav_msgs/OccupancyGrid` | `goal_selector`<br>`peers` | `goal_selector`<br>`peers` | pub goal_selector: reliable, volatile, keep_last 1<br>pub peers: reliable, volatile, keep_last 1<br>sub goal_selector: reliable, volatile, keep_last 1<br>sub peers: reliable, volatile, keep_last 1 | `docs/external_nodes.yaml`<br>`src/goal_selector/goal_selector_node.cpp:131`<br>`src/goal_selector/goal_selector_node.cpp:133` | pub goal_selector only if `expl_enabled && expl_use_minpos`<br>sub goal_selector only if `expl_enabled && expl_use_minpos` |
+| `/exploration/peer_poses` | `geometry_msgs/PoseStamped` | `goal_selector`<br>`peers` | `goal_selector`<br>`peers` | pub goal_selector: reliable, volatile, keep_last 10<br>pub peers: reliable, volatile, keep_last 10<br>sub goal_selector: reliable, volatile, keep_last 10<br>sub peers: reliable, volatile, keep_last 10 | `docs/external_nodes.yaml`<br>`src/goal_selector/goal_selector_node.cpp:158`<br>`src/goal_selector/goal_selector_node.cpp:159` | pub goal_selector only if `expl_enabled && expl_use_minpos`<br>sub goal_selector only if `expl_enabled && expl_use_minpos` |
+| `/exploration/return_home` | `std_msgs/Empty` | `operator` | `goal_selector` | pub operator: reliable, volatile, keep_last 1<br>sub goal_selector: reliable, volatile, keep_last 1 | `docs/external_nodes.yaml`<br>`src/goal_selector/goal_selector_node.cpp:182` | operator entry unverified<br>operator: one-shot trigger; no publisher exists in this repo (grep), so it is published by hand<br>sub goal_selector only if `expl_enabled` |
+| `/exploration/visited_maps` | `nav_msgs/OccupancyGrid` | `goal_selector`<br>`peers` | `goal_selector`<br>`peers` | pub goal_selector: reliable, volatile, keep_last 1<br>pub peers: reliable, volatile, keep_last 1<br>sub goal_selector: reliable, volatile, keep_last 1<br>sub peers: reliable, volatile, keep_last 1 | `docs/external_nodes.yaml`<br>`src/goal_selector/goal_selector_node.cpp:167`<br>`src/goal_selector/goal_selector_node.cpp:169` | pub goal_selector only if `expl_enabled && expl_use_minpos`<br>sub goal_selector only if `expl_enabled && expl_use_minpos` |
 | `/frame_align/<ns>/<other_name>` | `geometry_msgs/TransformStamped` | - | `mighty_node` | sub mighty_node: reliable, volatile, keep_last 10 | `src/mighty/mighty_node.cpp:208` | **no publisher in this stack** |
-| `/tf` | `tf2_msgs/TFMessage` | `dlio` | `mighty_node` | pub dlio: unspecified<br>sub mighty_node: tf2 default (via TransformListener) | `docs/external_nodes.yaml`<br>`src/mighty/mighty_node.cpp:243` | dlio: tf map->odom (docker/README.hw.md:30) |
-| `/tf_static` | `tf2_msgs/TFMessage` | `dlio` | `mighty_node` | pub dlio: unspecified<br>sub mighty_node: tf2 default (via TransformListener) | `docs/external_nodes.yaml`<br>`src/mighty/mighty_node.cpp:243` | dlio entry unverified<br>dlio: base_link->lidar static TF is published by sensors.service (docker/mighty_hw.sh:37) |
+| `/tf` | `tf2_msgs/TFMessage` | `dlio` | `mighty_node`<br>`goal_selector` | pub dlio: unspecified<br>sub mighty_node: tf2 default (via TransformListener)<br>sub goal_selector: tf2 default (via TransformListener) | `docs/external_nodes.yaml`<br>`src/goal_selector/goal_selector_node.cpp:141`<br>`src/mighty/mighty_node.cpp:243` | dlio: tf map->odom (docker/README.hw.md:30) |
+| `/tf_static` | `tf2_msgs/TFMessage` | `dlio` | `mighty_node`<br>`goal_selector` | pub dlio: unspecified<br>sub mighty_node: tf2 default (via TransformListener)<br>sub goal_selector: tf2 default (via TransformListener) | `docs/external_nodes.yaml`<br>`src/goal_selector/goal_selector_node.cpp:141`<br>`src/mighty/mighty_node.cpp:243` | dlio entry unverified<br>dlio: base_link->lidar static TF is published by sensors.service (docker/mighty_hw.sh:37) |
 | `/trajs` | `dynus_interfaces/DynTraj` | `mighty_node`<br>`peer_planners` | `mighty_node` | pub mighty_node: reliable, volatile, keep_last 10<br>pub peer_planners: reliable, volatile, keep_last 10<br>sub mighty_node: reliable, volatile, keep_last 10 | `docs/external_nodes.yaml`<br>`src/mighty/mighty_node.cpp:174`<br>`src/mighty/mighty_node.cpp:186` |  |
+| `<gate_echo_topic_>` | `std_msgs/String` | - | `goal_selector` | sub goal_selector: reliable, volatile, keep_last 5 | `src/goal_selector/goal_selector_node.cpp:147` | **no publisher in this stack**<br>sub goal_selector only if `expl_enabled && expl_geofence_enabled` |
+| `<goal_fence_topic_>` | `std_msgs/String` | - | `goal_selector` | sub goal_selector: reliable, volatile, keep_last 1 | `src/goal_selector/goal_selector_node.cpp:144` | **no publisher in this stack**<br>sub goal_selector only if `expl_enabled && expl_geofence_enabled` |
+| `<occ_2d_topic_>` | `nav_msgs/OccupancyGrid` | - | `goal_selector` | sub goal_selector: best_effort, volatile, keep_last 5 | `src/goal_selector/goal_selector_node.cpp:111` | **no publisher in this stack** |
+| `<par_.esdf_2d_topic_name>` | `nav_msgs/OccupancyGrid` | - | `mighty_node` | sub mighty_node: best_effort, volatile, keep_last 5 | `src/mighty/mighty_node.cpp:290` | **no publisher in this stack** |
+| `<par_.occ_2d_topic_name>` | `nav_msgs/OccupancyGrid` | - | `mighty_node` | sub mighty_node: best_effort, volatile, keep_last 5 | `src/mighty/mighty_node.cpp:299` | **no publisher in this stack** |
+| `<persistent_map_topic_>` | `nav_msgs/OccupancyGrid` | - | `goal_selector` | sub goal_selector: reliable, transient_local, keep_last 1 | `src/goal_selector/goal_selector_node.cpp:125` | **no publisher in this stack**<br>sub goal_selector only if `expl_enabled && expl_persistent_map_enabled` |
 | `actual_traj` | `visualization_msgs/MarkerArray` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:148` | **no subscriber in this stack** |
 | `cmd_vel_auto` | `geometry_msgs/Twist` | `mpc` | `drive` | pub mpc: reliable, volatile, keep_last 10<br>sub drive: unspecified | `docs/external_nodes.yaml` | drive entry unverified<br>drive: the drive/mux code is not in this workspace; docker/README.hw.md:77 only says MPC publishes cmd_vel_auto<br>mpc: hardware cmd_vel_topic (mpc.yaml:11); 'cmd_vel' in sim |
 | `command_to_exec_time` | `std_msgs/Float64` | `mighty_node` | - | pub mighty_node: reliable, volatile, keep_last 10 | `src/mighty/mighty_node.cpp:183` | **no subscriber in this stack** |
@@ -143,10 +154,10 @@ flowchart LR
 | `dlio/odom_node/pose` | `geometry_msgs/PoseStamped` | `dlio` | `mapper`<br>`mpc` | pub dlio: unspecified<br>sub mapper: unspecified<br>sub mpc: reliable, volatile, keep_last 10 | `docs/external_nodes.yaml` | mapper entry unverified<br>mapper: mapper pose input<br>mpc: hardware pose_topic from mpc.yaml:9; the launch file overrides it to 'world' when use_onboard_localization is false; sim uses use_tf_pose (TF) instead |
 | `dynamic_map_marker` | `visualization_msgs/MarkerArray` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:107` | **no subscriber in this stack** |
 | `dynamic_occupied_grid` | `sensor_msgs/PointCloud2` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:103` | **no subscriber in this stack** |
-| `esdf_2d_topic` | `nav_msgs/OccupancyGrid` | `mapper` | `mighty_node`<br>`rviz` | pub mapper: best_effort, volatile<br>sub mighty_node: best_effort, volatile, keep_last 5<br>sub rviz: reliable, volatile, keep_last 5 | `docs/external_nodes.yaml`<br>`src/mighty/mighty_node.cpp:290` | QoS WARNING (mapper -> rviz): subscriber reliable, publisher best_effort: no delivery<br>mapper: encoded 2D ESDF; consumed by the planner when use_esdf_cost<br>rviz: rviz/mighty_RR04.rviz:744, Map display 'RR04 2D ESDF' |
-| `exploration/current_goal` | `geometry_msgs/PoseStamped` | `goal_selector` | `rviz` | pub goal_selector: reliable, volatile, keep_last 10<br>sub rviz: reliable, volatile, keep_last 5 | `docs/external_nodes.yaml`<br>`src/goal_selector/goal_selector_node.cpp:92` | pub goal_selector only if `expl_enabled`<br>rviz: rviz/mighty_RR04.rviz:783 (display disabled in the shipped config) |
-| `exploration/frontiers` | `visualization_msgs/MarkerArray` | `goal_selector` | `rviz` | pub goal_selector: reliable, volatile, keep_last 10<br>sub rviz: reliable, volatile, keep_last 5 | `docs/external_nodes.yaml`<br>`src/goal_selector/goal_selector_node.cpp:90` | pub goal_selector only if `expl_enabled`<br>rviz: rviz/mighty_RR04.rviz:763 |
-| `exploration/visited_map` | `nav_msgs/OccupancyGrid` | `goal_selector` | `rviz` | pub goal_selector: reliable, transient_local, keep_last 1<br>sub rviz: reliable, transient_local, keep_last 1 | `docs/external_nodes.yaml`<br>`src/goal_selector/goal_selector_node.cpp:93` | pub goal_selector only if `expl_enabled`<br>rviz: rviz/mighty_RR04.rviz:634 |
+| `esdf_2d_topic` | `nav_msgs/OccupancyGrid` | `mapper` | `rviz` | pub mapper: best_effort, volatile<br>sub rviz: reliable, volatile, keep_last 5 | `docs/external_nodes.yaml` | QoS WARNING (mapper -> rviz): subscriber reliable, publisher best_effort: no delivery<br>mapper: encoded 2D ESDF; consumed by the planner when use_esdf_cost<br>rviz: rviz/mighty_RR04.rviz:744, Map display 'RR04 2D ESDF' |
+| `exploration/current_goal` | `geometry_msgs/PoseStamped` | `goal_selector` | `rviz` | pub goal_selector: reliable, volatile, keep_last 10<br>sub rviz: reliable, volatile, keep_last 5 | `docs/external_nodes.yaml`<br>`src/goal_selector/goal_selector_node.cpp:94` | pub goal_selector only if `expl_enabled`<br>rviz: rviz/mighty_RR04.rviz:783 (display disabled in the shipped config) |
+| `exploration/frontiers` | `visualization_msgs/MarkerArray` | `goal_selector` | `rviz` | pub goal_selector: reliable, volatile, keep_last 10<br>sub rviz: reliable, volatile, keep_last 5 | `docs/external_nodes.yaml`<br>`src/goal_selector/goal_selector_node.cpp:92` | pub goal_selector only if `expl_enabled`<br>rviz: rviz/mighty_RR04.rviz:763 |
+| `exploration/visited_map` | `nav_msgs/OccupancyGrid` | `goal_selector` | `rviz` | pub goal_selector: reliable, transient_local, keep_last 1<br>sub rviz: reliable, transient_local, keep_last 1 | `docs/external_nodes.yaml`<br>`src/goal_selector/goal_selector_node.cpp:95` | pub goal_selector only if `expl_enabled`<br>rviz: rviz/mighty_RR04.rviz:634 |
 | `fov` | `visualization_msgs/Marker` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:149` | **no subscriber in this stack** |
 | `free_grid` | `sensor_msgs/PointCloud2` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:123` | **no subscriber in this stack** |
 | `free_hgp_path_marker` | `visualization_msgs/MarkerArray` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:131` | **no subscriber in this stack** |
@@ -161,11 +172,11 @@ flowchart LR
 | `local_global_path_after_push_marker` | `visualization_msgs/MarkerArray` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:136` | **no subscriber in this stack** |
 | `local_global_path_marker` | `visualization_msgs/MarkerArray` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:133` | **no subscriber in this stack** |
 | `mpc_waypoints` | `dynus_interfaces/SpeedyPath` | `mighty_node` | `mpc` | pub mighty_node: reliable, volatile, keep_last 10<br>sub mpc: reliable, volatile, keep_last 10 | `docs/external_nodes.yaml`<br>`src/mighty/mighty_node.cpp:178` | mpc: mpc_node.py:231 (path_topic parameter) |
-| `occ_2d_topic` | `nav_msgs/OccupancyGrid` | `mapper` | `mighty_node`<br>`goal_selector`<br>`rviz` | pub mapper: best_effort, volatile<br>sub mighty_node: best_effort, volatile, keep_last 5<br>sub goal_selector: best_effort, volatile, keep_last 5<br>sub rviz: reliable, volatile, keep_last 5 | `docs/external_nodes.yaml`<br>`src/goal_selector/goal_selector_node.cpp:109`<br>`src/mighty/mighty_node.cpp:299` | QoS WARNING (mapper -> rviz): subscriber reliable, publisher best_effort: no delivery<br>mapper: raw tri-state 2D grid; consumed by planner and selector since Phase 5<br>rviz: rviz/mighty_RR04.rviz:655, Map display 'RR04 2D Occ from ACL Mapper' |
+| `occ_2d_topic` | `nav_msgs/OccupancyGrid` | `mapper` | `rviz` | pub mapper: best_effort, volatile<br>sub rviz: reliable, volatile, keep_last 5 | `docs/external_nodes.yaml` | QoS WARNING (mapper -> rviz): subscriber reliable, publisher best_effort: no delivery<br>mapper: raw tri-state 2D grid; consumed by planner and selector since Phase 5<br>rviz: rviz/mighty_RR04.rviz:655, Map display 'RR04 2D Occ from ACL Mapper' |
 | `occupancy_grid` | `sensor_msgs/PointCloud2` | - | `mighty_node`<br>`mighty_node` (sim only) | sub mighty_node: reliable, volatile, keep_last 5 (from_rmw copies only history+depth; reliability/durability stay default)<br>sub mighty_node: best_effort, volatile, keep_last 5 | `src/mighty/mighty_node.cpp:260`<br>`src/mighty/mighty_node.cpp:272` | **no publisher in this stack**<br>sub mighty_node inactive on hardware (not drawn): `!use_hardware && sim_env != "fake_sim"` |
 | `original_hgp_path_marker` | `visualization_msgs/MarkerArray` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:129` | **no subscriber in this stack** |
 | `p_points` | `visualization_msgs/MarkerArray` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:153` | **no subscriber in this stack** |
-| `planner_status` | `goal_selector_msgs/PlannerStatus` | `mighty_node` | `goal_selector` | pub mighty_node: reliable, volatile, keep_last 10<br>sub goal_selector: reliable, volatile, keep_last 10 | `src/goal_selector/goal_selector_node.cpp:104`<br>`src/mighty/mighty_node.cpp:181` |  |
+| `planner_status` | `goal_selector_msgs/PlannerStatus` | `mighty_node` | `goal_selector` | pub mighty_node: reliable, volatile, keep_last 10<br>sub goal_selector: reliable, volatile, keep_last 10 | `src/goal_selector/goal_selector_node.cpp:106`<br>`src/mighty/mighty_node.cpp:181` |  |
 | `planning_map_2d` | `nav_msgs/OccupancyGrid` | `mighty_node` | - | pub mighty_node: reliable, transient_local, keep_last 1 | `src/mighty/mighty_node.cpp:119` | **no subscriber in this stack** |
 | `planning_occ_2d_topic` | `nav_msgs/OccupancyGrid` | `mapper` | - | pub mapper: best_effort, volatile | `docs/external_nodes.yaml` | **no subscriber in this stack**<br>mapper entry unverified<br>mapper: PUBLISHED BUT UNUSED: nothing subscribes since Phase 5 (recorded by pass1_rover.sh only); producer is not in this workspace |
 | `point_A` | `geometry_msgs/PointStamped` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:155` | **no subscriber in this stack** |
@@ -173,18 +184,18 @@ flowchart LR
 | `point_G` | `geometry_msgs/PointStamped` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:156` | **no subscriber in this stack** |
 | `point_G_term` | `geometry_msgs/PointStamped` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:158` | **no subscriber in this stack** |
 | `point_current_state` | `geometry_msgs/PointStamped` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:160` | **no subscriber in this stack** |
-| `point_selector_goal` | `geometry_msgs/PointStamped` | `goal_selector` | - | pub goal_selector: best_effort, volatile, keep_last 1 | `src/goal_selector/goal_selector_node.cpp:87` | **no subscriber in this stack** |
+| `point_selector_goal` | `geometry_msgs/PointStamped` | `goal_selector` | - | pub goal_selector: best_effort, volatile, keep_last 1 | `src/goal_selector/goal_selector_node.cpp:89` | **no subscriber in this stack** |
 | `poly_safe` | `decomp_ros_msgs/PolyhedronArray` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:140` | **no subscriber in this stack** |
 | `poly_whole` | `decomp_ros_msgs/PolyhedronArray` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:138` | **no subscriber in this stack** |
 | `predicted_trajs` | `dynus_interfaces/DynTraj` | - | `mighty_node` | sub mighty_node: reliable, volatile, keep_last 10 | `src/mighty/mighty_node.cpp:189` | **no publisher in this stack** |
-| `selector_map_2d` | `nav_msgs/OccupancyGrid` | `goal_selector` | - | pub goal_selector: reliable, transient_local, keep_last 1 | `src/goal_selector/goal_selector_node.cpp:82` | **no subscriber in this stack** |
+| `selector_map_2d` | `nav_msgs/OccupancyGrid` | `goal_selector` | - | pub goal_selector: reliable, transient_local, keep_last 1 | `src/goal_selector/goal_selector_node.cpp:84` | **no subscriber in this stack** |
 | `sensor_point_cloud` | `sensor_msgs/PointCloud2` | - | `mighty_node` (sim only) | sub mighty_node: reliable, volatile, keep_last 5 (from_rmw copies only history+depth; reliability/durability stay default) | `src/mighty/mighty_node.cpp:278` | **no publisher in this stack**<br>sub mighty_node inactive on hardware (not drawn): `!use_hardware && !(sim_env != "fake_sim")` |
 | `setpoint_vis` | `geometry_msgs/PointStamped` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:146` | **no subscriber in this stack** |
-| `state` | `dynus_interfaces/State` | `convert_odom_to_state` | `mighty_node`<br>`goal_selector` | pub convert_odom_to_state: reliable, volatile, keep_last 1<br>sub mighty_node: reliable, volatile, keep_last 10<br>sub goal_selector: reliable, volatile, keep_last 10 | `src/goal_selector/goal_selector_node.cpp:98`<br>`src/mighty/convert_odom_to_state.cpp:12`<br>`src/mighty/mighty_node.cpp:192` |  |
+| `state` | `dynus_interfaces/State` | `convert_odom_to_state` | `mighty_node`<br>`goal_selector` | pub convert_odom_to_state: reliable, volatile, keep_last 1<br>sub mighty_node: reliable, volatile, keep_last 10<br>sub goal_selector: reliable, volatile, keep_last 10 | `src/goal_selector/goal_selector_node.cpp:100`<br>`src/mighty/convert_odom_to_state.cpp:12`<br>`src/mighty/mighty_node.cpp:192` |  |
 | `static_map_marker` | `visualization_msgs/MarkerArray` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:105` | **no subscriber in this stack** |
 | `static_push_points` | `visualization_msgs/MarkerArray` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:151` | **no subscriber in this stack** |
-| `term_goal` | `geometry_msgs/PoseStamped` | `goal_selector` | `mighty_node` | pub goal_selector: reliable, volatile, keep_last 10<br>sub mighty_node: reliable, volatile, keep_last 10 | `src/goal_selector/goal_selector_node.cpp:80`<br>`src/mighty/mighty_node.cpp:195` |  |
-| `term_goal_rviz` | `geometry_msgs/PoseStamped` | `rviz` | `goal_selector` | pub rviz: reliable, volatile, keep_last 5<br>sub goal_selector: reliable, volatile, keep_last 10 | `docs/external_nodes.yaml`<br>`src/goal_selector/goal_selector_node.cpp:101` | rviz: 2D Goal Pose tool, RR04/RR05/RR06 configs (rviz/mighty_RR04.rviz:907-913). UAV (mighty_PX03.rviz) and sim configs publish to term_goal directly (spec section 13) |
+| `term_goal` | `geometry_msgs/PoseStamped` | `goal_selector` | `mighty_node` | pub goal_selector: reliable, volatile, keep_last 10<br>sub mighty_node: reliable, volatile, keep_last 10 | `src/goal_selector/goal_selector_node.cpp:82`<br>`src/mighty/mighty_node.cpp:195` |  |
+| `term_goal_rviz` | `geometry_msgs/PoseStamped` | `rviz` | `goal_selector` | pub rviz: reliable, volatile, keep_last 5<br>sub goal_selector: reliable, volatile, keep_last 10 | `docs/external_nodes.yaml`<br>`src/goal_selector/goal_selector_node.cpp:103` | rviz: 2D Goal Pose tool, RR04/RR05/RR06 configs (rviz/mighty_RR04.rviz:907-913). UAV (mighty_PX03.rviz) and sim configs publish to term_goal directly (spec section 13) |
 | `traj_committed_colored` | `visualization_msgs/MarkerArray` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:142` | **no subscriber in this stack** |
 | `traj_received` | `visualization_msgs/Marker` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:163` | **no subscriber in this stack** |
 | `traj_subopt_colored` | `visualization_msgs/MarkerArray` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:144` | **no subscriber in this stack** |
@@ -207,7 +218,7 @@ None: no `create_client` / `create_service` call exists in the scanned sources.
 
 Published but with no subscriber in this stack (collapsed visualization topics excluded): `command_to_exec_time`, `goal`, `goal_reached`, `planning_map_2d`, `planning_occ_2d_topic`, `selector_map_2d`, `trajectory`, `yaw_output`.
 
-Subscribed (on hardware) but with no publisher in this stack: `/frame_align/<ns>/<other_name>`, `occupancy_grid`, `predicted_trajs`.
+Subscribed (on hardware) but with no publisher in this stack: `/frame_align/<ns>/<other_name>`, `<gate_echo_topic_>`, `<goal_fence_topic_>`, `<occ_2d_topic_>`, `<par_.esdf_2d_topic_name>`, `<par_.occ_2d_topic_name>`, `<persistent_map_topic_>`, `occupancy_grid`, `predicted_trajs`.
 
 Launch remappings that do not match any topic the node creates (dead remaps):
 
