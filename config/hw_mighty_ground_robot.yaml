@@ -316,7 +316,7 @@ mighty_node:
 
         # --- Debug ---
         global_planner_verbose: false                   # [-] Global planner debug output
-        debug_verbose: true                            # [-] General debug output
+        debug_verbose: false                            # [-] General debug output
         closed_form_traj_verbose: false                 # [-] Closed-form trajectory debug
         verbose_computation_time: false                 # [-] Print computation times
 
