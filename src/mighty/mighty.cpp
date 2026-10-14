@@ -385,7 +385,7 @@ bool MIGHTY::needReplan(const state& local_state, const state& local_G_term,
       drone_status_ == DroneStatus::TRAVELING) {
     state G_now;
     getG(G_now);
-    const double dist_to_G = (local_state.pos - G_now.pos).norm();
+    const double dist_to_G = dist(local_state.pos, G_now.pos);  // xy: G z is default_goal_z too
     const double dist_G_to_term = (G_now.pos - local_G_term.pos).norm();
     const bool G_is_final = dist_G_to_term < 1e-3;
     if (!G_is_final && dist_to_G < par_.goal_radius) {
