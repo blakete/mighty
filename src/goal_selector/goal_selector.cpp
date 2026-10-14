@@ -451,6 +451,17 @@ bool GoalSelector::stuckWatchdogFired(double now) {
   return false;
 }
 
+// While the fence pause holds the current frontier pursuit, the gate is holding the robot too: keep
+// the pursuit's stuck and pursuit-timeout clocks from running, or the first tick after the fence is
+// ready again drops a valid goal as stuck / timed out. Both clocks run normally again on resume.
+void GoalSelector::holdPursuitClocks(double now) {
+  const double dt = fence_pause_tick_t_ >= 0.0 ? now - fence_pause_tick_t_ : 0.0;
+  fence_pause_tick_t_ = now;
+  if (!exploration_active_) return;
+  if (explore_last_progress_t_ >= 0.0) explore_last_progress_t_ = now;
+  frontier_manager_->extendPursuit(current_explore_id_, dt);
+}
+
 void GoalSelector::selectAndCommit(double now, Output& out) {
   if (!params_.expl_enabled) return;
   if (manual_goal_active_) return;  // manual override: no selection / preemption / watchdog
@@ -463,7 +474,11 @@ void GoalSelector::selectAndCommit(double now, Output& out) {
   // ranking, also when the fence arrived after the last detection pass.
   const FenceGate gate = fenceGate(now);
   noteFenceGate(now, gate, out);
-  if (gate == FenceGate::kPause) return;
+  if (gate == FenceGate::kPause) {
+    holdPursuitClocks(now);
+    return;
+  }
+  fence_pause_tick_t_ = -1.0;
   if (gate == FenceGate::kFilter) invalidateNogoFrontiers(now, out);
 
   // If we still have an in-progress exploration goal that hasn't been marked VISITED/INVALIDATED

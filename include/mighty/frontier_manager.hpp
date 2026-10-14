@@ -168,6 +168,12 @@ class FrontierManager {
    */
   void clearPursuit(uint64_t id);
 
+  /** @brief Push an armed pursuit deadline back by dt seconds (no-op if none is armed).
+   *  Used while the goal selector holds a pursuit with the robot stopped (geofence pause),
+   *  so that time does not count against the pursuit budget.
+   */
+  void extendPursuit(uint64_t id, double dt);
+
   /** @brief Utility of a specific record against the CURRENT robot pose/grid.
    *  Same scoring as selectNextGoal(). nullopt if the id is unknown. Used by
    *  goal preemption to compare the in-flight goal against a fresh candidate.

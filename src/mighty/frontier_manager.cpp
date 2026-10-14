@@ -423,6 +423,16 @@ void FrontierManager::markSelected(uint64_t id, const Eigen::Vector2d& robot_xy,
   }
 }
 
+void FrontierManager::extendPursuit(uint64_t id, double dt) {
+  if (dt <= 0.0) return;
+  for (auto& r : records_) {
+    if (r.id == id) {
+      if (r.pursuit_deadline_t > 0.0) r.pursuit_deadline_t += dt;
+      return;
+    }
+  }
+}
+
 void FrontierManager::clearPursuit(uint64_t id) {
   for (auto& r : records_) {
     if (r.id == id) {

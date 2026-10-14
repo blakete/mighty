@@ -166,6 +166,44 @@ TEST(GoalSelectorGeofence, PauseHoldsCurrentPursuit) {
   EXPECT_EQ(h.goals.size(), n_goals) << "no new commits while paused";
 }
 
+TEST(GoalSelectorGeofence, PauseStopsPursuitClocks) {
+  // JR02 2026-10-14: the robot had moved (stuck watchdog armed), the geofence restarted and the gate
+  // held the robot; on resume the held frontier was invalidated as "stuck". The pause must hold the
+  // stuck clock and the pursuit deadline (5 m / 0.5 m/s * 3 = 30 s budget here).
+  Harness h(BaseParams());
+  InitCorridor(h);
+  h.cycle();  // no fence: LEFT committed
+  ASSERT_TRUE(GoalNear(h.goals.back(), kLeftX, kCorridorY));
+  const auto left_id = h.sel.currentExploreId();
+  h.advance(1.0);
+  h.setRobot(kStartX - 1.0, kStartY);  // moved 1 m: the stuck watchdog is armed
+  h.cycle();
+  ASSERT_EQ(h.sel.currentExploreId(), left_id);
+
+  GoalFence f;
+  f.active = true;
+  f.ready = false;
+  for (int i = 0; i < 40; ++i) {  // 40 s held: longer than the stuck timeout and the pursuit budget
+    h.advance(1.0);
+    h.sel.onGoalFence(h.now, f, Transform2D{});
+    h.cycle();
+  }
+  h.advance(1.0);
+  h.sel.onGoalFence(h.now, KeepIn(-10.0, 40.0), Transform2D{});  // ready; LEFT allowed
+  h.cycle();
+  EXPECT_EQ(h.sel.currentExploreId(), left_id);
+  EXPECT_NE(h.sel.frontierManager().find(left_id)->state, FrontierState::INVALIDATED);
+  EXPECT_FALSE(h.hasLog(LogMessage::Level::kWarn, "stuck"));
+
+  // The clocks run again after resume: no motion for longer than the stuck timeout -> released.
+  for (int i = 0; i < 6; ++i) {
+    h.advance(1.0);
+    h.sel.onGoalFence(h.now, KeepIn(-10.0, 40.0), Transform2D{});
+    h.cycle();
+  }
+  EXPECT_TRUE(h.hasLog(LogMessage::Level::kWarn, "stuck"));
+}
+
 TEST(GoalSelectorGeofence, StalePauseFailsOpen) {
   Harness h(BaseParams());
   InitCorridor(h);

@@ -380,8 +380,10 @@ class GoalSelector {
   double fence_t_{-1.0};
   FenceGate last_fence_gate_{FenceGate::kOpen};
   double last_fence_pause_log_t_{-1.0e18};
+  double fence_pause_tick_t_{-1.0};  // last select tick spent in kPause (-1: not paused)
   bool fenceAllowsMap(double x, double y) const;   // goalFenceAllows on a map_frame_id point
   void noteFenceGate(double now, FenceGate gate, Output& out);
+  void holdPursuitClocks(double now);  // kPause: stuck / pursuit-timeout clocks do not run
   void invalidateNogoFrontiers(double now, Output& out);
   std::shared_ptr<const OccGrid2D> frontier_grid_;  // derived from the detect grid (N1/N5)
   std::vector<uint8_t> frontier_passable_;          // walkable-but-UNKNOWN mask for frontier_grid_
