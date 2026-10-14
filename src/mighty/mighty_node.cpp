@@ -1563,6 +1563,11 @@ void MIGHTY_NODE::publishVelocityInText(const Eigen::Vector3d& position, double 
  * @brief Callback function to check if the goal is reached
  */
 void MIGHTY_NODE::goalReachedCheckCallback() {
+  // Stamp read BEFORE the status check, as in replanCallback: terminalGoalCallback
+  // calls setTerminalGoal() (status -> TRAVELING) before storing the new stamp, so
+  // a goal arriving in between is reported under the old stamp (which the selector
+  // ignores) instead of the new goal being reported REACHED.
+  const auto goal_stamp = getGoalStamp();
   if (!mighty_ptr_->goalReachedCheck()) return;
 
   if (use_benchmark_) {
@@ -1571,7 +1576,7 @@ void MIGHTY_NODE::goalReachedCheckCallback() {
   // goal_reached is published on every arrival (user decision, spec §11.11). It used to be gated on
   // `use_benchmark_ || expl_enabled`; expl_enabled no longer exists in the planner.
   pub_goal_reached_->publish(std_msgs::msg::Empty());
-  publishPlannerStatus(goal_selector_msgs::msg::PlannerStatus::REACHED, getGoalStamp());
+  publishPlannerStatus(goal_selector_msgs::msg::PlannerStatus::REACHED, goal_stamp);
 }
 
 // ----------------------------------------------------------------------------

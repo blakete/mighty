@@ -345,19 +345,22 @@ void MIGHTY::computeG_corridorHop(const state& A, const state& G_term,
  */
 
 bool MIGHTY::needReplan(const state& local_state, const state& local_G_term,
-                        const state& last_plan_state) {
+                        const state& last_plan_state, uint64_t goal_gen) {
+  // Status transitions below are computed against local_G_term; they go through
+  // changeDroneStatusForGoal() so they are dropped if a new goal arrived since
+  // replan() read it (otherwise the new goal could be marked GOAL_REACHED at once).
   // Compute the distance to the terminal goal
   double dist_to_term_G = (local_state.pos - local_G_term.pos).norm();
   double dist_from_last_plan_state_to_term_G = (last_plan_state.pos - local_G_term.pos).norm();
 
   if (dist_to_term_G < par_.goal_radius) {
-    changeDroneStatus(DroneStatus::GOAL_REACHED);
+    changeDroneStatusForGoal(DroneStatus::GOAL_REACHED, goal_gen);
     return false;
   }
 
   if (dist_to_term_G < par_.goal_seen_radius) {
-    changeDroneStatus(
-        DroneStatus::GOAL_SEEN);  // This triggers to use the hard final state constraint
+    // This triggers to use the hard final state constraint
+    if (!changeDroneStatusForGoal(DroneStatus::GOAL_SEEN, goal_gen)) return false;
   }
 
   if (drone_status_ == DroneStatus::GOAL_SEEN &&
@@ -380,8 +383,8 @@ bool MIGHTY::needReplan(const state& local_state, const state& local_G_term,
     const double dist_G_to_term = (G_now.pos - local_G_term.pos).norm();
     const bool G_is_final = dist_G_to_term < 1e-3;
     if (!G_is_final && dist_to_G < par_.goal_radius) {
-      corridor_hop_yawing_ = true;
-      changeDroneStatus(DroneStatus::YAWING);
+      corridor_hop_yawing_ = true;  // set before YAWING, as the yaw controller reads both
+      if (!changeDroneStatusForGoal(DroneStatus::YAWING, goal_gen)) corridor_hop_yawing_ = false;
       return false;
     }
   }
@@ -716,11 +719,18 @@ std::tuple<bool, bool> MIGHTY::replan(double last_replaning_computation_time, do
   // Get states we need
   state local_state, local_G_term, last_plan_state;
   getState(local_state);
-  getGterm(local_G_term);
+  uint64_t goal_gen;
+  {
+    // G_term_ and its generation together: needReplan's status transitions are
+    // tied to this goal (see changeDroneStatusForGoal).
+    std::lock_guard<std::mutex> lock(mtx_goal_gen_);
+    getGterm(local_G_term);
+    goal_gen = goal_gen_;
+  }
   getLastPlanState(last_plan_state);
 
   // Check if we need to replan based on the distance to the terminal goal
-  if (!needReplan(local_state, local_G_term, last_plan_state))
+  if (!needReplan(local_state, local_G_term, last_plan_state, goal_gen))
     return std::make_tuple(false, false);  // outcome: SKIPPED
 
   if (par_.debug_verbose)
@@ -1710,16 +1720,23 @@ void MIGHTY::setTerminalGoal(const state& term_goal) {
   state local_state;
   getState(local_state);
 
-  // Set the terminal goal
-  setGterm(term_goal);
-
-  // Project the terminal goal to the sphere
   {
-    std::lock_guard<std::mutex> lock(mtx_G_);
-    G_.pos = mighty_utils::projectPointToSphere(local_state.pos, term_goal.pos, par_.horizon);
-  }
+    // New goal, new generation, TRAVELING: one step for any status transition
+    // still being computed against the previous goal (changeDroneStatusForGoal).
+    std::lock_guard<std::mutex> lock(mtx_goal_gen_);
 
-  changeDroneStatus(DroneStatus::TRAVELING);
+    // Set the terminal goal
+    setGterm(term_goal);
+    ++goal_gen_;
+
+    // Project the terminal goal to the sphere
+    {
+      std::lock_guard<std::mutex> lock_G(mtx_G_);
+      G_.pos = mighty_utils::projectPointToSphere(local_state.pos, term_goal.pos, par_.horizon);
+    }
+
+    changeDroneStatus(DroneStatus::TRAVELING);
+  }
 
   if (!terminal_goal_initialized_) terminal_goal_initialized_ = true;
 }
@@ -1770,6 +1787,15 @@ void MIGHTY::changeDroneStatus(int new_status) {
   std::cout << std::endl;
 
   drone_status_ = new_status;
+}
+
+// ----------------------------------------------------------------------------
+
+bool MIGHTY::changeDroneStatusForGoal(int new_status, uint64_t goal_gen) {
+  std::lock_guard<std::mutex> lock(mtx_goal_gen_);
+  if (goal_gen != goal_gen_) return false;  // a new goal arrived; drop the stale transition
+  changeDroneStatus(new_status);
+  return true;
 }
 
 // ----------------------------------------------------------------------------

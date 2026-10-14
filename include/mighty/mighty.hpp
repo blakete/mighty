@@ -9,6 +9,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -75,7 +76,7 @@ class MIGHTY {
    *  @return True if replanning is necessary.
    */
   bool needReplan(const state& local_state, const state& local_G_term,
-                  const state& last_plan_state);
+                  const state& last_plan_state, uint64_t goal_gen);
 
   /** @brief Find the planning start state A and its timestamp.
    *  @param A Output start state for the next plan.
@@ -209,6 +210,14 @@ class MIGHTY {
    *  @param new_status One of DroneStatus enum values.
    */
   void changeDroneStatus(int new_status);
+
+  /** @brief changeDroneStatus() for a transition computed against a specific goal
+   *  (needReplan): applied only if that goal is still the current one, i.e. no
+   *  setTerminalGoal() happened since replan() read it.
+   *  @param goal_gen goal_gen_ read together with G_term_ at the start of the tick.
+   *  @return False if the goal changed meanwhile (the transition is dropped).
+   */
+  bool changeDroneStatusForGoal(int new_status, uint64_t goal_gen);
 
   /** @brief Compute the desired yaw for the next goal based on velocity direction.
    *  @param next_goal Goal state whose yaw field is updated.
@@ -541,9 +550,17 @@ class MIGHTY {
   double dyaw_filtered_ = 0.0;                      // Filtered dyaw
   PieceWiseQuinticPol pwp_to_share_;                // Piecewise polynomial to share
 
-  // Drone status
-  int drone_status_ =
-      DroneStatus::GOAL_REACHED;  // status_ can be TRAVELING, GOAL_SEEN, GOAL_REACHED
+  // Drone status. Atomic: written by the goal thread (setTerminalGoal), the replan
+  // thread (needReplan, getDesiredYaw) and read by the goal-reached timer.
+  std::atomic<int> drone_status_{
+      DroneStatus::GOAL_REACHED};  // status_ can be TRAVELING, GOAL_SEEN, GOAL_REACHED
+
+  // Goal generation: bumped by setTerminalGoal() together with G_term_, so a status
+  // transition computed against an older goal can be detected and dropped
+  // (changeDroneStatusForGoal). Guarded by mtx_goal_gen_; lock order is always
+  // mtx_goal_gen_ -> mtx_G_term_.
+  std::mutex mtx_goal_gen_;
+  uint64_t goal_gen_ = 0;
 
   // Corridor-hop turn-in-place override (ground robot only). When true, the
   // YAWING branch in the yaw controller uses G_.yaw (the heading to the next
