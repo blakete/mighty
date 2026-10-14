@@ -559,7 +559,7 @@ void MIGHTY_NODE::declareParameters() {
   this->declare_parameter("use_free_goal", false);
   this->declare_parameter("free_goal_factor", 1.0);
   this->declare_parameter("relocate_occupied_goal", true);
-  this->declare_parameter("goal_relocation_clearance_m", 1.0);
+  this->declare_parameter("goal_relocation_clearance_m", 0.0);
   this->declare_parameter("max_dist_vertexes", 5.0);
   this->declare_parameter("w_unknown", 1.0);
   this->declare_parameter("w_align", 60.0);

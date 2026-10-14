@@ -94,9 +94,10 @@ struct parameters {
   bool use_free_goal;
   double free_goal_factor;
   bool relocate_occupied_goal;
-  double goal_relocation_clearance_m{1.0};  // [m] Min clearance from occupied cells enforced
+  double goal_relocation_clearance_m{0.0};  // [m] Extra standoff beyond the inflation band
                                              // when relocating a goal out of occupied space
-                                             // (ground-robot 2D path; see sanitizeTerminalGoal2D)
+                                             // (ground-robot 2D path; see sanitizeTerminalGoal2D).
+                                             // 0 = nearest cell outside the band
 
   // LOS post processing parameters
   int los_cells;
