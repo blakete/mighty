@@ -354,6 +354,7 @@ void MIGHTY_NODE::declareParameters() {
   // Global planner parameters
   this->declare_parameter("file_path", "/home/kkondo/code/dynus_ws/src/dynus/data/data.txt");
   this->declare_parameter("use_benchmark", false);
+  this->declare_parameter("publish_planner_status", true);
   this->declare_parameter("start_yaw", -90.0);
   this->declare_parameter("global_planner", "sjps");
   this->declare_parameter("global_planner_verbose", false);
@@ -643,6 +644,7 @@ void MIGHTY_NODE::setParameters() {
   // Global Planner parameters
   file_path_ = this->get_parameter("file_path").as_string();
   use_benchmark_ = this->get_parameter("use_benchmark").as_bool();
+  publish_planner_status_ = this->get_parameter("publish_planner_status").as_bool();
   par_.global_planner = this->get_parameter("global_planner").as_string();
   par_.global_planner_verbose = this->get_parameter("global_planner_verbose").as_bool();
   par_.global_planner_heuristic_weight =
@@ -1513,6 +1515,13 @@ builtin_interfaces::msg::Time MIGHTY_NODE::getGoalStamp() {
  */
 void MIGHTY_NODE::publishPlannerStatus(uint8_t status,
                                        const builtin_interfaces::msg::Time& goal_stamp) {
+  // Off only when no goal_selector runs: it needs FAILED (unreachable count) and REACHED.
+  if (!publish_planner_status_) return;
+  // The selector ignores statuses for no goal (stamp 0), and SKIPPED is neutral to it; at the
+  // 100 Hz replan rate these were most of the traffic while idle or parked.
+  if (status == goal_selector_msgs::msg::PlannerStatus::SKIPPED ||
+      (goal_stamp.sec == 0 && goal_stamp.nanosec == 0))
+    return;
   goal_selector_msgs::msg::PlannerStatus msg;
   msg.header.stamp = this->now();
   msg.header.frame_id = par_.map_frame_id;
@@ -1573,8 +1582,19 @@ void MIGHTY_NODE::goalReachedCheckCallback() {
   if (use_benchmark_) {
     logData();
   }
-  // goal_reached is published on every arrival (user decision, spec §11.11). It used to be gated on
-  // `use_benchmark_ || expl_enabled`; expl_enabled no longer exists in the planner.
+  // goal_reached / REACHED are published once per arrival (user decision, spec §11.11). They used
+  // to be gated on `use_benchmark_ || expl_enabled`; expl_enabled no longer exists in the planner.
+  // This timer sees GOAL_REACHED every 100 ms while the robot is parked, but the selector acts on
+  // the first REACHED only, so repeats for the same goal (and the start-up GOAL_REACHED with no
+  // goal, stamp 0) are not sent.
+  if (goal_stamp.sec == 0 && goal_stamp.nanosec == 0) return;
+  {
+    std::lock_guard<std::mutex> lock(mtx_goal_stamp_);
+    if (goal_stamp.sec == last_reached_stamp_.sec &&
+        goal_stamp.nanosec == last_reached_stamp_.nanosec)
+      return;
+    last_reached_stamp_ = goal_stamp;
+  }
   pub_goal_reached_->publish(std_msgs::msg::Empty());
   publishPlannerStatus(goal_selector_msgs::msg::PlannerStatus::REACHED, goal_stamp);
 }

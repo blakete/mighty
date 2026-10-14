@@ -323,6 +323,7 @@ mighty_node:
 
         # --- Benchmarking ---
         use_benchmark: true                             # [-] Enable benchmarking data logging
+        publish_planner_status: true                    # [-] planner_status (SUCCESS/PARTIAL/FAILED per replan, REACHED once per goal) to goal_selector. Set false only when goal_selector is not running: the selector needs FAILED (unreachable count) and REACHED.
         file_path: ""                                   # Path to save benchmark CSV
         use_only_global_planner: false                  # [-] Use only global planner for benchmarking
 

@@ -373,6 +373,7 @@ class MIGHTY_NODE : public rclcpp::Node {
   bool state_initialized_ = false;           // State initialized
   bool replan_timer_started_ = false;        // Replan timer started
   bool use_benchmark_ = false;               // Use benchmark
+  bool publish_planner_status_ = true;       // planner_status to goal_selector (param)
 
   // Actual-trajectory history for visualization (sando-style: a single
   // persistent LINE_STRIP marker built from a bounded history of past states,
@@ -422,6 +423,9 @@ class MIGHTY_NODE : public rclcpp::Node {
   // terminalGoalCallback and read by
   // the replan and goal-reached timers, which run in different callback groups.
   builtin_interfaces::msg::Time goal_stamp_;
+  // Stamp of the goal goal_reached / REACHED was last sent for (once per goal). Guarded by
+  // mtx_goal_stamp_ (the goal-reached timer is in a reentrant group).
+  builtin_interfaces::msg::Time last_reached_stamp_;
   std::mutex mtx_goal_stamp_;
   builtin_interfaces::msg::Time getGoalStamp();
   void publishPlannerStatus(uint8_t status, const builtin_interfaces::msg::Time& goal_stamp);
