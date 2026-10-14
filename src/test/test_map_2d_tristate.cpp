@@ -181,3 +181,71 @@ TEST(Map2DInflation, GoalBoxKeepsInflation) {
   mu->free2DCell(47, 45, 0.1f);
   EXPECT_FALSE(mu->is2DOccupied(47, 45)) << "default free2DCell still clears everything";
 }
+
+// Goal queries at WORLD points (sanitizeTerminalGoal2D). The planner window is
+// robot-centred, not the world: a goal beyond it is unobserved and must not read
+// as occupied, or a far goal gets "relocated" to the window edge or dropped.
+namespace {
+
+// World point at fractional cell coordinates (fx, fy) of the window. Callers
+// keep >= 0.2 cell from cell edges so float noise cannot flip floor().
+Vec3f WorldAt(mighty::VoxelMapUtil& mu, double fx, double fy) {
+  const auto o = mu.getOrigin();
+  return Vec3f(o(0) + fx * RES, o(1) + fy * RES, 0.0);
+}
+
+}  // namespace
+
+TEST(Map2DGoalQueries, OutOfWindowPointIsNotOccupied) {
+  auto mu = MakeWindow();
+  EXPECT_FALSE(mu->is2DOccupiedInWindow(WorldAt(*mu, 45.5, 45.5))) << "no 2D map yet";
+  mu->buildMap2DFromOcc2D(*OneObstacleGrid(*mu), 0.5, 100.0);
+
+  EXPECT_TRUE(mu->is2DOccupiedInWindow(WorldAt(*mu, 45.5, 45.5)));
+  EXPECT_TRUE(mu->is2DOccupiedInWindow(WorldAt(*mu, 44.5, 44.5)));
+  EXPECT_FALSE(mu->is2DOccupiedInWindow(WorldAt(*mu, 50.5, 50.5))) << "free";
+  EXPECT_FALSE(mu->is2DOccupiedInWindow(WorldAt(*mu, 40.5, 40.5))) << "mapper unknown";
+  EXPECT_FALSE(mu->is2DOccupiedInWindow(WorldAt(*mu, 5.5, 5.5))) << "no mapper coverage";
+  // beyond each window edge: unobserved, trusted
+  EXPECT_FALSE(mu->is2DOccupiedInWindow(WorldAt(*mu, -0.5, 50.5)));
+  EXPECT_FALSE(mu->is2DOccupiedInWindow(WorldAt(*mu, DIM + 0.5, 50.5)));
+  EXPECT_FALSE(mu->is2DOccupiedInWindow(WorldAt(*mu, 50.5, -0.5)));
+  EXPECT_FALSE(mu->is2DOccupiedInWindow(WorldAt(*mu, 50.5, DIM + 100.5)));
+  // the cell-index helper keeps its conservative contract for the planner
+  EXPECT_TRUE(mu->is2DOccupied(-1, 50));
+  EXPECT_TRUE(mu->is2DOccupied(DIM, 50));
+}
+
+TEST(Map2DGoalQueries, UsesFloorCellConvention) {
+  auto mu = MakeWindow();
+  mu->buildMap2DFromOcc2D(*OneObstacleGrid(*mu), 0.5, 100.0);  // obstacle block (44..45, 44..45)
+  // floatToInt() is half a cell off (46.2 -> 45, 44.2 -> 43) and would invert both.
+  EXPECT_FALSE(mu->is2DOccupiedInWindow(WorldAt(*mu, 46.2, 45.5)));
+  EXPECT_TRUE(mu->is2DOccupiedInWindow(WorldAt(*mu, 44.2, 45.5)));
+  int x, y;
+  EXPECT_TRUE(mu->worldTo2DCell(WorldAt(*mu, 46.2, 45.5).x(), WorldAt(*mu, 46.2, 45.5).y(), x, y));
+  EXPECT_EQ(x, 46);
+  EXPECT_EQ(y, 45);
+  EXPECT_FALSE(mu->worldTo2DCell(WorldAt(*mu, -0.5, 45.5).x(), WorldAt(*mu, -0.5, 45.5).y(), x, y));
+  EXPECT_EQ(x, -1) << "cell is written even when outside the window";
+}
+
+TEST(Map2DGoalQueries, ClearanceDiskSkipsOutOfWindowCells) {
+  auto mu = MakeWindow();
+  mu->buildMap2DFromOcc2D(*OneObstacleGrid(*mu), 0.5, 100.0);
+  // a 0.5 m disk next to the window edge reaches past it: not an obstacle
+  EXPECT_TRUE(mu->is2DClearOfOccupied(WorldAt(*mu, 1.5, 50.5), 0.5));
+  EXPECT_TRUE(mu->is2DClearOfOccupied(WorldAt(*mu, -20.5, 50.5), 0.5)) << "fully outside";
+  // the real wall is still found: block edge at x=45, 3 cells from 48 and 4 from 49
+  EXPECT_FALSE(mu->is2DClearOfOccupied(WorldAt(*mu, 48.5, 45.5), 0.3));
+  EXPECT_TRUE(mu->is2DClearOfOccupied(WorldAt(*mu, 49.5, 45.5), 0.3));
+  EXPECT_TRUE(mu->is2DClearOfOccupied(WorldAt(*mu, 45.5, 45.5), 0.0)) << "clearance 0 = no check";
+}
+
+TEST(Map2DGoalQueries, ClearanceCountsInflationNotUnknown) {
+  auto mu = MakeWindow();
+  mu->setInflation2D(0.3f);  // band reaches x=48 on row 45
+  mu->buildMap2DFromOcc2D(*OneObstacleGrid(*mu), 0.5, 100.0);
+  EXPECT_FALSE(mu->is2DClearOfOccupied(WorldAt(*mu, 49.5, 45.5), 0.1)) << "band counts";
+  EXPECT_TRUE(mu->is2DClearOfOccupied(WorldAt(*mu, 40.5, 40.5), 0.1)) << "unknown pocket does not";
+}

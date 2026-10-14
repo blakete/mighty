@@ -147,7 +147,9 @@ class HGPManager {
    *  findClosestNonOccupied2DPoint() in map_util.hpp for why) and
    *  checkIfPointOccupied() cannot see real occupancy there.
    *  @param point Query position in world coordinates.
-   *  @return True if the 2D cell is occupied. False if no 2D map exists yet.
+   *  @return True if the 2D cell is occupied. False if no 2D map exists yet, or
+   *  if the point is outside the 2D window (unobserved, so trusted -- see
+   *  VoxelMapUtil::is2DOccupiedInWindow()).
    */
   bool checkIfPointOccupied2D(const Vec3f& point);
 
@@ -155,6 +157,7 @@ class HGPManager {
    *  Unlike checkIfPointOccupied2D(), this checks a disk around the point, not
    *  just the cell it falls in -- used by goal relocation (sanitizeTerminalGoal2D)
    *  to guarantee real standoff instead of merely "not inside an obstacle".
+   *  Unknown and out-of-window cells count as clear.
    *  @param point Query position in world coordinates.
    *  @param clearance_m Required clearance in meters.
    *  @return True if clear (or no 2D map yet / clearance_m <= 0).

@@ -1974,6 +1974,53 @@ class MapUtil {
     return idx < inflated_only_2d_.size() && inflated_only_2d_[idx] != 0;
   }
 
+  /** @brief World (x, y) -> 2D cell, floor convention: cell i spans
+   *  [origin + i*res, origin + (i+1)*res), which is how the 2D builders rasterize.
+   *  NOT floatToInt(), which is half a cell off. x/y are always written.
+   *  @return True if the cell is inside the 2D window. */
+  bool worldTo2DCell(double wx, double wy, int& x, int& y) const {
+    x = static_cast<int>(std::floor((wx - origin_d_(0)) / res_));
+    y = static_cast<int>(std::floor((wy - origin_d_(1)) / res_));
+    return x >= 0 && x < dim_(0) && y >= 0 && y < dim_(1);
+  }
+
+  /** @brief Goal check at a WORLD point: true if its cell is OCCUPIED (inflation
+   *  included) inside the 2D window, false OUTSIDE the window. The window is
+   *  robot-centred, not the world: a point beyond it is unobserved, so it is
+   *  trusted like the 3D isOccupied() does (plan() clamps such a goal to the
+   *  window edge). is2DOccupied(x, y) stays conservative for the planner. */
+  bool is2DOccupiedInWindow(const Vec3f& p) const {
+    if (!has_2d_map_ || res_ <= 0.0) return false;
+    int x, y;
+    return worldTo2DCell(p.x(), p.y(), x, y) && is2DOccupied(x, y);
+  }
+
+  /** @brief True if no OCCUPIED 2D cell (inflation included) lies within
+   *  clearance_m of p (disk, cell-centre distance). Used by goal relocation
+   *  (sanitizeTerminalGoal2D) to guarantee standoff beyond the inflation band.
+   *  Checks is2DOccupied(), NOT get2DOccupancy(...) != 0: UNKNOWN cells do not
+   *  block, so a goal merely near unmapped space is not rejected. Out-of-window
+   *  cells do not block either -- like unknown, they are not a real obstacle,
+   *  and blocking them would reject goals near the window edge.
+   *  @return True if clear, or if there is no 2D map yet / clearance_m <= 0. */
+  bool is2DClearOfOccupied(const Vec3f& p, double clearance_m) const {
+    if (!has_2d_map_ || res_ <= 0.0 || clearance_m <= 0.0) return true;
+    int cx, cy;
+    worldTo2DCell(p.x(), p.y(), cx, cy);  // centre may be outside; in-window walls still count
+    const int r = std::max(1, static_cast<int>(std::ceil(clearance_m / res_)));
+    const int r2 = r * r;
+    for (int dy = -r; dy <= r; ++dy) {
+      for (int dx = -r; dx <= r; ++dx) {
+        if (dx * dx + dy * dy > r2) continue;
+        const int x = cx + dx;
+        const int y = cy + dy;
+        if (x < 0 || x >= dim_(0) || y < 0 || y >= dim_(1)) continue;
+        if (is2DOccupied(x, y)) return false;
+      }
+    }
+    return true;
+  }
+
   /** @brief World-frame rectangle covered by the mapper grid the 2D map was last
    *  built from. Only buildMap2DFromOcc2D() records it.
    *  @return false if no coverage is known. */

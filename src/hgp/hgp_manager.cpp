@@ -212,46 +212,16 @@ bool HGPManager::checkIfPointOccupied2D(const Vec3f& point) {
   // Locked: see checkIfPointOccupied() above -- same race applies here.
   std::lock_guard<std::mutex> lock(mtx_map_util_);
   const auto& mu = map_util_for_planning_ ? map_util_for_planning_ : map_util_;
-  if (!mu || !mu->has2DMap()) return false;
-
-  int dimX, dimY;
-  mu->get2DDimensions(dimX, dimY);
-  const auto origin = mu->getOrigin();
-  const double res = mu->getRes();
-  if (res <= 0.0) return false;
-
-  const int x = static_cast<int>(std::floor((point.x() - origin(0)) / res));
-  const int y = static_cast<int>(std::floor((point.y() - origin(1)) / res));
-  return mu->is2DOccupied(x, y);
+  // Window test and cell read on the same map under one lock: a window shift
+  // from updateMap() cannot land between them. Outside the window -> false.
+  return mu && mu->is2DOccupiedInWindow(point);
 }
 
 bool HGPManager::isClearOfOccupied2D(const Vec3f& point, double clearance_m) {
   // Locked: see checkIfPointOccupied() above -- same race applies here.
   std::lock_guard<std::mutex> lock(mtx_map_util_);
   const auto& mu = map_util_for_planning_ ? map_util_for_planning_ : map_util_;
-  if (!mu || !mu->has2DMap()) return true;
-
-  const double res = mu->getRes();
-  if (res <= 0.0 || clearance_m <= 0.0) return true;
-
-  const auto origin = mu->getOrigin();
-  const int cx = static_cast<int>(std::floor((point.x() - origin(0)) / res));
-  const int cy = static_cast<int>(std::floor((point.y() - origin(1)) / res));
-
-  // Disk scan in cell units (matches the pattern already used for
-  // hgp_stop_distance_m's tooCloseToObstacle in solveHGP() below), but via
-  // is2DOccupied() specifically -- NOT get2DOccupancy(...) != 0, which also
-  // catches UNKNOWN (val_unknown_ == -1) and would make this reject goals
-  // that are merely near unmapped space rather than a real obstacle.
-  const int r = std::max(1, static_cast<int>(std::ceil(clearance_m / res)));
-  const int r2 = r * r;
-  for (int dy = -r; dy <= r; ++dy) {
-    for (int dx = -r; dx <= r; ++dx) {
-      if (dx * dx + dy * dy > r2) continue;
-      if (mu->is2DOccupied(cx + dx, cy + dy)) return false;
-    }
-  }
-  return true;
+  return !mu || mu->is2DClearOfOccupied(point, clearance_m);
 }
 
 bool HGPManager::get2DPlanningMapSnapshot(std::vector<int8_t>& values,

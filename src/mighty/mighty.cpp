@@ -1806,7 +1806,8 @@ bool MIGHTY::sanitizeTerminalGoal2D(state& goal) {
   // Map not initialized yet (e.g. very first goal at startup): trust the user.
   if (!hgp_manager_.isMapInitialized()) return true;
 
-  // Already free or unknown: nothing to do.
+  // Already free, unknown, or outside the 2D window (unobserved; plan() clamps
+  // it to the window edge): nothing to do.
   if (!hgp_manager_.checkIfPointOccupied2D(goal.pos)) return true;
 
   // Expanding-radius search for the closest free/unknown 2D cell.
