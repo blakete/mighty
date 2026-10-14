@@ -108,3 +108,188 @@ TEST(Map2DTristate, PrecedenceOnMixedOverlap) {
   EXPECT_EQ(mu->get2DOccupancy(24, 25), 0) << "neighbour of the unknown block stays free";
   EXPECT_EQ(mu->get2DOccupancy(30, 30), 100) << "any occupied -> occupied";
 }
+
+namespace {
+
+// 40 x 40 source grid covering planner cells [30, 70) with one occupied cell at
+// planner (45,45) and a 3x3 unknown pocket at planner (39..41, 39..41).
+std::shared_ptr<const OccGrid2D> OneObstacleGrid(mighty::VoxelMapUtil& mu) {
+  const auto o = mu.getOrigin();
+  const int W = 40, H = 40, OFF = 30;
+  std::vector<int8_t> data(W * H, 0);
+  data[15 * W + 15] = 100;
+  for (int iy = 9; iy <= 11; ++iy)
+    for (int ix = 9; ix <= 11; ++ix) data[iy * W + ix] = -1;
+  return OccGrid2D::fromTristate(W, H, RES, o(0) + OFF * RES, o(1) + OFF * RES, data);
+}
+
+}  // namespace
+
+TEST(Map2DInflation, ZeroRadiusLeavesMapUnchanged) {
+  auto mu = MakeWindow();
+  mu->setInflation2D(0.0f);
+  mu->buildMap2DFromOcc2D(*OneObstacleGrid(*mu), 0.5, 100.0);
+  EXPECT_TRUE(mu->is2DOccupied(45, 45));
+  EXPECT_FALSE(mu->is2DOccupied(46, 45));
+  EXPECT_FALSE(mu->is2DInflatedOnly(46, 45));
+}
+
+TEST(Map2DInflation, DiskIsExactAndMarkedInflatedOnly) {
+  auto mu = MakeWindow();
+  mu->setInflation2D(0.3f);  // 3 cells
+  mu->buildMap2DFromOcc2D(*OneObstacleGrid(*mu), 0.5, 100.0);
+
+  // On aligned lattices the builder turns the one source obstacle into the 2x2
+  // planner block (44..45, 44..45); inflation is measured from that block.
+  for (const auto& c : std::vector<std::pair<int, int>>{{44, 44}, {45, 45}}) {
+    EXPECT_TRUE(mu->is2DOccupied(c.first, c.second)) << c.first << "," << c.second;
+    EXPECT_FALSE(mu->is2DInflatedOnly(c.first, c.second)) << c.first << "," << c.second;
+  }
+  // centre distance <= 3 cells from the block: inflated
+  for (const auto& c : std::vector<std::pair<int, int>>{{46, 45}, {48, 45}, {45, 48}, {47, 47}, {41, 44}}) {
+    EXPECT_TRUE(mu->is2DOccupied(c.first, c.second)) << c.first << "," << c.second;
+    EXPECT_TRUE(mu->is2DInflatedOnly(c.first, c.second)) << c.first << "," << c.second;
+  }
+  // centre distance > 3 cells: untouched ((48,46) is sqrt(10) from (45,45))
+  for (const auto& c : std::vector<std::pair<int, int>>{{49, 45}, {48, 46}, {48, 48}, {40, 44}}) {
+    EXPECT_FALSE(mu->is2DOccupied(c.first, c.second)) << c.first << "," << c.second;
+    EXPECT_FALSE(mu->is2DInflatedOnly(c.first, c.second)) << c.first << "," << c.second;
+  }
+  // the unknown pocket is more than 3 cells away and is not a seed itself
+  EXPECT_TRUE(mu->is2DUnknown(40, 40));
+  EXPECT_FALSE(mu->is2DOccupied(38, 40));
+}
+
+TEST(Map2DInflation, RecordsMapperCoverage) {
+  auto mu = MakeWindow();
+  mu->buildMap2DFromOcc2D(*OneObstacleGrid(*mu), 0.5, 100.0);
+  const auto o = mu->getOrigin();
+  double x0, y0, x1, y1;
+  ASSERT_TRUE(mu->get2DCoverage(x0, y0, x1, y1));
+  EXPECT_NEAR(x0, o(0) + 30 * RES, 1e-6);
+  EXPECT_NEAR(y0, o(1) + 30 * RES, 1e-6);
+  EXPECT_NEAR(x1, o(0) + 70 * RES, 1e-6);
+  EXPECT_NEAR(y1, o(1) + 70 * RES, 1e-6);
+}
+
+TEST(Map2DInflation, GoalBoxKeepsInflation) {
+  auto mu = MakeWindow();
+  mu->setInflation2D(0.3f);
+  mu->buildMap2DFromOcc2D(*OneObstacleGrid(*mu), 0.5, 100.0);
+  mu->free2DCell(47, 45, 0.1f, /*keep_inflation=*/true);
+  EXPECT_TRUE(mu->is2DOccupied(47, 45)) << "inflation must survive the goal box";
+  mu->free2DCell(47, 45, 0.1f);
+  EXPECT_FALSE(mu->is2DOccupied(47, 45)) << "default free2DCell still clears everything";
+}
+
+// Goal queries at WORLD points (sanitizeTerminalGoal2D). The planner window is
+// robot-centred, not the world: a goal beyond it is unobserved and must not read
+// as occupied, or a far goal gets "relocated" to the window edge or dropped.
+namespace {
+
+// World point at fractional cell coordinates (fx, fy) of the window. Callers
+// keep >= 0.2 cell from cell edges so float noise cannot flip floor().
+Vec3f WorldAt(mighty::VoxelMapUtil& mu, double fx, double fy) {
+  const auto o = mu.getOrigin();
+  return Vec3f(o(0) + fx * RES, o(1) + fy * RES, 0.0);
+}
+
+}  // namespace
+
+TEST(Map2DGoalQueries, OutOfWindowPointIsNotOccupied) {
+  auto mu = MakeWindow();
+  EXPECT_FALSE(mu->is2DOccupiedInWindow(WorldAt(*mu, 45.5, 45.5))) << "no 2D map yet";
+  mu->buildMap2DFromOcc2D(*OneObstacleGrid(*mu), 0.5, 100.0);
+
+  EXPECT_TRUE(mu->is2DOccupiedInWindow(WorldAt(*mu, 45.5, 45.5)));
+  EXPECT_TRUE(mu->is2DOccupiedInWindow(WorldAt(*mu, 44.5, 44.5)));
+  EXPECT_FALSE(mu->is2DOccupiedInWindow(WorldAt(*mu, 50.5, 50.5))) << "free";
+  EXPECT_FALSE(mu->is2DOccupiedInWindow(WorldAt(*mu, 40.5, 40.5))) << "mapper unknown";
+  EXPECT_FALSE(mu->is2DOccupiedInWindow(WorldAt(*mu, 5.5, 5.5))) << "no mapper coverage";
+  // beyond each window edge: unobserved, trusted
+  EXPECT_FALSE(mu->is2DOccupiedInWindow(WorldAt(*mu, -0.5, 50.5)));
+  EXPECT_FALSE(mu->is2DOccupiedInWindow(WorldAt(*mu, DIM + 0.5, 50.5)));
+  EXPECT_FALSE(mu->is2DOccupiedInWindow(WorldAt(*mu, 50.5, -0.5)));
+  EXPECT_FALSE(mu->is2DOccupiedInWindow(WorldAt(*mu, 50.5, DIM + 100.5)));
+  // the cell-index helper keeps its conservative contract for the planner
+  EXPECT_TRUE(mu->is2DOccupied(-1, 50));
+  EXPECT_TRUE(mu->is2DOccupied(DIM, 50));
+}
+
+TEST(Map2DGoalQueries, UsesFloorCellConvention) {
+  auto mu = MakeWindow();
+  mu->buildMap2DFromOcc2D(*OneObstacleGrid(*mu), 0.5, 100.0);  // obstacle block (44..45, 44..45)
+  // floatToInt() is half a cell off (46.2 -> 45, 44.2 -> 43) and would invert both.
+  EXPECT_FALSE(mu->is2DOccupiedInWindow(WorldAt(*mu, 46.2, 45.5)));
+  EXPECT_TRUE(mu->is2DOccupiedInWindow(WorldAt(*mu, 44.2, 45.5)));
+  int x, y;
+  EXPECT_TRUE(mu->worldTo2DCell(WorldAt(*mu, 46.2, 45.5).x(), WorldAt(*mu, 46.2, 45.5).y(), x, y));
+  EXPECT_EQ(x, 46);
+  EXPECT_EQ(y, 45);
+  EXPECT_FALSE(mu->worldTo2DCell(WorldAt(*mu, -0.5, 45.5).x(), WorldAt(*mu, -0.5, 45.5).y(), x, y));
+  EXPECT_EQ(x, -1) << "cell is written even when outside the window";
+}
+
+TEST(Map2DGoalQueries, ClearanceDiskSkipsOutOfWindowCells) {
+  auto mu = MakeWindow();
+  mu->buildMap2DFromOcc2D(*OneObstacleGrid(*mu), 0.5, 100.0);
+  // a 0.5 m disk next to the window edge reaches past it: not an obstacle
+  EXPECT_TRUE(mu->is2DClearOfOccupied(WorldAt(*mu, 1.5, 50.5), 0.5));
+  EXPECT_TRUE(mu->is2DClearOfOccupied(WorldAt(*mu, -20.5, 50.5), 0.5)) << "fully outside";
+  // the real wall is still found: block edge at x=45, 3 cells from 48 and 4 from 49
+  EXPECT_FALSE(mu->is2DClearOfOccupied(WorldAt(*mu, 48.5, 45.5), 0.3));
+  EXPECT_TRUE(mu->is2DClearOfOccupied(WorldAt(*mu, 49.5, 45.5), 0.3));
+  EXPECT_TRUE(mu->is2DClearOfOccupied(WorldAt(*mu, 45.5, 45.5), 0.0)) << "clearance 0 = no check";
+}
+
+TEST(Map2DGoalQueries, ClearanceCountsInflationNotUnknown) {
+  auto mu = MakeWindow();
+  mu->setInflation2D(0.3f);  // band reaches x=48 on row 45
+  mu->buildMap2DFromOcc2D(*OneObstacleGrid(*mu), 0.5, 100.0);
+  EXPECT_FALSE(mu->is2DClearOfOccupied(WorldAt(*mu, 49.5, 45.5), 0.1)) << "band counts";
+  EXPECT_TRUE(mu->is2DClearOfOccupied(WorldAt(*mu, 40.5, 40.5), 0.1)) << "unknown pocket does not";
+}
+
+// hgp_stop_distance_m stand-off (solveHGP fallback paths): measured from real
+// obstacles, unknown and the window edge -- not from the inflation band edge.
+TEST(Map2DStandoff, IgnoresInflationOnlyCells) {
+  auto mu = MakeWindow();
+  mu->setInflation2D(0.3f);  // band covers x=46..48 on row 45
+  mu->buildMap2DFromOcc2D(*OneObstacleGrid(*mu), 0.5, 100.0);
+  EXPECT_FALSE(mu->has2DBlockerWithin(49, 45, 3)) << "only band cells within 3";
+  EXPECT_TRUE(mu->has2DBlockerWithin(49, 45, 4)) << "real block edge at x=45";
+}
+
+TEST(Map2DStandoff, CountsRealUnknownAndOutOfWindow) {
+  auto mu = MakeWindow();
+  mu->buildMap2DFromOcc2D(*OneObstacleGrid(*mu), 0.5, 100.0);
+  EXPECT_TRUE(mu->has2DBlockerWithin(36, 40, 3)) << "unknown pocket at x=39";
+  EXPECT_FALSE(mu->has2DBlockerWithin(36, 40, 2));
+  EXPECT_TRUE(mu->has2DBlockerWithin(31, 50, 2)) << "x=29 is outside mapper coverage";
+
+  // full-window all-free grid: only the window edge remains
+  auto full = MakeWindow();
+  const auto o = full->getOrigin();
+  full->buildMap2DFromOcc2D(
+      *OccGrid2D::fromTristate(DIM, DIM, RES, o(0), o(1), std::vector<int8_t>(DIM * DIM, 0)), 0.5,
+      100.0);
+  EXPECT_FALSE(full->has2DBlockerWithin(1, 50, 1));
+  EXPECT_TRUE(full->has2DBlockerWithin(1, 50, 2)) << "x=-1 is outside the window";
+}
+
+TEST(Map2DStandoff, MatchesOldCheckWithoutInflation) {
+  auto mu = MakeWindow();
+  mu->buildMap2DFromOcc2D(*OneObstacleGrid(*mu), 0.5, 100.0);
+  // the check solveHGP used before inflation existed: any non-free cell in the disk
+  auto old_check = [&](int cx, int cy, int r) {
+    for (int dy = -r; dy <= r; ++dy)
+      for (int dx = -r; dx <= r; ++dx)
+        if (dx * dx + dy * dy <= r * r && mu->get2DOccupancy(cx + dx, cy + dy) != 0) return true;
+    return false;
+  };
+  for (int r : {1, 3})
+    for (int y = -2; y < DIM + 2; ++y)
+      for (int x = -2; x < DIM + 2; ++x)
+        ASSERT_EQ(mu->has2DBlockerWithin(x, y, r), old_check(x, y, r))
+            << "cell " << x << "," << y << " r=" << r;
+}

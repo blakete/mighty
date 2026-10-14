@@ -279,6 +279,10 @@ class GraphSearch {
   /// Check if (x, y, z) is unknown
   bool isUnknown(int x, int y, int z) const;
 
+  /// True if 2D cell (x, y) is occupied only by planning-map inflation and lies
+  /// within the inflation radius of the start (passable so the robot can leave the band)
+  bool isStartEscapeCell(int x, int y) const;
+
   /// Clculate heuristic
   double getHeur(int x, int y, int z) const;
 
@@ -324,6 +328,8 @@ class GraphSearch {
   double w_side_{0.2};            // side (handedness) tie-break strength (cells)
 
   int xGoal_, yGoal_, zGoal_;
+  int xStart_ = 0, yStart_ = 0;
+  double start_escape_r2_ = 0.0;  // [cells^2] 0 = no start exemption
   bool use_jps_ = false;
   bool use_heat_ = false;  // only true when global_planner_=="astar_heat"
   // Set true only when the exact goal node is popped; false on any best_node

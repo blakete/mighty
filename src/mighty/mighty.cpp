@@ -482,6 +482,12 @@ bool MIGHTY::checkIfPointOccupied(const Vec3f& point) {
 
 // ----------------------------------------------------------------------------
 
+bool MIGHTY::checkIfPointOccupied2D(const Vec3f& point) {
+  return hgp_manager_.checkIfPointOccupied2D(point);
+}
+
+// ----------------------------------------------------------------------------
+
 bool MIGHTY::checkIfPointFree(const Vec3f& point) {
   // Check if the point is free
   return hgp_manager_.checkIfPointFree(point);
@@ -862,8 +868,10 @@ bool MIGHTY::generateGlobalPath(vec_Vecf<3>& global_path, double current_time,
   // v_max_ from the last replan)
   // Pass ESDF and occ grids to HGP manager for ground robot A* planning
   if (par_.use_esdf_cost && par_.vehicle_type == "ground_robot") {
-    if (occ_grid_2d_) hgp_manager_.setOccGrid2D(occ_grid_2d_);
-    if (esdf_grid_) hgp_manager_.setEsdfGrid(esdf_grid_, par_.esdf_weight, par_.esdf_d_safe);
+    auto occ_grid_2d_snap = getOccGrid2DSnapshot();
+    auto esdf_grid_snap = getEsdfGridSnapshot();
+    if (occ_grid_2d_snap) hgp_manager_.setOccGrid2D(occ_grid_2d_snap);
+    if (esdf_grid_snap) hgp_manager_.setEsdfGrid(esdf_grid_snap, par_.esdf_weight, par_.esdf_d_safe);
   }
 
   MyTimer timer_setup(true);
@@ -1095,8 +1103,8 @@ bool MIGHTY::generateLocalTrajectory(const state& local_A, double A_time, vec_Ve
     local_E.pos[2] = par_.default_goal_z;
   }
 
-  // Pass ESDF grid to solver (ground robot only, thread-safe immutable snapshot)
-  if (esdf_grid_) whole_traj_solver_ptr->setEsdfGrid(esdf_grid_);
+  // Pass ESDF grid to solver (ground robot only)
+  if (auto esdf_grid_snap = getEsdfGridSnapshot()) whole_traj_solver_ptr->setEsdfGrid(esdf_grid_snap);
 
   whole_traj_solver_ptr->prepareSolverForReplan(
       A_time, global_path, safe_corridor_polytopes_whole_, local_trajs, local_A, local_E,
@@ -1159,13 +1167,17 @@ bool MIGHTY::generateLocalTrajectory(const state& local_A, double A_time, vec_Ve
     std::vector<std::future<void>> futures;
     futures.reserve(size_of_list_z0);
 
+    // One snapshot shared by every worker below, instead of each of the async threads
+    // racing setEsdfGrid()'s writer by reading esdf_grid_ directly.
+    auto esdf_grid_snap = getEsdfGridSnapshot();
+
     auto t_start = std::chrono::high_resolution_clock::now();
     for (size_t i = 0; i < size_of_list_z0; ++i) {
-      futures.emplace_back(std::async(std::launch::async, [&, i]() {
+      futures.emplace_back(std::async(std::launch::async, [&, i, esdf_grid_snap]() {
         // make a fresh solver for thread-safety
         std::shared_ptr<lbfgs::SolverLBFGS> solver_ptr = std::make_shared<lbfgs::SolverLBFGS>();
         solver_ptr->initializeSolver(planner_params_);
-        if (esdf_grid_) solver_ptr->setEsdfGrid(esdf_grid_);
+        if (esdf_grid_snap) solver_ptr->setEsdfGrid(esdf_grid_snap);
         double initial_guess_computation_time = 0.0;
         solver_ptr->prepareSolverForReplan(
             A_time, global_path, safe_corridor_polytopes_whole_, local_trajs, local_A, local_E,
@@ -1724,6 +1736,16 @@ void MIGHTY::yaw(double diff, state& next_goal) {
  *        the goal is already non-occupied or if the map isn't ready yet.
  */
 bool MIGHTY::sanitizeTerminalGoal(state& goal) {
+  // NEW BRANCH: ground-robot 2D deployments have no 3D point-cloud source, so
+  // the 3D voxel map this function checks below is never populated (see
+  // updateMap2DOnly()) and checkIfPointOccupied()/findClosestNonOccupiedPoint()
+  // cannot see real occupancy from occ_2d_topic. Route those to the 2D-map
+  // equivalent instead. To revert to the original (3D-map-based) behavior for
+  // ground robots too, delete this if-block; everything below is unchanged.
+  if (par_.vehicle_type == "ground_robot" && par_.use_2d_planning) {
+    return sanitizeTerminalGoal2D(goal);
+  }
+
   // Map not initialized yet (e.g. very first goal at startup): trust the user.
   if (!hgp_manager_.isMapInitialized()) return true;
 
@@ -1774,6 +1796,75 @@ bool MIGHTY::sanitizeTerminalGoal(state& goal) {
   goal.pos = new_pos;
   printf("[MIGHTY] Goal relocated from (%.2f,%.2f,%.2f) to (%.2f,%.2f,%.2f) "
          "(was inside occupied voxel, clearance=%.2f m)\n",
+         original.x(), original.y(), original.z(),
+         new_pos.x(), new_pos.y(), new_pos.z(), clearance);
+  return true;
+}
+
+// ----------------------------------------------------------------------------
+
+/**
+ * @brief NEW: 2D-map counterpart of sanitizeTerminalGoal(), for ground-robot
+ *        2D deployments -- see the branch at the top of sanitizeTerminalGoal()
+ *        for why this exists. Same relocate-and-push-out algorithm as the
+ *        original, but checks/searches the 2D tri-state map (occ_2d_topic-
+ *        derived) instead of the (unpopulated, for these deployments) 3D
+ *        voxel map.
+ */
+bool MIGHTY::sanitizeTerminalGoal2D(state& goal) {
+  // Map not initialized yet (e.g. very first goal at startup): trust the user.
+  if (!hgp_manager_.isMapInitialized()) return true;
+
+  // Already free, unknown, or outside the 2D window (unobserved; plan() clamps
+  // it to the window edge): nothing to do.
+  if (!hgp_manager_.checkIfPointOccupied2D(goal.pos)) return true;
+
+  // Expanding-radius search for the closest free/unknown 2D cell.
+  Vec3f closest;
+  bool found = hgp_manager_.findClosestNonOccupied2DPoint(goal.pos, closest);
+
+  if (!found || (closest - goal.pos).norm() < 1e-6) {
+    printf("[MIGHTY] sanitizeTerminalGoal2D: goal is occupied (2D map) and no free/unknown "
+           "cell found within search radius; dropping goal.\n");
+    return false;
+  }
+
+  // Direction outward from the occupied goal toward free/unknown space.
+  const Vec3f dir = (closest - goal.pos).normalized();
+
+  // `closest` is the nearest cell that is not occupied in the (inflated) 2D
+  // map, so it already has the inflation_2d_m clearance. goal_relocation_clearance_m
+  // adds standoff beyond that; with 0 the goal lands on `closest`.
+  const double clearance = par_.goal_relocation_clearance_m;
+  Vec3f new_pos = closest + dir * clearance;
+
+  // Safety loop: if pushing by `clearance` still lands somewhere without
+  // `clearance` of real standoff from occupied cells (thin wall, deep
+  // obstacle, concave geometry), keep walking outward by one resolution at a
+  // time until a point that is ACTUALLY clear is found. isClearOfOccupied2D
+  // checks a disk of radius `clearance`, not just the single landing cell --
+  // stopping at the first non-occupied cell (the old behavior) could leave
+  // the goal sitting right on the boundary with zero real margin.
+  const double step = par_.res > 0.0 ? par_.res : 0.1;
+  const int max_iters = std::max(20, static_cast<int>(std::ceil(3.0 * clearance / step)) + 10);
+  int i = 0;
+  for (; i < max_iters && (hgp_manager_.checkIfPointOccupied2D(new_pos) ||
+                          !hgp_manager_.isClearOfOccupied2D(new_pos, clearance));
+       ++i) {
+    new_pos += dir * step;
+  }
+
+  if (hgp_manager_.checkIfPointOccupied2D(new_pos) ||
+      !hgp_manager_.isClearOfOccupied2D(new_pos, clearance)) {
+    printf("[MIGHTY] sanitizeTerminalGoal2D: could not find a point with %.2f m clearance "
+           "(2D map) after %d steps; dropping goal.\n", clearance, max_iters);
+    return false;
+  }
+
+  const Vec3f original = goal.pos;
+  goal.pos = new_pos;
+  printf("[MIGHTY] Goal relocated (2D map) from (%.2f,%.2f,%.2f) to (%.2f,%.2f,%.2f) "
+         "(was in an occupied or inflated cell, extra clearance=%.2f m)\n",
          original.x(), original.y(), original.z(),
          new_pos.x(), new_pos.y(), new_pos.z(), clearance);
   return true;
@@ -2051,8 +2142,12 @@ void MIGHTY::updateMap2DOnly() {
   // Forward the freshest grids to HGP now. replan() also forwards them, but
   // the FIRST updateMap() call must already see occ_grid_2d_ or its 2D build
   // takes the wrong branch (ESDF/pointcloud fallback) for a whole cycle.
-  if (occ_grid_2d_) hgp_manager_.setOccGrid2D(occ_grid_2d_);
-  if (esdf_grid_) hgp_manager_.setEsdfGrid(esdf_grid_, par_.esdf_weight, par_.esdf_d_safe);
+  {
+    auto occ_grid_2d_snap = getOccGrid2DSnapshot();
+    auto esdf_grid_snap = getEsdfGridSnapshot();
+    if (occ_grid_2d_snap) hgp_manager_.setOccGrid2D(occ_grid_2d_snap);
+    if (esdf_grid_snap) hgp_manager_.setEsdfGrid(esdf_grid_snap, par_.esdf_weight, par_.esdf_d_safe);
+  }
 
   // Same window bookkeeping as updateOccupancyMap().
   state local_state, local_G;

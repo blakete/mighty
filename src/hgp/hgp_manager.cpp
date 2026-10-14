@@ -85,6 +85,9 @@ void HGPManager::setParameters(const parameters& par) {
 
   // Soft-cost obstacle mode
   map_util_->setSoftCostObstacles(par.use_soft_cost_obstacles, par.obstacle_soft_cost);
+
+  // 2D planning-map inflation (ground robot); 0 disables it.
+  map_util_->setInflation2D(static_cast<float>(par.inflation_2d_m));
 }
 
 // ----------------------------------------------------------------------------
@@ -129,8 +132,9 @@ void HGPManager::setupHGPPlanner(const std::string& global_planner, bool global_
   planner_ptr_->set2DMode(is_ground_robot_ && par_.use_2d_planning);
 
   // Pass ESDF grid for ground robot A* cost
-  if (is_ground_robot_ && esdf_grid_) {
-    planner_ptr_->setEsdfGrid(esdf_grid_, esdf_weight_astar_, esdf_d_safe_astar_);
+  const Grids2D grids = get2DGridsSnapshot();
+  if (is_ground_robot_ && grids.esdf) {
+    planner_ptr_->setEsdfGrid(grids.esdf, grids.esdf_weight, grids.esdf_d_safe);
   }
 
   // Corridor-center corner snap post-processing (ground robot only).
@@ -189,11 +193,59 @@ bool HGPManager::checkIfPointOccupied(const Vec3f& point) {
   // map_util_for_planning_ is only created inside setupHGPPlanner/solveHGP,
   // so callers outside the planning pipeline (e.g. checkHoverAvoidance) need
   // the fallback.
+  //
+  // Locked: setupHGPPlanner() reassigns map_util_for_planning_ under
+  // mtx_map_util_ from the replan thread (cb_group_replan_); this can be
+  // called from the goal callback thread (cb_group_goal_ is Reentrant) at the
+  // same time via sanitizeTerminalGoal(). Reading the shared_ptr here without
+  // the same lock races the reassignment's destroy of the old pointee --
+  // observed as "double free or corruption" when several goals arrive close
+  // together.
+  std::lock_guard<std::mutex> lock(mtx_map_util_);
   const auto& mu = map_util_for_planning_ ? map_util_for_planning_ : map_util_;
   if (!mu) return false;  // map not yet initialized
 
   Veci<3> point_int = mu->floatToInt(point);
   return mu->isOccupied(point_int);
+}
+
+// The three 2D goal helpers below (sanitizeTerminalGoal2D) read map_util_, not
+// map_util_for_planning_: the planning copy is last cycle's map with solveHGP()'s
+// start/goal boxes freed -- a goal that has since become an obstacle reads free
+// there -- and solveHGP() writes it without mtx_map_util_. map_util_ is only
+// written by updateMap() under mtx_map_util_ and always holds the latest
+// inflated 2D map.
+bool HGPManager::checkIfPointOccupied2D(const Vec3f& point) {
+  std::lock_guard<std::mutex> lock(mtx_map_util_);
+  // Window test and cell read on the same map under one lock: a window shift
+  // from updateMap() cannot land between them. Outside the window -> false.
+  return map_util_ && map_util_->is2DOccupiedInWindow(point);
+}
+
+bool HGPManager::isClearOfOccupied2D(const Vec3f& point, double clearance_m) {
+  std::lock_guard<std::mutex> lock(mtx_map_util_);
+  return !map_util_ || map_util_->is2DClearOfOccupied(point, clearance_m);
+}
+
+bool HGPManager::get2DPlanningMapSnapshot(std::vector<int8_t>& values,
+                                          std::vector<uint8_t>& inflated, int& dimX, int& dimY,
+                                          double& res, Vec3f& origin) {
+  std::lock_guard<std::mutex> lock(mtx_map_util_);
+  if (!map_util_ || !map_util_->has2DMap()) return false;
+  map_util_->get2DDimensions(dimX, dimY);
+  res = map_util_->getRes();
+  origin = map_util_->getOrigin();
+  const size_t n = static_cast<size_t>(dimX) * dimY;
+  values.resize(n);
+  inflated.resize(n);
+  for (int y = 0; y < dimY; ++y) {
+    for (int x = 0; x < dimX; ++x) {
+      const size_t i = static_cast<size_t>(x) + static_cast<size_t>(dimX) * y;
+      values[i] = map_util_->get2DOccupancy(x, y);
+      inflated[i] = map_util_->is2DInflatedOnly(x, y) ? 1 : 0;
+    }
+  }
+  return true;
 }
 
 // Sample along [p0, p1] at a safe step to ensure we don't skip thin obstacles.
@@ -270,12 +322,16 @@ bool HGPManager::solveHGP(const Vec3f& start_sent, const Vec3f& start_vel, const
     goal_for_search(2) = static_cast<float>(par_.default_goal_z);
 
     // Free start/goal in the 2D map — ground points would otherwise block them.
+    // The goal box keeps inflation cells: a goal inside the clearance band must
+    // stay blocked so plan() rejects it. (sanitizeTerminalGoal2D reads map_util_,
+    // not this copy, so it still sees the goal and relocates it.)
+    // Leaving the start inside the band is handled by A*'s start exemption instead.
     if (map_util_for_planning_->has2DMap()) {
       Veci<3> si = map_util_for_planning_->floatToInt(start_for_search);
       map_util_for_planning_->free2DCell(si(0), si(1), 2.0f * res_);
       map_util_for_planning_->setFreeVoxelAndSurroundings(si, 2.0f * res_);
       Veci<3> gi = map_util_for_planning_->floatToInt(goal_for_search);
-      map_util_for_planning_->free2DCell(gi(0), gi(1), 2.0f * res_);
+      map_util_for_planning_->free2DCell(gi(0), gi(1), 2.0f * res_, /*keep_inflation=*/true);
       map_util_for_planning_->setFreeVoxelAndSurroundings(gi, 2.0f * res_);
     }
   }
@@ -321,7 +377,9 @@ bool HGPManager::solveHGP(const Vec3f& start_sent, const Vec3f& start_vel, const
     bool cut = false;
     for (size_t i = 1; i < path.size() && !cut; i++) {
       const Veci<3> wi = mu->floatToInt(path[i]);
-      if (mu->is2DOccupied(wi(0), wi(1))) break;  // stop at first occupied waypoint
+      // Stop at the first waypoint on a real obstacle. Inflation-only cells are
+      // skipped: A* only crosses them via the start exemption, leaving the band.
+      if (mu->is2DOccupied(wi(0), wi(1)) && !mu->is2DInflatedOnly(wi(0), wi(1))) break;
       // Sample the segment for an unknown run of >= min_run cells.
       const Vecf<3> a = path[i - 1];
       const Vecf<3> b = path[i];
@@ -354,30 +412,62 @@ bool HGPManager::solveHGP(const Vec3f& start_sent, const Vec3f& start_vel, const
     }
   }
 
+  // Unknown ring (option B): A* may plan through the window cells outside the
+  // mapper's grid (priced by w_unknown), but the path handed on to L-BFGS stops
+  // unknown_clearance_2d_m inside that grid's edge. raw_path is untouched, so
+  // original_hgp_path_marker still shows the full route into the ring.
+  double cov_x0, cov_y0, cov_x1, cov_y1;
+  if (is_ground_robot_ && par_.unknown_clearance_2d_m > 0.0 && path.size() > 1 &&
+      map_util_for_planning_->get2DCoverage(cov_x0, cov_y0, cov_x1, cov_y1)) {
+    const double c = par_.unknown_clearance_2d_m;
+    cov_x0 += c;
+    cov_y0 += c;
+    cov_x1 -= c;
+    cov_y1 -= c;
+    auto inside = [&](const Vecf<3>& p) {
+      return p.x() >= cov_x0 && p.x() <= cov_x1 && p.y() >= cov_y0 && p.y() <= cov_y1;
+    };
+    if (cov_x0 < cov_x1 && cov_y0 < cov_y1 && inside(path.front())) {
+      vec_Vecf<3> clipped;
+      clipped.push_back(path.front());
+      for (size_t i = 1; i < path.size(); ++i) {
+        if (inside(path[i])) {
+          clipped.push_back(path[i]);
+          continue;
+        }
+        // Segment a->b leaves the box: keep the point where it crosses the edge.
+        const Vecf<3> a = path[i - 1];
+        const Vecf<3> d = path[i] - a;
+        decimal_t t = 1.0;
+        if (d.x() > 0) t = std::min(t, (cov_x1 - a.x()) / d.x());
+        if (d.x() < 0) t = std::min(t, (cov_x0 - a.x()) / d.x());
+        if (d.y() > 0) t = std::min(t, (cov_y1 - a.y()) / d.y());
+        if (d.y() < 0) t = std::min(t, (cov_y0 - a.y()) / d.y());
+        const Vecf<3> exit = a + d * std::max<decimal_t>(0.0, t);
+        if ((exit - clipped.back()).norm() > 1e-6) clipped.push_back(exit);
+        break;
+      }
+      if (clipped.size() >= 2) path = clipped;
+    }
+  }
+
   // Safety stand-off for ground robots on A* FALLBACK paths only. When A* could
   // not reach the goal it returns a partial path ending at best_node, which sits
   // one cell from a (conservative UNKNOWN->OCCUPIED) wall in the planning map --
   // so the robot would drive right up to the obstacle and park there. Back off
   // the path TAIL until the last waypoint keeps >= hgp_stop_distance_m clearance
-  // from any occupied cell. Skipped when A* reached the actual goal (a real goal
-  // near a wall is never trimmed) and when hgp_stop_distance_m <= 0 (default).
+  // from any real occupied, unknown or out-of-window cell (has2DBlockerWithin).
+  // inflation_2d_m band cells are ignored: the clearance is measured from the
+  // wall, not from the band edge. Skipped when A* reached the actual goal (a real
+  // goal near a wall is never trimmed) and when hgp_stop_distance_m <= 0 (default).
   if (is_ground_robot_ && map_util_for_planning_->has2DMap() &&
       par_.hgp_stop_distance_m > 0.0 && path.size() > 1 &&
       !planner_ptr_->reachedGoal()) {
     const double res = map_util_for_planning_->getRes();
     const int r = std::max(1, static_cast<int>(std::ceil(par_.hgp_stop_distance_m / res)));
-    const int r2 = r * r;
     auto tooCloseToObstacle = [&](const Vecf<3>& wp) {
       const Veci<3> pi = map_util_for_planning_->floatToInt(wp);
-      for (int dy = -r; dy <= r; ++dy) {
-        for (int dx = -r; dx <= r; ++dx) {
-          if (dx * dx + dy * dy > r2) continue;
-          // get2DOccupancy() returns occupied for out-of-bounds too (conservative).
-          if (map_util_for_planning_->get2DOccupancy(pi(0) + dx, pi(1) + dy) != 0)
-            return true;
-        }
-      }
-      return false;
+      return map_util_for_planning_->has2DBlockerWithin(pi(0), pi(1), r);
     };
     const size_t before = path.size();
     while (path.size() > 1 && tooCloseToObstacle(path.back())) path.pop_back();
@@ -539,6 +629,28 @@ bool HGPManager::cvxEllipsoidDecomp(EllipsoidDecomp3D& ellip, const vec_Vecf<3>&
   poly_out.clear();
   poly_out.resize(num_seg);
 
+  // Bounding box around THIS path, padded by local_box_size_ + drone_radius_ + a buffer.
+  // add_local_bbox() clips every per-segment polyhedron to local_box_size_ around that
+  // segment regardless, so any obstacle point farther than this margin from every path
+  // point cannot bind on any segment's polyhedron -- only the padding changes, not the
+  // math. Without this filter the loops below scan the ENTIRE map window (has been
+  // observed at ~50k points for one segment with sfc_use_unknown_as_obstacle=true on a
+  // largely-unexplored window), which is both needless O(window-area) work every replan
+  // and, at that scale, well beyond what decomp_util's ellipsoid decomposition has been
+  // exercised with in this codebase -- the likely cause of a SIGSEGV inside ellip.dilate().
+  float path_x_lo = static_cast<float>(path.front()(0));
+  float path_x_hi = path_x_lo;
+  float path_y_lo = static_cast<float>(path.front()(1));
+  float path_y_hi = path_y_lo;
+  for (const auto& p : path) {
+    path_x_lo = std::min(path_x_lo, static_cast<float>(p(0)));
+    path_x_hi = std::max(path_x_hi, static_cast<float>(p(0)));
+    path_y_lo = std::min(path_y_lo, static_cast<float>(p(1)));
+    path_y_hi = std::max(path_y_hi, static_cast<float>(p(1)));
+  }
+  const float margin = std::max(local_box_size_[0], local_box_size_[1]) +
+                       static_cast<float>(drone_radius_) + 0.5f;
+
   // For ground robot: build a projected obstacle set at z=0 + floor/ceiling slabs.
   // When sfc_use_unknown_as_obstacle is true, use the 2D map (which merges unknown+occupied).
   // When false, project the caller-provided base_uo (occupied-only 3D points) to z=0.
@@ -550,9 +662,16 @@ bool HGPManager::cvxEllipsoidDecomp(EllipsoidDecomp3D& ellip, const vec_Vecf<3>&
     const auto origin = map_util_for_planning_->getOrigin();
     const float res = static_cast<float>(map_util_for_planning_->getRes());
 
+    // Restrict the scan to the path's bounding box (in cell indices) instead of the
+    // whole window -- same effect as the world-frame filter, without per-cell bounds checks.
+    const int scan_x_min = std::max(0, static_cast<int>(std::floor((path_x_lo - margin - origin(0)) / res)));
+    const int scan_x_max = std::min(dimX - 1, static_cast<int>(std::ceil((path_x_hi + margin - origin(0)) / res)));
+    const int scan_y_min = std::max(0, static_cast<int>(std::floor((path_y_lo - margin - origin(1)) / res)));
+    const int scan_y_max = std::min(dimY - 1, static_cast<int>(std::ceil((path_y_hi + margin - origin(1)) / res)));
+
     // Add 2D occupied cells as obstacle points at z=0
-    for (int x = 0; x < dimX; ++x) {
-      for (int y = 0; y < dimY; ++y) {
+    for (int x = scan_x_min; x <= scan_x_max; ++x) {
+      for (int y = scan_y_min; y <= scan_y_max; ++y) {
         if (map_util_for_planning_->get2DOccupancy(x, y) != 0) {  // not free
           const float wx = origin(0) + (x + 0.5f) * res;
           const float wy = origin(1) + (y + 0.5f) * res;
@@ -561,11 +680,11 @@ bool HGPManager::cvxEllipsoidDecomp(EllipsoidDecomp3D& ellip, const vec_Vecf<3>&
       }
     }
 
-    // Add floor/ceiling virtual points covering the local window
-    const float x_lo = origin(0);
-    const float y_lo = origin(1);
-    const float x_hi = origin(0) + dimX * res;
-    const float y_hi = origin(1) + dimY * res;
+    // Add floor/ceiling virtual points covering the path's local area (not the whole window)
+    const float x_lo = std::max(static_cast<float>(origin(0)), path_x_lo - margin);
+    const float y_lo = std::max(static_cast<float>(origin(1)), path_y_lo - margin);
+    const float x_hi = std::min(static_cast<float>(origin(0)) + dimX * res, path_x_hi + margin);
+    const float y_hi = std::min(static_cast<float>(origin(1)) + dimY * res, path_y_hi + margin);
     const float floor_step = res * 2.0f;  // every 2 cells for density
     for (float fx = x_lo; fx <= x_hi; fx += floor_step) {
       for (float fy = y_lo; fy <= y_hi; fy += floor_step) {
@@ -581,9 +700,10 @@ bool HGPManager::cvxEllipsoidDecomp(EllipsoidDecomp3D& ellip, const vec_Vecf<3>&
     const auto origin = map_util_for_planning_->getOrigin();
     const auto dim = map_util_for_planning_->getDim();
     const float res = static_cast<float>(map_util_for_planning_->getRes());
-    const float x_lo = origin(0), y_lo = origin(1);
-    const float x_hi = origin(0) + dim(0) * res;
-    const float y_hi = origin(1) + dim(1) * res;
+    const float x_lo = std::max(static_cast<float>(origin(0)), path_x_lo - margin);
+    const float y_lo = std::max(static_cast<float>(origin(1)), path_y_lo - margin);
+    const float x_hi = std::min(static_cast<float>(origin(0)) + dim(0) * res, path_x_hi + margin);
+    const float y_hi = std::min(static_cast<float>(origin(1)) + dim(1) * res, path_y_hi + margin);
     const float floor_step = res * 2.0f;
     for (float fx = x_lo; fx <= x_hi; fx += floor_step) {
       for (float fy = y_lo; fy <= y_hi; fy += floor_step) {
@@ -614,6 +734,10 @@ bool HGPManager::cvxEllipsoidDecomp(EllipsoidDecomp3D& ellip, const vec_Vecf<3>&
     }
 
     ellip.set_obs(vec_uo);
+    if (par_.debug_verbose) {
+      std::cout << "cvxEllipsoidDecomp: segment " << i << " obstacle point count = "
+                << vec_uo.size() << std::endl;
+    }
 
     seg_path.clear();
     if (is_ground_robot_) {
@@ -1273,7 +1397,11 @@ void HGPManager::updateMap(double wdx, double wdy, double wdz, const Vec3f& cent
   // Get the current time to see the computation time for readmap
   auto start_time = std::chrono::high_resolution_clock::now();
 
-  mtx_map_util_.lock();
+  // Snapshot the mapper grids before taking mtx_map_util_ (the two locks are
+  // never nested); the copies keep the grids alive for the whole build.
+  const Grids2D grids = get2DGridsSnapshot();
+
+  std::unique_lock<std::mutex> lock(mtx_map_util_);
   // Use round (not truncation) so wdz==res_ reliably gives ≥1 cell despite
   // floating-point rep of values like 0.15. Floor for x/y was already safe in
   // practice (windows are large) but rounding is more robust there too.
@@ -1284,12 +1412,12 @@ void HGPManager::updateMap(double wdx, double wdy, double wdz, const Vec3f& cent
 
   // Build 2D ground robot map
   if (is_ground_robot_) {
-    if (occ_grid_2d_) {
-      // Occ2D mode: binary occupancy from mapper + BFS distance-based heat ramp. No inflation.
-      map_util_->buildMap2DFromOcc2D(*occ_grid_2d_, esdf_d_safe_astar_, par_.static_heat_Hmax);
-    } else if (esdf_grid_) {
+    if (grids.occ) {
+      // Occ2D mode: tri-state occupancy from mapper + BFS distance-based heat ramp.
+      map_util_->buildMap2DFromOcc2D(*grids.occ, grids.esdf_d_safe, par_.static_heat_Hmax);
+    } else if (grids.esdf) {
       // ESDF fallback
-      map_util_->buildMap2DFromEsdf(*esdf_grid_, esdf_d_safe_astar_, par_.static_heat_Hmax);
+      map_util_->buildMap2DFromEsdf(*grids.esdf, grids.esdf_d_safe, par_.static_heat_Hmax);
     } else {
       // Final fallback: 3D point cloud projection
       map_util_->buildGroundMap2D(static_cast<float>(par_.obstacle_min_height),
@@ -1298,7 +1426,7 @@ void HGPManager::updateMap(double wdx, double wdy, double wdz, const Vec3f& cent
                                   static_cast<float>(par_.column_min_z));
     }
   }
-  mtx_map_util_.unlock();
+  lock.unlock();
 
   // Get the elapsed time for reading the map
   auto end_time = std::chrono::high_resolution_clock::now();
@@ -1331,6 +1459,17 @@ void HGPManager::findClosestNonOccupiedPoint(const Vec3f& point,
     closest_non_occupied_point = point;
   }
   mtx_map_util_.unlock();
+}
+
+bool HGPManager::findClosestNonOccupied2DPoint(const Vec3f& point,
+                                               Vec3f& closest_non_occupied_point) {
+  // Reads map_util_: see checkIfPointOccupied2D().
+  std::lock_guard<std::mutex> lock(mtx_map_util_);
+  if (!map_util_) {
+    closest_non_occupied_point = point;
+    return false;
+  }
+  return map_util_->findClosestNonOccupied2DPoint(point, closest_non_occupied_point);
 }
 
 int HGPManager::countUnknownCells() const { return map_util_for_planning_->countUnknownCells(); }

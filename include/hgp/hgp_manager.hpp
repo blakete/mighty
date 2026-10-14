@@ -26,6 +26,7 @@
 #include <hgp/utils.hpp>
 
 // Other includes
+#include <atomic>
 #include <mutex>
 
 #include <Eigen/Dense>
@@ -141,6 +142,39 @@ class HGPManager {
    */
   bool checkIfPointOccupied(const Vec3f& point);
 
+  /** @brief NEW BRANCH of checkIfPointOccupied(): checks the 2D ground-robot
+   *  tri-state map (map_2d_) instead of the 3D voxel map. Use this for
+   *  ground-robot 2D deployments, where the 3D map is never populated (see
+   *  findClosestNonOccupied2DPoint() in map_util.hpp for why) and
+   *  checkIfPointOccupied() cannot see real occupancy there.
+   *  @param point Query position in world coordinates.
+   *  @return True if the 2D cell is occupied. False if no 2D map exists yet, or
+   *  if the point is outside the 2D window (unobserved, so trusted -- see
+   *  VoxelMapUtil::is2DOccupiedInWindow()).
+   */
+  bool checkIfPointOccupied2D(const Vec3f& point);
+
+  /** @brief True if no OCCUPIED 2D cell lies within `clearance_m` of `point`.
+   *  Unlike checkIfPointOccupied2D(), this checks a disk around the point, not
+   *  just the cell it falls in -- used by goal relocation (sanitizeTerminalGoal2D)
+   *  to guarantee real standoff instead of merely "not inside an obstacle".
+   *  Unknown and out-of-window cells count as clear.
+   *  @param point Query position in world coordinates.
+   *  @param clearance_m Required clearance in meters.
+   *  @return True if clear (or no 2D map yet / clearance_m <= 0).
+   */
+  bool isClearOfOccupied2D(const Vec3f& point, double clearance_m);
+
+  /** @brief Copy of the 2D planning map (the base map A* copies each cycle, before
+   *  the per-plan start/goal boxes are cleared), taken under the map lock.
+   *  @param values Cell values, row-major x + dimX * y: 0 free, 100 occupied, -1 unknown.
+   *  @param inflated 1 where the cell is occupied only because of inflation.
+   *  @param origin World position of the window's lower-left cell corner.
+   *  @return false if no 2D map has been built yet.
+   */
+  bool get2DPlanningMapSnapshot(std::vector<int8_t>& values, std::vector<uint8_t>& inflated,
+                                int& dimX, int& dimY, double& res, Vec3f& origin);
+
   /** @brief Run the HGP global planner from start to goal.
    *  @param start_sent Start position in world coordinates.
    *  @param start_vel Current velocity at start.
@@ -255,6 +289,16 @@ class HGPManager {
    */
   void findClosestNonOccupiedPoint(const Vec3f& point, Vec3f& closest_non_occupied_point);
 
+  /** @brief NEW BRANCH of findClosestNonOccupiedPoint(): searches the 2D
+   *  ground-robot tri-state map instead of the 3D voxel map. See
+   *  checkIfPointOccupied2D() for why this is needed. Like the other 2D goal
+   *  helpers, it reads the latest 2D map, not the planner's per-cycle copy.
+   *  @param point Query position in world coordinates.
+   *  @param closest_non_occupied_point Output position of the nearest non-occupied 2D cell.
+   *  @return True if a non-occupied cell was found within the search radius.
+   */
+  bool findClosestNonOccupied2DPoint(const Vec3f& point, Vec3f& closest_non_occupied_point);
+
   /** @brief Count the number of unknown cells in the current map.
    *  @return Number of unknown cells.
    */
@@ -357,8 +401,16 @@ class HGPManager {
   const Eigen::Vector3d unitZ_ = Eigen::Vector3d::UnitZ();
 
   // Flags
-  bool map_initialized_ = false;
+  std::atomic<bool> map_initialized_{false};  // written by updateMap() (map thread), read
+                                              // via isMapInitialized() from goal/replan threads
   bool is_ground_robot_ = false;
+
+  // Mapper grids for the ground-robot 2D build and A* cost. Guarded by
+  // mtx_grids_: the setters run on the map thread (MIGHTY::updateMap2DOnly) and
+  // the replan thread (MIGHTY::generateGlobalPath). Readers take a snapshot
+  // first, so a grid replaced mid-build stays alive. Never held together with
+  // mtx_map_util_.
+  std::mutex mtx_grids_;
 
   // ESDF for ground robot A* cost
   std::shared_ptr<const EsdfGrid2D> esdf_grid_;
@@ -368,20 +420,37 @@ class HGPManager {
   // Binary 2D occupancy for ground robot A* planning
   std::shared_ptr<const class OccGrid2D> occ_grid_2d_;
 
+  struct Grids2D {
+    std::shared_ptr<const class OccGrid2D> occ;
+    std::shared_ptr<const EsdfGrid2D> esdf;
+    double esdf_weight = 0.0;
+    double esdf_d_safe = 0.0;
+  };
+  Grids2D get2DGridsSnapshot() {
+    std::lock_guard<std::mutex> lock(mtx_grids_);
+    return {occ_grid_2d_, esdf_grid_, esdf_weight_astar_, esdf_d_safe_astar_};
+  }
+
  public:
   /** @brief Check if 2D ground robot planning mode is active. */
   bool isGroundRobot() const { return is_ground_robot_; }
 
-  /** @brief Set binary 2D occupancy grid for ground robot A* planning. */
-  void setOccGrid2D(std::shared_ptr<const class OccGrid2D> grid) { occ_grid_2d_ = grid; }
+  /** @brief Set binary 2D occupancy grid for ground robot A* planning.
+   *  Locked: see mtx_grids_. */
+  void setOccGrid2D(std::shared_ptr<const class OccGrid2D> grid) {
+    std::lock_guard<std::mutex> lock(mtx_grids_);
+    occ_grid_2d_ = grid;
+  }
 
   /** @brief Set max distance between waypoints for 2D path resampling. */
   void setMaxDistVertexes2D(double d) {
     if (planner_ptr_) planner_ptr_->setMaxDistVertexes2D(d);
   }
 
-  /** @brief Set ESDF grid for distance-based A* cost (ground robot only). */
+  /** @brief Set ESDF grid for distance-based A* cost (ground robot only).
+   *  Locked: see mtx_grids_. */
   void setEsdfGrid(std::shared_ptr<const EsdfGrid2D> grid, double weight, double d_safe) {
+    std::lock_guard<std::mutex> lock(mtx_grids_);
     esdf_grid_ = grid;
     esdf_weight_astar_ = weight;
     esdf_d_safe_astar_ = d_safe;

@@ -94,6 +94,10 @@ struct parameters {
   bool use_free_goal;
   double free_goal_factor;
   bool relocate_occupied_goal;
+  double goal_relocation_clearance_m{0.0};  // [m] Extra standoff beyond the inflation band
+                                             // when relocating a goal out of occupied space
+                                             // (ground-robot 2D path; see sanitizeTerminalGoal2D).
+                                             // 0 = nearest cell outside the band
 
   // LOS post processing parameters
   int los_cells;
@@ -264,6 +268,8 @@ struct parameters {
   // <= 0 disables (default) -> behavior identical to before.
   double hgp_stop_distance_m{0.0};
   int trim_min_unknown_run_cells{3};  // [cells] executed path is cut only at an UNKNOWN run this long (see HGPManager::solveHGP)
+  double inflation_2d_m{0.0};          // [m] 2D planning-map inflation radius (MapUtil::inflate2DMap); 0 = off
+  double unknown_clearance_2d_m{0.0};  // [m] path handed to L-BFGS stops this far inside the mapper grid's edge; 0 = off
 
   // Debug flags
   bool debug_verbose;

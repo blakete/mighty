@@ -200,6 +200,18 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_graph_search_unknown_cost
     rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
+  # HGPManager 2D goal helpers + mapper-grid handoff locking (no rclcpp::init).
+  ament_add_gtest(test_hgp_manager_2d
+    src/test/test_hgp_manager_2d.cpp
+    src/hgp/hgp_manager.cpp
+    src/hgp/hgp_planner.cpp
+    src/hgp/graph_search.cpp
+    src/hgp/utils.cpp
+    src/mighty/utils.cpp)
+  target_link_libraries(test_hgp_manager_2d ${PCL_LIBRARIES})
+  ament_target_dependencies(test_hgp_manager_2d
+    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
+
   ament_add_gtest(test_frontier_detector
     src/test/test_frontier_detector.cpp
     src/mighty/frontier_detector.cpp)

@@ -100,6 +100,13 @@ class MapUtil {
         col_min_height_(other.col_min_height_),
         col_max_height_(other.col_max_height_),
         has_2d_map_(other.has_2d_map_),
+        inflation_2d_m_(other.inflation_2d_m_),
+        inflated_only_2d_(other.inflated_only_2d_),
+        coverage_2d_valid_(other.coverage_2d_valid_),
+        coverage_2d_min_x_(other.coverage_2d_min_x_),
+        coverage_2d_min_y_(other.coverage_2d_min_y_),
+        coverage_2d_max_x_(other.coverage_2d_max_x_),
+        coverage_2d_max_y_(other.coverage_2d_max_y_),
         res_(other.res_),
         total_size_(other.total_size_),
         inflation_(other.inflation_),
@@ -1047,6 +1054,69 @@ class MapUtil {
   }
 
   /**
+   * @brief Find a non-occupied point (free or unknown) on the 2D ground-robot
+   *        tri-state map closest to the given point. NEW BRANCH: mirrors
+   *        findClosestNonOccupiedPoint() above, but searches map_2d_ (via
+   *        get2DOccupancy) instead of the 3D voxel map (map_). The 3D map is
+   *        never populated for ground-robot deployments with no 3D point-cloud
+   *        source (see buildMap2DFromOcc2D()/updateMap2DOnly(), which feed it
+   *        empty clouds) -- findClosestNonOccupiedPoint() and isOccupied()
+   *        therefore cannot see real occupancy from occ_2d_topic at all for
+   *        those deployments. This function does not replace or modify the
+   *        original -- callers choose which one to use.
+   * @param  point : The given query position in world coordinates (z passed through unchanged)
+   * @param  closest_non_occupied_point : Output position of the nearest non-occupied 2D cell
+   * @return true if a non-occupied cell was found (or the query point already was one)
+   */
+  bool findClosestNonOccupied2DPoint(const Vec3f& point, Vec3f& closest_non_occupied_point) {
+    closest_non_occupied_point = point;
+
+    if (!has_2d_map_) return false;
+
+    int dimX, dimY;
+    get2DDimensions(dimX, dimY);
+    const auto origin = getOrigin();
+    const float res = static_cast<float>(getRes());
+    if (res <= 0.0f) return false;
+
+    const int cx = static_cast<int>(std::floor((point.x() - origin(0)) / res));
+    const int cy = static_cast<int>(std::floor((point.y() - origin(1)) / res));
+
+    // Already non-occupied (free or unknown): nothing to do.
+    if (get2DOccupancy(cx, cy) != val_occ_) return true;
+
+    // Expanding-radius (in cells) search, ~5 m cap to match findClosestNonOccupiedPoint().
+    const int max_radius_cells = static_cast<int>(std::ceil(5.0f / res));
+    for (int r = 1; r <= max_radius_cells; ++r) {
+      float min_dist = std::numeric_limits<float>::max();
+      bool found = false;
+      for (int dx = -r; dx <= r; ++dx) {
+        for (int dy = -r; dy <= r; ++dy) {
+          // Only the outer ring of this radius -- interior cells were already
+          // checked (and would have returned) at a smaller r.
+          if (dx != -r && dx != r && dy != -r && dy != r) continue;
+          const int nx = cx + dx;
+          const int ny = cy + dy;
+          if (nx < 0 || nx >= dimX || ny < 0 || ny >= dimY) continue;
+          if (get2DOccupancy(nx, ny) == val_occ_) continue;  // still occupied
+
+          const float wx = origin(0) + (nx + 0.5f) * res;
+          const float wy = origin(1) + (ny + 0.5f) * res;
+          const Vec3f candidate(wx, wy, static_cast<float>(point.z()));
+          const float dist = (candidate - point).norm();
+          if (dist < min_dist) {
+            min_dist = dist;
+            closest_non_occupied_point = candidate;
+            found = true;
+          }
+        }
+      }
+      if (found) return true;
+    }
+    return false;  // nothing non-occupied found within the search radius
+  }
+
+  /**
    * @brief Get indices of the neighbors of a point given the radius
    * @param Veci<3> point_int : The given point
    * @param std::vector<int>& neighbor_indices : The indices of the neighbors
@@ -1655,6 +1725,15 @@ class MapUtil {
   std::vector<float> col_min_height_;  // Per-column min occupied z in world coords
   std::vector<float> col_max_height_;  // Per-column max occupied z in world coords
   bool has_2d_map_{false};
+  float inflation_2d_m_{0.0f};             // Planning-map inflation radius [m], 0 = off
+  std::vector<uint8_t> inflated_only_2d_;  // 1 = OCCUPIED only because of inflate2DMap()
+  // World-frame rectangle covered by the mapper grid the 2D map was last built
+  // from. Window cells outside it are the unknown ring around the mapper's area.
+  bool coverage_2d_valid_{false};
+  double coverage_2d_min_x_{0.0};
+  double coverage_2d_min_y_{0.0};
+  double coverage_2d_max_x_{0.0};
+  double coverage_2d_max_y_{0.0};
 
   /** @brief Build a 2D ground robot map from the current 3D occupancy grid.
    *
@@ -1839,6 +1918,8 @@ class MapUtil {
       }
     }
 
+    coverage_2d_valid_ = false;
+    inflate2DMap();
     has_2d_map_ = true;
   }
 
@@ -1876,6 +1957,103 @@ class MapUtil {
     const int dimY = dim_(1);
     if (x < 0 || x >= dimX || y < 0 || y >= dimY) return true;
     return map_2d_[static_cast<size_t>(x) + static_cast<size_t>(dimX) * y] == val_unknown_;
+  }
+
+  /** @brief Set the 2D planning-map inflation radius [m]; 0 disables it. Every
+   *  2D map builder applies it via inflate2DMap(). */
+  void setInflation2D(float radius_m) { inflation_2d_m_ = std::max(0.0f, radius_m); }
+  float getInflation2D() const { return inflation_2d_m_; }
+
+  /** @brief True if the 2D cell is OCCUPIED only because of inflation, i.e. it is
+   *  not a real obstacle from the mapper. Out-of-bounds is false. */
+  bool is2DInflatedOnly(int x, int y) const {
+    const int dimX = dim_(0);
+    const int dimY = dim_(1);
+    if (x < 0 || x >= dimX || y < 0 || y >= dimY) return false;
+    const size_t idx = static_cast<size_t>(x) + static_cast<size_t>(dimX) * y;
+    return idx < inflated_only_2d_.size() && inflated_only_2d_[idx] != 0;
+  }
+
+  /** @brief World (x, y) -> 2D cell, floor convention: cell i spans
+   *  [origin + i*res, origin + (i+1)*res), which is how the 2D builders rasterize.
+   *  NOT floatToInt(), which is half a cell off. x/y are always written.
+   *  @return True if the cell is inside the 2D window. */
+  bool worldTo2DCell(double wx, double wy, int& x, int& y) const {
+    x = static_cast<int>(std::floor((wx - origin_d_(0)) / res_));
+    y = static_cast<int>(std::floor((wy - origin_d_(1)) / res_));
+    return x >= 0 && x < dim_(0) && y >= 0 && y < dim_(1);
+  }
+
+  /** @brief Goal check at a WORLD point: true if its cell is OCCUPIED (inflation
+   *  included) inside the 2D window, false OUTSIDE the window. The window is
+   *  robot-centred, not the world: a point beyond it is unobserved, so it is
+   *  trusted like the 3D isOccupied() does (plan() clamps such a goal to the
+   *  window edge). is2DOccupied(x, y) stays conservative for the planner. */
+  bool is2DOccupiedInWindow(const Vec3f& p) const {
+    if (!has_2d_map_ || res_ <= 0.0) return false;
+    int x, y;
+    return worldTo2DCell(p.x(), p.y(), x, y) && is2DOccupied(x, y);
+  }
+
+  /** @brief True if no OCCUPIED 2D cell (inflation included) lies within
+   *  clearance_m of p (disk, cell-centre distance). Used by goal relocation
+   *  (sanitizeTerminalGoal2D) to guarantee standoff beyond the inflation band.
+   *  Checks is2DOccupied(), NOT get2DOccupancy(...) != 0: UNKNOWN cells do not
+   *  block, so a goal merely near unmapped space is not rejected. Out-of-window
+   *  cells do not block either -- like unknown, they are not a real obstacle,
+   *  and blocking them would reject goals near the window edge.
+   *  @return True if clear, or if there is no 2D map yet / clearance_m <= 0. */
+  bool is2DClearOfOccupied(const Vec3f& p, double clearance_m) const {
+    if (!has_2d_map_ || res_ <= 0.0 || clearance_m <= 0.0) return true;
+    int cx, cy;
+    worldTo2DCell(p.x(), p.y(), cx, cy);  // centre may be outside; in-window walls still count
+    const int r = std::max(1, static_cast<int>(std::ceil(clearance_m / res_)));
+    const int r2 = r * r;
+    for (int dy = -r; dy <= r; ++dy) {
+      for (int dx = -r; dx <= r; ++dx) {
+        if (dx * dx + dy * dy > r2) continue;
+        const int x = cx + dx;
+        const int y = cy + dy;
+        if (x < 0 || x >= dim_(0) || y < 0 || y >= dim_(1)) continue;
+        if (is2DOccupied(x, y)) return false;
+      }
+    }
+    return true;
+  }
+
+  /** @brief hgp_stop_distance_m stand-off test: true if any cell within r_cells
+   *  of (cx, cy) (disk, cell-centre distance) is a REAL obstacle, UNKNOWN, or
+   *  outside the window. Inflation-only cells are skipped: they are the
+   *  clearance band, so counting them would back off a second time from the
+   *  band edge instead of measuring from the wall. (An UNKNOWN cell that
+   *  inflation turned OCCUPIED is skipped too; the obstacle that inflated it
+   *  lies within inflation_2d_m.) Same as get2DOccupancy() != 0 when inflation
+   *  is off. Unlike is2DClearOfOccupied(), unknown and out-of-window cells count. */
+  bool has2DBlockerWithin(int cx, int cy, int r_cells) const {
+    if (!has_2d_map_) return false;
+    const int r2 = r_cells * r_cells;
+    for (int dy = -r_cells; dy <= r_cells; ++dy) {
+      for (int dx = -r_cells; dx <= r_cells; ++dx) {
+        if (dx * dx + dy * dy > r2) continue;
+        // get2DOccupancy() is val_occ_ out of bounds and is2DInflatedOnly() is
+        // false there, so the window edge still counts.
+        if (get2DOccupancy(cx + dx, cy + dy) != val_free_ && !is2DInflatedOnly(cx + dx, cy + dy))
+          return true;
+      }
+    }
+    return false;
+  }
+
+  /** @brief World-frame rectangle covered by the mapper grid the 2D map was last
+   *  built from. Only buildMap2DFromOcc2D() records it.
+   *  @return false if no coverage is known. */
+  bool get2DCoverage(double& min_x, double& min_y, double& max_x, double& max_y) const {
+    if (!coverage_2d_valid_) return false;
+    min_x = coverage_2d_min_x_;
+    min_y = coverage_2d_min_y_;
+    max_x = coverage_2d_max_x_;
+    max_y = coverage_2d_max_y_;
+    return true;
   }
 
   /** @brief Get terrain gradient cost at grid coordinates. */
@@ -1916,8 +2094,10 @@ class MapUtil {
   /** @brief Get raw pointer to the 2D heat data for GraphSearch. */
   const float* get2DHeatData() const { return has_2d_map_ ? heat_2d_.data() : nullptr; }
 
-  /** @brief Free a cell and its surroundings in the 2D map. */
-  void free2DCell(int cx, int cy, float radius_m) {
+  /** @brief Free a cell and its surroundings in the 2D map.
+   *  @param keep_inflation Leave cells that are OCCUPIED only because of
+   *         inflate2DMap() untouched, so the clearance band survives. */
+  void free2DCell(int cx, int cy, float radius_m, bool keep_inflation = false) {
     if (!has_2d_map_) return;
     const int dimX = dim_(0);
     const int dimY = dim_(1);
@@ -1927,6 +2107,7 @@ class MapUtil {
         const int nx = cx + dx;
         const int ny = cy + dy;
         if (nx >= 0 && nx < dimX && ny >= 0 && ny < dimY) {
+          if (keep_inflation && is2DInflatedOnly(nx, ny)) continue;
           map_2d_[static_cast<size_t>(nx) + static_cast<size_t>(dimX) * ny] = val_free_;
         }
       }
@@ -1978,10 +2159,66 @@ class MapUtil {
     }
   }
 
+  /** @brief Mark every cell whose centre lies within inflation_2d_m_ of an
+   *  OCCUPIED cell's centre as OCCUPIED, recording in inflated_only_2d_ which
+   *  cells were set only by this. A*, the start/goal checks, goal relocation and
+   *  the path trims all read map_2d_, so they all get the same clearance.
+   */
+  void inflate2DMap() {
+    const int dimX = dim_(0);
+    const int dimY = dim_(1);
+    const size_t n2d = static_cast<size_t>(dimX) * dimY;
+    inflated_only_2d_.assign(n2d, 0);
+    if (inflation_2d_m_ <= 0.0f || res_ <= 0.0 || map_2d_.size() != n2d) return;
+
+    const double r_cells = inflation_2d_m_ / res_;
+    const int r = static_cast<int>(std::floor(r_cells + 1e-6));
+    if (r < 1) return;
+    const double r2 = r_cells * r_cells + 1e-6;
+    std::vector<std::pair<int, int>> offsets;
+    for (int dy = -r; dy <= r; ++dy) {
+      for (int dx = -r; dx <= r; ++dx) {
+        if ((dx != 0 || dy != 0) && dx * dx + dy * dy <= r2) offsets.emplace_back(dx, dy);
+      }
+    }
+
+    // Seed only from occupied cells with a non-occupied 4-neighbour: the nearest
+    // occupied cell to any non-occupied cell is always one of these, so skipping
+    // interior cells gives the same result for a fraction of the work.
+    std::vector<size_t> seeds;
+    for (int y = 0; y < dimY; ++y) {
+      for (int x = 0; x < dimX; ++x) {
+        const size_t idx = static_cast<size_t>(x) + static_cast<size_t>(dimX) * y;
+        if (map_2d_[idx] != val_occ_) continue;
+        if ((x > 0 && map_2d_[idx - 1] != val_occ_) ||
+            (x + 1 < dimX && map_2d_[idx + 1] != val_occ_) ||
+            (y > 0 && map_2d_[idx - dimX] != val_occ_) ||
+            (y + 1 < dimY && map_2d_[idx + dimX] != val_occ_)) {
+          seeds.push_back(idx);
+        }
+      }
+    }
+
+    for (const size_t s : seeds) {
+      const int sx = static_cast<int>(s % static_cast<size_t>(dimX));
+      const int sy = static_cast<int>(s / static_cast<size_t>(dimX));
+      for (const auto& o : offsets) {
+        const int nx = sx + o.first;
+        const int ny = sy + o.second;
+        if (nx < 0 || nx >= dimX || ny < 0 || ny >= dimY) continue;
+        const size_t n = static_cast<size_t>(nx) + static_cast<size_t>(dimX) * ny;
+        if (map_2d_[n] == val_occ_) continue;
+        map_2d_[n] = val_occ_;
+        inflated_only_2d_[n] = 1;
+      }
+    }
+  }
+
   void buildMap2DFromEsdf(const EsdfGrid2D& esdf, double d_safe, double h_max) {
     const int dimX = dim_(0);
     const int dimY = dim_(1);
     const size_t n2d = static_cast<size_t>(dimX) * dimY;
+    coverage_2d_valid_ = false;
 
     // Start UNKNOWN: only cells the ESDF actually covers become free/occupied.
     map_2d_.assign(n2d, val_unknown_);
@@ -2019,6 +2256,7 @@ class MapUtil {
         // observed edge, and the path flipped between gaps every map update).
       }
     }
+    inflate2DMap();
     mergeDynamicHeatInto2D();
     has_2d_map_ = true;
   }
@@ -2044,6 +2282,12 @@ class MapUtil {
     // mapper's grid). Precedence: occupied > unknown > free.
     map_2d_.assign(n2d, val_unknown_);
     heat_2d_.assign(n2d, 0.0f);
+
+    coverage_2d_valid_ = occ.width() > 0 && occ.height() > 0;
+    coverage_2d_min_x_ = occ.originX();
+    coverage_2d_min_y_ = occ.originY();
+    coverage_2d_max_x_ = occ.originX() + occ.width() * occ.resolution();
+    coverage_2d_max_y_ = occ.originY() + occ.height() * occ.resolution();
 
     // Compute distance field from the binary occupancy grid (truncated at d_safe)
     std::vector<float> dist = occ.computeDistanceField(d_safe);
@@ -2129,6 +2373,7 @@ class MapUtil {
         }
       }
     }
+    inflate2DMap();
     mergeDynamicHeatInto2D();
     has_2d_map_ = true;
   }
