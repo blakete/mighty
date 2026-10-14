@@ -21,26 +21,6 @@ std::string fmt(const char* f, ...) {
 
 }  // namespace
 
-bool nogoNear(const GridInput& g, double x, double y, double margin_m) {
-  if (g.width <= 0 || g.height <= 0 || g.resolution <= 0.0 ||
-      g.data.size() < static_cast<size_t>(g.width) * static_cast<size_t>(g.height))
-    return false;
-  const int cx = static_cast<int>(std::floor((x - g.origin_x) / g.resolution));
-  const int cy = static_cast<int>(std::floor((y - g.origin_y) / g.resolution));
-  const int r = std::max(0, static_cast<int>(std::ceil(margin_m / g.resolution)));
-  const int r2 = r * r;
-  for (int dy = -r; dy <= r; ++dy) {
-    for (int dx = -r; dx <= r; ++dx) {
-      if (dx * dx + dy * dy > r2) continue;
-      const int ix = cx + dx;
-      const int iy = cy + dy;
-      if (ix < 0 || ix >= g.width || iy < 0 || iy >= g.height) continue;  // outside: no opinion
-      if (g.data[static_cast<size_t>(ix) + static_cast<size_t>(g.width) * iy] >= 50) return true;
-    }
-  }
-  return false;
-}
-
 // ----------------------------------------------------------------------------
 
 GoalSelector::GoalSelector(const SelectorParams& params) : params_(params) {
@@ -345,35 +325,77 @@ Output GoalSelector::onPersistentGrid(double now, GridInput grid) {
 // Select tick (exploreSelectCallback)
 // ----------------------------------------------------------------------------
 
-void GoalSelector::onFenceGrid(double now, GridInput grid, const Transform2D& map_to_fence) {
-  fence_grid_ = std::move(grid);
+void GoalSelector::onGoalFence(double now, GoalFence fence, const Transform2D& map_to_fence) {
+  goal_fence_ = std::move(fence);
   map_to_fence_ = map_to_fence;
   fence_t_ = now;
 }
 
-// Frontiers in a geofence no-go zone can never be reached (the planner's grid holds the same
-// cells), so drop them before ranking instead of letting FAILED statuses invalidate them one by
-// one. Runs after every manager update, so a re-detected no-go frontier is dropped again.
-void GoalSelector::invalidateNogoFrontiers(double now, Output& out) {
-  if (!params_.expl_geofence_enabled || !fence_grid_ || !frontier_manager_) return;
-  if (now - fence_t_ > params_.expl_geofence_max_age_sec) return;  // stale: fail open
+GoalSelector::FenceGate GoalSelector::fenceGate(double now) const {
+  if (!params_.expl_geofence_enabled || !goal_fence_ ||
+      now - fence_t_ > params_.expl_geofence_max_age_sec || !goal_fence_->active)
+    return FenceGate::kOpen;  // fail open: the planner's grid and the drive gate still hold the fence
+  return goal_fence_->ready ? FenceGate::kFilter : FenceGate::kPause;
+}
 
+bool GoalSelector::fenceAllowsMap(double x, double y) const {
   const double c = std::cos(map_to_fence_.yaw);
   const double s = std::sin(map_to_fence_.yaw);
+  return goalFenceAllows(*goal_fence_, c * x - s * y + map_to_fence_.x, s * x + c * y + map_to_fence_.y,
+                         params_.expl_geofence_margin_m);
+}
+
+void GoalSelector::noteFenceGate(double now, FenceGate gate, Output& out) {
+  if (gate != last_fence_gate_) {
+    last_fence_gate_ = gate;
+    if (gate == FenceGate::kFilter)
+      log(out, LogMessage::Level::kInfo,
+          fmt("Geofence: goal filter on (fence enforcing, offset %.2f m + margin %.2f m)",
+              goal_fence_->offset_m, params_.expl_geofence_margin_m));
+    else if (gate == FenceGate::kOpen)
+      log(out, LogMessage::Level::kInfo, "Geofence: goal filter off (no fresh goal_fence or fence not enforcing)");
+  }
+  if (gate == FenceGate::kPause && now - last_fence_pause_log_t_ >= 5.0) {
+    last_fence_pause_log_t_ = now;
+    log(out, LogMessage::Level::kWarn,
+        "Geofence: fence enforcing but not ready (localizing / anchor) -> pausing new exploration goals");
+  }
+}
+
+// A frontier that is not a valid goal (outside the fence, or inside it but closer to the fence line
+// than the gate lets the rover drive) can never be reached, so drop it before ranking instead of
+// letting FAILED statuses invalidate it one by one. Runs after every manager update and at every
+// select tick, so re-detected ones are dropped again. Also checks the published target of the current
+// frontier pursuit (record centroids keep moving by EMA after the commit).
+void GoalSelector::invalidateNogoFrontiers(double now, Output& out) {
+  if (!frontier_manager_ || fenceGate(now) != FenceGate::kFilter) return;
+
   std::vector<std::pair<uint64_t, Eigen::Vector2d>> nogo;
   for (const auto& r : frontier_manager_->records()) {
     if (r.state != FrontierState::ACTIVE && r.state != FrontierState::DORMANT) continue;
-    const double fx = c * r.centroid_xy.x() - s * r.centroid_xy.y() + map_to_fence_.x;
-    const double fy = s * r.centroid_xy.x() + c * r.centroid_xy.y() + map_to_fence_.y;
-    if (nogoNear(*fence_grid_, fx, fy, params_.expl_geofence_margin_m))
-      nogo.emplace_back(r.id, r.centroid_xy);
+    if (!fenceAllowsMap(r.centroid_xy.x(), r.centroid_xy.y())) nogo.emplace_back(r.id, r.centroid_xy);
   }
-  for (const auto& [id, xy] : nogo) {
-    frontier_manager_->markInvalidated(id, now);
-    log(out, LogMessage::Level::kInfo,
-        fmt("Exploration: frontier %lu at (%.2f, %.2f) is in a geofence no-go zone -> invalidated",
-            static_cast<unsigned long>(id), xy.x(), xy.y()));
+  if (exploration_active_ && current_.kind == GoalKind::kFrontier &&
+      !fenceAllowsMap(current_.target.x(), current_.target.y())) {
+    const auto* r = frontier_manager_->find(current_explore_id_);
+    const bool listed = std::any_of(nogo.begin(), nogo.end(),
+                                    [&](const auto& n) { return n.first == current_explore_id_; });
+    if (r && !listed && (r->state == FrontierState::ACTIVE || r->state == FrontierState::DORMANT))
+      nogo.emplace_back(current_explore_id_, current_.target.head<2>());
   }
+  if (nogo.empty()) return;
+
+  std::string list;
+  for (size_t i = 0; i < nogo.size(); ++i) {
+    frontier_manager_->markInvalidated(nogo[i].first, now);
+    if (i < 6)
+      list += fmt("%s%lu (%.2f, %.2f)", i ? ", " : "", static_cast<unsigned long>(nogo[i].first),
+                  nogo[i].second.x(), nogo[i].second.y());
+  }
+  if (nogo.size() > 6) list += fmt(", ... (+%zu)", nogo.size() - 6);
+  log(out, LogMessage::Level::kInfo,
+      fmt("Exploration: %zu frontier(s) outside the geofence goal area -> invalidated: %s", nogo.size(),
+          list.c_str()));
 }
 
 Output GoalSelector::onSelectTick(double now) {
@@ -435,6 +457,14 @@ void GoalSelector::selectAndCommit(double now, Output& out) {
   if (!occ_grid_2d_ || !frontier_manager_) return;
   if (!frontier_grid_) return;
   if (!state_initialized_) return;
+
+  // Geofence goal filter: pause while the fence is enforcing but not usable (holds the current
+  // pursuit; no commits, preemption or watchdog switches); otherwise drop no-go frontiers before
+  // ranking, also when the fence arrived after the last detection pass.
+  const FenceGate gate = fenceGate(now);
+  noteFenceGate(now, gate, out);
+  if (gate == FenceGate::kPause) return;
+  if (gate == FenceGate::kFilter) invalidateNogoFrontiers(now, out);
 
   // If we still have an in-progress exploration goal that hasn't been marked VISITED/INVALIDATED
   // yet, either leave it alone (legacy hard-commit) or, with preemption enabled, keep re-ranking

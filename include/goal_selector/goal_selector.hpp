@@ -59,6 +59,7 @@
 
 #include <Eigen/Core>
 
+#include "goal_selector/goal_fence.hpp"
 #include "map2d/map2d.hpp"
 #include "mighty/frontier_detector.hpp"
 #include "mighty/frontier_manager.hpp"
@@ -116,13 +117,14 @@ struct SelectorParams {
   double expl_pursuit_timeout_min_sec{10.0};
   double expl_invalidation_keep_out_radius_m{1.5};
   double expl_invalidation_cooldown_sec{30.0};
-  // Geofence no-go filter (exploration.geofence.*): a frontier whose centroid is within
-  // expl_geofence_margin_m of a no-go cell of the geofence grid (onFenceGrid) is INVALIDATED.
-  // Fail-open: no grid, a grid older than expl_geofence_max_age_sec, or a centroid outside the
-  // grid's window -> no filtering.
+  // Geofence goal filter (exploration.geofence.*, onGoalFence): while the latest goal_fence is
+  // active and ready, a frontier that is not a valid goal (goalFenceAllows: inside keep_in, outside
+  // every keep_out, >= offset_m + expl_geofence_margin_m from every edge = the gate's core) is
+  // INVALIDATED; while active and not ready, no new goals are committed (pause). No message, one
+  // older than expl_geofence_max_age_sec, or not active -> no filtering (fail open).
   bool   expl_geofence_enabled{true};
-  double expl_geofence_margin_m{0.3};
-  double expl_geofence_max_age_sec{1.0};
+  double expl_geofence_margin_m{0.0};      ///< [m] extra beyond the fence's offset_m (which has the footprint)
+  double expl_geofence_max_age_sec{2.0};
   // Preemption
   bool   expl_preempt_enabled{false};
   double expl_preempt_margin{2.0};
@@ -190,11 +192,6 @@ struct GridInput {
 struct Transform2D {
   double x{0.0}, y{0.0}, yaw{0.0};
 };
-
-/** @brief True if any cell of `g` within margin_m of (x, y) (disk, cell-centre distance) is
- *  occupied (>= 50; the geofence publishes 100 for no-go). Floor cell convention. Cells outside
- *  the grid's window and unknown (-1) cells give no opinion. (x, y) in the grid's frame. */
-bool nogoNear(const GridInput& g, double x, double y, double margin_m);
 
 /** @brief Mirrors goal_selector_msgs/PlannerStatus constants. */
 enum class PlannerStatus : uint8_t { kSuccess = 0, kFailed = 1, kPartial = 2, kReached = 3, kSkipped = 4 };
@@ -273,11 +270,15 @@ class GoalSelector {
   /** @brief Exploration select tick (exploreSelectCallback), called at expl_select_rate_hz. */
   Output onSelectTick(double now);
 
-  /** @brief Geofence no-go grid (e.g. /<R>/geofence/occ_2d, in the robot's odom frame) and the
-   *  transform taking map_frame_id points into that grid's frame (map -> fence, from TF). Stored
-   *  and applied at the next detection pass (onOccGrid / onPersistentGrid); see the
-   *  expl_geofence_* params. */
-  void onFenceGrid(double now, GridInput grid, const Transform2D& map_to_fence);
+  /** @brief Latest geofence goal geometry (/<R>/geofence/goal_fence, in the robot's odom frame) and
+   *  the transform taking map_frame_id points into its frame (map -> fence, from TF). Applied at the
+   *  next detection pass and select tick; see the expl_geofence_* params and fenceGate(). */
+  void onGoalFence(double now, GoalFence fence, const Transform2D& map_to_fence);
+
+  /** @brief kOpen: no filtering (disabled, no / stale goal_fence, fence not active). kFilter: drop
+   *  frontiers that are not valid goals. kPause: fence active but not ready -> no new commits. */
+  enum class FenceGate { kOpen, kFilter, kPause };
+  FenceGate fenceGate(double now) const;
 
   /** @brief One planner_status message. goal_stamp_ns is the message's goal_stamp in nanoseconds. */
   Output onPlannerStatus(double now, PlannerStatus status, int64_t goal_stamp_ns);
@@ -373,10 +374,14 @@ class GoalSelector {
   PeerTracker peer_tracker_;
 
   std::shared_ptr<const OccGrid2D> occ_grid_2d_;
-  // Latest geofence no-go grid (onFenceGrid), its map -> fence transform and arrival time.
-  std::optional<GridInput> fence_grid_;
+  // Latest geofence goal geometry (onGoalFence), its map -> fence transform and arrival time.
+  std::optional<GoalFence> goal_fence_;
   Transform2D map_to_fence_;
   double fence_t_{-1.0};
+  FenceGate last_fence_gate_{FenceGate::kOpen};
+  double last_fence_pause_log_t_{-1.0e18};
+  bool fenceAllowsMap(double x, double y) const;   // goalFenceAllows on a map_frame_id point
+  void noteFenceGate(double now, FenceGate gate, Output& out);
   void invalidateNogoFrontiers(double now, Output& out);
   std::shared_ptr<const OccGrid2D> frontier_grid_;  // derived from the detect grid (N1/N5)
   std::vector<uint8_t> frontier_passable_;          // walkable-but-UNKNOWN mask for frontier_grid_

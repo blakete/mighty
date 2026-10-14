@@ -90,10 +90,11 @@ ament_target_dependencies(mighty rclcpp example_interfaces dynus_interfaces goal
 # The core pulls in nav_msgs headers via OccGrid2D but no rclcpp.
 add_library(goal_selector_core STATIC
   src/goal_selector/goal_selector.cpp
+  src/goal_selector/goal_fence.cpp
   src/mighty/frontier_detector.cpp
   src/mighty/frontier_manager.cpp)
 target_include_directories(goal_selector_core PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
-target_link_libraries(goal_selector_core map2d)
+target_link_libraries(goal_selector_core map2d nlohmann_json::nlohmann_json)
 ament_target_dependencies(goal_selector_core nav_msgs Eigen3)
 set_target_properties(goal_selector_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 

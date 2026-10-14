@@ -82,14 +82,17 @@ goal_selector:
         exploration.manager.pursuit_timeout_min_sec: 10.0
         exploration.manager.invalidation_keep_out_radius_m: 0.75
         exploration.manager.invalidation_cooldown_sec: 60.0
-        # Geofence no-go filter: a frontier whose centroid is within margin_m of a no-go cell (100)
-        # of the geofence grid is invalidated before ranking. The geofence publishes that grid
-        # (in <R>/odom, 20 m window, 5 Hz) only while the fence is ENFORCING; in shadow/off there is
-        # no grid and nothing is filtered (the planner's grid still holds the fence when enforcing).
+        # Geofence goal filter: the geofence publishes its fence rings (in <R>/odom) + offset_m
+        # (footprint radius + margin + its goal_fence.standoff_m) on geofence/goal_fence at 2 Hz.
+        # While the fence is ENFORCING, a frontier is invalidated before ranking unless it is inside
+        # keep_in, outside every keep_out and >= offset_m + margin_m from every fence edge (= the
+        # gate's core, whole fence, exact). While enforcing but not ready (localizing / no anchor)
+        # no new goals are committed. Shadow/off, an older geofence (no topic) or a message older
+        # than max_age_sec -> no filtering (fail open; the planner's grid still holds the fence).
         exploration.geofence.enabled: true
-        exploration.geofence.topic_name: "geofence/occ_2d"   # [-] relative to the robot namespace
-        exploration.geofence.margin_m: 0.3              # [m] ~ robot half-width (drone_bbox 0.6)
-        exploration.geofence.max_age_sec: 1.0           # [s] older grid -> no filtering (fail open)
+        exploration.geofence.topic_name: "geofence/goal_fence"  # [-] relative to the robot namespace
+        exploration.geofence.margin_m: 0.0              # [m] extra beyond the fence's offset_m (which has the footprint)
+        exploration.geofence.max_age_sec: 2.0           # [s] older message -> no filtering (fail open)
         # Goal preemption: while pursuing a frontier, keep re-ranking every
         # select tick (select_rate_hz) and SWITCH goals when another frontier
         # beats the current one's freshly recomputed utility by more than
