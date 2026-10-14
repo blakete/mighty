@@ -132,8 +132,9 @@ void HGPManager::setupHGPPlanner(const std::string& global_planner, bool global_
   planner_ptr_->set2DMode(is_ground_robot_ && par_.use_2d_planning);
 
   // Pass ESDF grid for ground robot A* cost
-  if (is_ground_robot_ && esdf_grid_) {
-    planner_ptr_->setEsdfGrid(esdf_grid_, esdf_weight_astar_, esdf_d_safe_astar_);
+  const Grids2D grids = get2DGridsSnapshot();
+  if (is_ground_robot_ && grids.esdf) {
+    planner_ptr_->setEsdfGrid(grids.esdf, grids.esdf_weight, grids.esdf_d_safe);
   }
 
   // Corridor-center corner snap post-processing (ground robot only).
@@ -1401,7 +1402,11 @@ void HGPManager::updateMap(double wdx, double wdy, double wdz, const Vec3f& cent
   // Get the current time to see the computation time for readmap
   auto start_time = std::chrono::high_resolution_clock::now();
 
-  mtx_map_util_.lock();
+  // Snapshot the mapper grids before taking mtx_map_util_ (the two locks are
+  // never nested); the copies keep the grids alive for the whole build.
+  const Grids2D grids = get2DGridsSnapshot();
+
+  std::unique_lock<std::mutex> lock(mtx_map_util_);
   // Use round (not truncation) so wdz==res_ reliably gives ≥1 cell despite
   // floating-point rep of values like 0.15. Floor for x/y was already safe in
   // practice (windows are large) but rounding is more robust there too.
@@ -1412,12 +1417,12 @@ void HGPManager::updateMap(double wdx, double wdy, double wdz, const Vec3f& cent
 
   // Build 2D ground robot map
   if (is_ground_robot_) {
-    if (occ_grid_2d_) {
-      // Occ2D mode: binary occupancy from mapper + BFS distance-based heat ramp. No inflation.
-      map_util_->buildMap2DFromOcc2D(*occ_grid_2d_, esdf_d_safe_astar_, par_.static_heat_Hmax);
-    } else if (esdf_grid_) {
+    if (grids.occ) {
+      // Occ2D mode: tri-state occupancy from mapper + BFS distance-based heat ramp.
+      map_util_->buildMap2DFromOcc2D(*grids.occ, grids.esdf_d_safe, par_.static_heat_Hmax);
+    } else if (grids.esdf) {
       // ESDF fallback
-      map_util_->buildMap2DFromEsdf(*esdf_grid_, esdf_d_safe_astar_, par_.static_heat_Hmax);
+      map_util_->buildMap2DFromEsdf(*grids.esdf, grids.esdf_d_safe, par_.static_heat_Hmax);
     } else {
       // Final fallback: 3D point cloud projection
       map_util_->buildGroundMap2D(static_cast<float>(par_.obstacle_min_height),
@@ -1426,7 +1431,7 @@ void HGPManager::updateMap(double wdx, double wdy, double wdz, const Vec3f& cent
                                   static_cast<float>(par_.column_min_z));
     }
   }
-  mtx_map_util_.unlock();
+  lock.unlock();
 
   // Get the elapsed time for reading the map
   auto end_time = std::chrono::high_resolution_clock::now();
