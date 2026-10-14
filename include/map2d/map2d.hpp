@@ -137,8 +137,12 @@ inline void inflate(Grid2D& g, float inflation_m) {
 
 /** @brief Unknown band: `band` is resized to dim_x*dim_y and set to 1 for every NON-unknown cell
  *  within radius_m of an unknown cell (cell centre to cell centre, same distance convention as
- *  inflate), 0 elsewhere (unknown cells themselves are 0). `values` is not modified and nothing is
- *  marked occupied. radius_m <= 0 (or less than one cell) gives an all-zero band. */
+ *  inflate) that the unknown cell can see, 0 elsewhere (unknown cells themselves are 0). Walls stop
+ *  the band: a cell is not reached if an OCCUPIED cell lies strictly between it and the unknown cell
+ *  on the DDA line (cell k = (lround(k*dx/n), lround(k*dy/n)), n = max(|dx|, |dy|)), or if a
+ *  diagonal step of that line passes between two OCCUPIED cells. An occupied cell can itself be a
+ *  band cell. Without occupied cells the band is the plain disk. `values` is not modified and
+ *  nothing is marked occupied. radius_m <= 0 (or less than one cell) gives an all-zero band. */
 void inflateUnknown(const std::vector<int8_t>& values, int dim_x, int dim_y, double res,
                     float radius_m, std::vector<uint8_t>& band);
 

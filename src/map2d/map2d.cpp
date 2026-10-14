@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <utility>
 
@@ -170,6 +171,36 @@ void inflate(std::vector<int8_t>& values, std::vector<uint8_t>& inflated_only, i
   }
 }
 
+namespace {
+
+// Visibility ray for one band offset (dx, dy): the cells strictly between (0, 0) and (dx, dy) on the
+// DDA line (cell k = (lround(k*dx/n), lround(k*dy/n)), n = max(|dx|, |dy|)), and for every
+// diagonal step the two orthogonal side cells it squeezes between.
+struct BandRay {
+  int dx{0}, dy{0};
+  std::vector<std::pair<int, int>> between;
+  std::vector<std::pair<std::pair<int, int>, std::pair<int, int>>> squeezes;
+};
+
+BandRay makeBandRay(int dx, int dy) {
+  BandRay ray;
+  ray.dx = dx;
+  ray.dy = dy;
+  const int n = std::max(std::abs(dx), std::abs(dy));
+  int px = 0, py = 0;
+  for (int k = 1; k <= n; ++k) {
+    const int x = static_cast<int>(std::lround(static_cast<double>(k) * dx / n));
+    const int y = static_cast<int>(std::lround(static_cast<double>(k) * dy / n));
+    if (x != px && y != py) ray.squeezes.push_back({{x, py}, {px, y}});
+    if (k < n) ray.between.emplace_back(x, y);
+    px = x;
+    py = y;
+  }
+  return ray;
+}
+
+}  // namespace
+
 void inflateUnknown(const std::vector<int8_t>& values, int dim_x, int dim_y, double res,
                     float radius_m, std::vector<uint8_t>& band) {
   const int dimX = dim_x;
@@ -182,15 +213,22 @@ void inflateUnknown(const std::vector<int8_t>& values, int dim_x, int dim_y, dou
   const int r = static_cast<int>(std::floor(r_cells + 1e-6));
   if (r < 1) return;
   const double r2 = r_cells * r_cells + 1e-6;
-  std::vector<std::pair<int, int>> offsets;
+  std::vector<BandRay> rays;
   for (int dy = -r; dy <= r; ++dy) {
     for (int dx = -r; dx <= r; ++dx) {
-      if ((dx != 0 || dy != 0) && dx * dx + dy * dy <= r2) offsets.emplace_back(dx, dy);
+      if ((dx != 0 || dy != 0) && dx * dx + dy * dy <= r2) rays.push_back(makeBandRay(dx, dy));
     }
   }
 
+  // A ray's intermediate and side cells lie inside the bounding box of its two in-grid end cells,
+  // so they need no bounds check.
+  auto occupiedAt = [&](int x, int y) {
+    return values[static_cast<size_t>(x) + static_cast<size_t>(dimX) * y] == kOccupied;
+  };
+
   // Seed only from unknown cells with a known 4-neighbour (same shortcut as inflate: the nearest
-  // unknown cell to any known cell is always one of these).
+  // unknown cell to any known cell is always one of these). A seed reaches a cell only if an
+  // OCCUPIED cell does not block the line between them, so walls stop the band.
   for (int y = 0; y < dimY; ++y) {
     for (int x = 0; x < dimX; ++x) {
       const size_t idx = static_cast<size_t>(x) + static_cast<size_t>(dimX) * y;
@@ -201,13 +239,25 @@ void inflateUnknown(const std::vector<int8_t>& values, int dim_x, int dim_y, dou
             (y + 1 < dimY && values[idx + dimX] != kUnknown))) {
         continue;
       }
-      for (const auto& o : offsets) {
-        const int nx = x + o.first;
-        const int ny = y + o.second;
+      for (const auto& ray : rays) {
+        const int nx = x + ray.dx;
+        const int ny = y + ray.dy;
         if (nx < 0 || nx >= dimX || ny < 0 || ny >= dimY) continue;
         const size_t n = static_cast<size_t>(nx) + static_cast<size_t>(dimX) * ny;
-        if (values[n] == kUnknown) continue;
-        band[n] = 1;
+        if (values[n] == kUnknown || band[n]) continue;
+        bool blocked = false;
+        for (const auto& c : ray.between) {
+          if (occupiedAt(x + c.first, y + c.second)) {
+            blocked = true;
+            break;
+          }
+        }
+        for (size_t i = 0; !blocked && i < ray.squeezes.size(); ++i) {
+          const auto& a = ray.squeezes[i].first;
+          const auto& b = ray.squeezes[i].second;
+          blocked = occupiedAt(x + a.first, y + a.second) && occupiedAt(x + b.first, y + b.second);
+        }
+        if (!blocked) band[n] = 1;
       }
     }
   }
