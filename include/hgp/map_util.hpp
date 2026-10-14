@@ -2021,6 +2021,29 @@ class MapUtil {
     return true;
   }
 
+  /** @brief hgp_stop_distance_m stand-off test: true if any cell within r_cells
+   *  of (cx, cy) (disk, cell-centre distance) is a REAL obstacle, UNKNOWN, or
+   *  outside the window. Inflation-only cells are skipped: they are the
+   *  clearance band, so counting them would back off a second time from the
+   *  band edge instead of measuring from the wall. (An UNKNOWN cell that
+   *  inflation turned OCCUPIED is skipped too; the obstacle that inflated it
+   *  lies within inflation_2d_m.) Same as get2DOccupancy() != 0 when inflation
+   *  is off. Unlike is2DClearOfOccupied(), unknown and out-of-window cells count. */
+  bool has2DBlockerWithin(int cx, int cy, int r_cells) const {
+    if (!has_2d_map_) return false;
+    const int r2 = r_cells * r_cells;
+    for (int dy = -r_cells; dy <= r_cells; ++dy) {
+      for (int dx = -r_cells; dx <= r_cells; ++dx) {
+        if (dx * dx + dy * dy > r2) continue;
+        // get2DOccupancy() is val_occ_ out of bounds and is2DInflatedOnly() is
+        // false there, so the window edge still counts.
+        if (get2DOccupancy(cx + dx, cy + dy) != val_free_ && !is2DInflatedOnly(cx + dx, cy + dy))
+          return true;
+      }
+    }
+    return false;
+  }
+
   /** @brief World-frame rectangle covered by the mapper grid the 2D map was last
    *  built from. Only buildMap2DFromOcc2D() records it.
    *  @return false if no coverage is known. */

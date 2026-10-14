@@ -456,25 +456,18 @@ bool HGPManager::solveHGP(const Vec3f& start_sent, const Vec3f& start_vel, const
   // one cell from a (conservative UNKNOWN->OCCUPIED) wall in the planning map --
   // so the robot would drive right up to the obstacle and park there. Back off
   // the path TAIL until the last waypoint keeps >= hgp_stop_distance_m clearance
-  // from any occupied cell. Skipped when A* reached the actual goal (a real goal
-  // near a wall is never trimmed) and when hgp_stop_distance_m <= 0 (default).
+  // from any real occupied, unknown or out-of-window cell (has2DBlockerWithin).
+  // inflation_2d_m band cells are ignored: the clearance is measured from the
+  // wall, not from the band edge. Skipped when A* reached the actual goal (a real
+  // goal near a wall is never trimmed) and when hgp_stop_distance_m <= 0 (default).
   if (is_ground_robot_ && map_util_for_planning_->has2DMap() &&
       par_.hgp_stop_distance_m > 0.0 && path.size() > 1 &&
       !planner_ptr_->reachedGoal()) {
     const double res = map_util_for_planning_->getRes();
     const int r = std::max(1, static_cast<int>(std::ceil(par_.hgp_stop_distance_m / res)));
-    const int r2 = r * r;
     auto tooCloseToObstacle = [&](const Vecf<3>& wp) {
       const Veci<3> pi = map_util_for_planning_->floatToInt(wp);
-      for (int dy = -r; dy <= r; ++dy) {
-        for (int dx = -r; dx <= r; ++dx) {
-          if (dx * dx + dy * dy > r2) continue;
-          // get2DOccupancy() returns occupied for out-of-bounds too (conservative).
-          if (map_util_for_planning_->get2DOccupancy(pi(0) + dx, pi(1) + dy) != 0)
-            return true;
-        }
-      }
-      return false;
+      return map_util_for_planning_->has2DBlockerWithin(pi(0), pi(1), r);
     };
     const size_t before = path.size();
     while (path.size() > 1 && tooCloseToObstacle(path.back())) path.pop_back();

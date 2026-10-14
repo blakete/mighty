@@ -249,3 +249,47 @@ TEST(Map2DGoalQueries, ClearanceCountsInflationNotUnknown) {
   EXPECT_FALSE(mu->is2DClearOfOccupied(WorldAt(*mu, 49.5, 45.5), 0.1)) << "band counts";
   EXPECT_TRUE(mu->is2DClearOfOccupied(WorldAt(*mu, 40.5, 40.5), 0.1)) << "unknown pocket does not";
 }
+
+// hgp_stop_distance_m stand-off (solveHGP fallback paths): measured from real
+// obstacles, unknown and the window edge -- not from the inflation band edge.
+TEST(Map2DStandoff, IgnoresInflationOnlyCells) {
+  auto mu = MakeWindow();
+  mu->setInflation2D(0.3f);  // band covers x=46..48 on row 45
+  mu->buildMap2DFromOcc2D(*OneObstacleGrid(*mu), 0.5, 100.0);
+  EXPECT_FALSE(mu->has2DBlockerWithin(49, 45, 3)) << "only band cells within 3";
+  EXPECT_TRUE(mu->has2DBlockerWithin(49, 45, 4)) << "real block edge at x=45";
+}
+
+TEST(Map2DStandoff, CountsRealUnknownAndOutOfWindow) {
+  auto mu = MakeWindow();
+  mu->buildMap2DFromOcc2D(*OneObstacleGrid(*mu), 0.5, 100.0);
+  EXPECT_TRUE(mu->has2DBlockerWithin(36, 40, 3)) << "unknown pocket at x=39";
+  EXPECT_FALSE(mu->has2DBlockerWithin(36, 40, 2));
+  EXPECT_TRUE(mu->has2DBlockerWithin(31, 50, 2)) << "x=29 is outside mapper coverage";
+
+  // full-window all-free grid: only the window edge remains
+  auto full = MakeWindow();
+  const auto o = full->getOrigin();
+  full->buildMap2DFromOcc2D(
+      *OccGrid2D::fromTristate(DIM, DIM, RES, o(0), o(1), std::vector<int8_t>(DIM * DIM, 0)), 0.5,
+      100.0);
+  EXPECT_FALSE(full->has2DBlockerWithin(1, 50, 1));
+  EXPECT_TRUE(full->has2DBlockerWithin(1, 50, 2)) << "x=-1 is outside the window";
+}
+
+TEST(Map2DStandoff, MatchesOldCheckWithoutInflation) {
+  auto mu = MakeWindow();
+  mu->buildMap2DFromOcc2D(*OneObstacleGrid(*mu), 0.5, 100.0);
+  // the check solveHGP used before inflation existed: any non-free cell in the disk
+  auto old_check = [&](int cx, int cy, int r) {
+    for (int dy = -r; dy <= r; ++dy)
+      for (int dx = -r; dx <= r; ++dx)
+        if (dx * dx + dy * dy <= r * r && mu->get2DOccupancy(cx + dx, cy + dy) != 0) return true;
+    return false;
+  };
+  for (int r : {1, 3})
+    for (int y = -2; y < DIM + 2; ++y)
+      for (int x = -2; x < DIM + 2; ++x)
+        ASSERT_EQ(mu->has2DBlockerWithin(x, y, r), old_check(x, y, r))
+            << "cell " << x << "," << y << " r=" << r;
+}
