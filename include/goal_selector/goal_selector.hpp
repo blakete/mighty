@@ -45,9 +45,16 @@
  *   Detection and every FrontierManager call run on a derived grid built from the detect grid
  *   (visited-fused grid or raw occ_2d window): cells within inflation_2d_m of an OCCUPIED cell
  *   become occupied; the remaining non-occupied cells within unknown_inflation_2d_m of an UNKNOWN
- *   cell (computed on the detect grid's raw values) become UNKNOWN. A frontier is therefore a
- *   reachable free cell outside both bands that is adjacent to the unknown band, and the manager's
- *   VISITED verification tests the unknown band rather than raw unknown.
+ *   cell that it can see (computed on the detect grid's raw values; walls stop the band, see
+ *   map2d::inflateUnknown) become UNKNOWN. A frontier is therefore a reachable free cell outside
+ *   both bands that is adjacent to the unknown band, and the manager's VISITED verification tests
+ *   the unknown band rather than raw unknown.
+ *
+ * Frontier goals
+ *   The published goal of a frontier is one of its cells (the one nearest the cluster centroid),
+ *   not the centroid itself. Clusters longer than expl_max_cluster_extent_m are split into
+ *   world-anchored tiles, one frontier each. A record is retired (VISITED) once none of its cells
+ *   borders unknown any more.
  */
 #pragma once
 
@@ -89,6 +96,7 @@ struct SelectorParams {
   int    expl_border_margin_cells{2};
   int    expl_obstacle_clearance_cells{1};
   double expl_robot_snap_radius_m{1.0};
+  double expl_max_cluster_extent_m{0.0};  ///< [m] split longer clusters into tiles; <= 0 = no split
   bool   expl_bounds_enabled{false};
   double expl_bounds_min_x{-50.0};
   double expl_bounds_max_x{50.0};
