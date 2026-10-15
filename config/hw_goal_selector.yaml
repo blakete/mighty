@@ -20,8 +20,9 @@ goal_selector:
 
         # --- Frontier-Based Exploration ---
         exploration.return_home.enabled: false          # [-] true: when no frontier is left, drive back to the start pose (latched until arrival). false: go idle where the robot is; exploration resumes when a new frontier appears. The /exploration/return_home topic still works either way. Off for the 2026-10 hardware tests (return-home behaviour to be revisited, spec §13)
-        # Hardware default: OFF. Flip exploration.enabled to true to autonomously
-        # drive to frontiers detected on occ_2d_topic. See plan: snazzy-moseying-donut.md
+        # Hardware default: ON. The rover drives itself to frontiers (persistent map, see below) as
+        # soon as the drive is in AUTO (and, with the geofence engaged, the fence is locked).
+        # false: no autonomous goals; manual goals (term_goal_rviz) still work. See plan: snazzy-moseying-donut.md
         exploration.enabled: true
         exploration.select_rate_hz: 1.0
         exploration.default_goal_z: 0.0
