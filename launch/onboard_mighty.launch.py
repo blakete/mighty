@@ -25,6 +25,30 @@ STAR_ROBOT = 'star_robot'
 def convert_str_to_bool(str):
     return True if (str == 'true' or str == 'True' or str == 1 or str == '1') else False
 
+# Sections a vehicle overlay may hold (config/vehicles/<namespace>.yaml)
+VEHICLE_SECTIONS = ('mighty_node', 'goal_selector', 'mpc')
+
+def _flatten(d, prefix=''):
+    # The config YAMLs spell parameters as flat dotted keys (exploration.enabled: true); flatten
+    # a nested overlay the same way so a dict.update replaces one key, never a whole group.
+    out = {}
+    for k, v in d.items():
+        key = f'{prefix}{k}'
+        if isinstance(v, dict):
+            out.update(_flatten(v, key + '.'))
+        else:
+            out[key] = v
+    return out
+
+def load_vehicle_overlay(path):
+    """{section: flat parameter dict} from a vehicle overlay; an unknown section is an error."""
+    with open(path, 'r') as f:
+        data = yaml.safe_load(f) or {}
+    unknown = sorted(set(data) - set(VEHICLE_SECTIONS))
+    if unknown:
+        raise RuntimeError(f'{path}: unknown section(s) {unknown} (allowed: {list(VEHICLE_SECTIONS)})')
+    return {s: _flatten((data[s] or {}).get('ros__parameters') or {}) for s in VEHICLE_SECTIONS if s in data}
+
 def generate_launch_description():
 
     # Declare launch arguments
@@ -147,6 +171,22 @@ def generate_launch_description():
             with open(hw_parameters_path, 'r') as f:
                 hw_params = yaml.safe_load(f)['mighty_node']['ros__parameters']
             parameters.update(hw_params)
+
+        # Per-vehicle overlay (hardware only): config/vehicles/<namespace>.yaml, optional, holding
+        # only the keys that differ on that vehicle (layout as on feature/hw-standalone). Its
+        # `mighty_node:` section goes on top of the hw yaml (so the goal selector, which starts from
+        # this dict, sees it too), `goal_selector:` on top of hw_goal_selector.yaml and `mpc:` on top
+        # of mpc.yaml. config/ is bind-mounted from the checkout: an edit needs only a pane restart.
+        vehicle_params = {}
+        if use_hardware:
+            vehicle_path = os.path.join(get_package_share_directory('mighty'), 'config', 'vehicles', f'{namespace}.yaml')
+            if os.path.isfile(vehicle_path):
+                vehicle_params = load_vehicle_overlay(vehicle_path)
+                parameters.update(vehicle_params.get('mighty_node', {}))
+                print(f'[onboard_mighty] vehicle overlay {vehicle_path}: ' + ', '.join(
+                    f'{s} {sorted(p)}' for s, p in vehicle_params.items()), flush=True)
+            else:
+                print(f'[onboard_mighty] no vehicle overlay for {namespace}', flush=True)
 
         # Update parameters for benchmarking
         parameters['file_path'] = data_file
@@ -271,7 +311,7 @@ def generate_launch_description():
             name='mpc',
             namespace=namespace,
             output='screen',
-            parameters=[mpc_params_file, mpc_overrides],
+            parameters=[mpc_params_file, vehicle_params.get('mpc', {}), mpc_overrides],
         )
 
         # Create a fake sim node
@@ -352,7 +392,7 @@ def generate_launch_description():
                 get_package_share_directory('mighty'), 'config', 'hw_goal_selector.yaml')
             with open(gs_path, 'r') as f:
                 gs_params = yaml.safe_load(f)['goal_selector']['ros__parameters']
-            goal_selector_params = {**parameters, **gs_params}
+            goal_selector_params = {**parameters, **gs_params, **vehicle_params.get('goal_selector', {})}
             goal_selector_node = Node(
                 package='mighty',
                 executable='goal_selector',
