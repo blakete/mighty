@@ -29,6 +29,7 @@ goal_selector:
         exploration.detector.border_margin_cells: 1
         exploration.detector.obstacle_clearance_cells: 0   # occupied band (inflation_2d_m) already keeps frontiers clear of obstacles
         exploration.detector.robot_snap_radius_m: 0.5
+        exploration.detector.max_cluster_extent_m: 3.0    # [m] a frontier cluster longer than this is split into world-anchored 3 m tiles, one frontier (and goal) per piece, so goals stay on the frontier instead of at the centroid of a long/curved cluster. 0 = no split
         # --- Persistent-map frontier detection ---
         # true: detect frontiers on the mapper's growing accumulated grid (persistent_map_topic_name)
         # instead of the selector's own VisitedMap / the sliding occ_2d window. The VisitedMap is then

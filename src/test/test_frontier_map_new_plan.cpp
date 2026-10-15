@@ -639,13 +639,13 @@ TEST(Lifecycle, CentroidInObstacleMarginInvalidatedThenKeepOutThenNewCandidate) 
 
 // Scenario: free x 0..9, occupied wall column x = 10, real unknown x 11..19 (7 rows). The unknown edge is
 // directly behind the wall.
-//   .........?#??????????      (y0..y6; wall at x=10)
-// With inflation 0.2 m (2 cells) the occupied band covers x 8,9 which is exactly where the unknown band
-// (x 9,10 ...) would be, so no free cell outside both bands has an unknown-band neighbour.
-// Expected: no frontier. Control (inflation 0): the band cell x = 9 is free, the safe cell x = 8 is a frontier
-// column (centroid (0.85, 0.35), 7 cells).
+//   ..........#?????????      (y0..y6; wall at x=10)
+// The wall stops the unknown band (map2d::inflateUnknown: no band cell behind an occupied cell), so no free
+// cell has an unknown-band neighbour, with or without occupied inflation (0.2 m = 2 cells covers x 8,9 too).
+// Expected: no frontier either way. Control (no wall, inflation 0): the band covers x 9,10, the safe cell
+// x = 8 is a frontier column (centroid (0.85, 0.35), 7 cells).
 // Why: notes C bullet 4 and N5 "unknown edges within inflation_2d_m of an obstacle produce no frontier (the
-// occupied band covers their unknown band)".
+// occupied band covers their unknown band)"; a wall with unknown behind it is not a frontier.
 TEST(NoFrontierNearObstacles, UnknownEdgeWithinInflationOfAnObstacleGivesNoFrontier) {
   const Rows rows(7, std::string(10, '.') + "#" + std::string(9, '?'));
 
@@ -653,9 +653,13 @@ TEST(NoFrontierNearObstacles, UnknownEdgeWithinInflationOfAnObstacleGivesNoFront
   inflated.feed(rows, 1.0);
   EXPECT_TRUE(inflated.records().empty());
 
+  Rig walled(makeParams(20, 7, 0.0, 0.2), 0.35, 0.35);
+  walled.feed(rows, 1.0);
+  EXPECT_TRUE(walled.records().empty()) << "the wall stops the band: no frontier behind it";
+
   Rig plain(makeParams(20, 7, 0.0, 0.2), 0.35, 0.35);
-  plain.feed(rows, 1.0);
-  ASSERT_EQ(plain.records().size(), 1u) << "control: without occupied inflation the same edge yields a frontier";
+  plain.feed(Rows(7, std::string(11, '.') + std::string(9, '?')), 1.0);
+  ASSERT_EQ(plain.records().size(), 1u) << "control: without the wall the same edge yields a frontier";
   EXPECT_EQ(plain.records()[0].size_cells, 7);
   EXPECT_NEAR(plain.records()[0].centroid_xy.x(), 0.85, 1e-9);
 }

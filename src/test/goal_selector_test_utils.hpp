@@ -32,7 +32,7 @@
 // ----------------------------------------------------------------------------------------------
 // Ranking is made trivial on purpose: BaseParams() zeroes every utility weight except distance and
 // chooses w_dist = dist_ref so that
-//        utility = - (distance robot -> frontier centroid)   [metres]
+//        utility = - (distance robot -> frontier goal)   [metres]  (goal = the cell at the centroid here)
 // i.e. the NEAREST frontier wins and preemption margins are plain metres.
 // ----------------------------------------------------------------------------------------------
 #pragma once

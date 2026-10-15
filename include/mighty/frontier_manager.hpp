@@ -30,7 +30,14 @@ enum class FrontierState {
 
 struct FrontierRecord {
   uint64_t        id            = 0;
-  Eigen::Vector2d centroid_xy   = Eigen::Vector2d::Zero();   // world frame
+  Eigen::Vector2d centroid_xy   = Eigen::Vector2d::Zero();   // world frame (EMA; used for matching)
+  // Exploration goal (world frame): a frontier cell of the last matched cluster
+  // (FrontierCluster::goal), or the centroid for clusters without cells. Ranking,
+  // visit checks, pursuit budgets and the published goal all use this point.
+  Eigen::Vector2d goal_xy       = Eigen::Vector2d::Zero();
+  // Frontier cells of the last matched cluster (world frame), trimmed by step d
+  // to the cells that still border unknown. Empty for clusters without cells.
+  std::vector<Eigen::Vector2d> cells;
   int             size_cells    = 0;
   double          first_seen_t  = 0.0;
   double          last_seen_t   = 0.0;
@@ -116,9 +123,12 @@ class FrontierManager {
   explicit FrontierManager(FrontierManagerParams p) : params_(p) {}
 
   /** @brief Update the DB from a fresh detection batch.
-   *  Match → EMA-update existing records; insert new ones; classify
-   *  in-window-but-not-detected as VISITED/INVALIDATED; mark out-of-window
-   *  records as DORMANT; apply robot-proximity dwell visit check.
+   *  Match (shared cells first, then centroid distance) → EMA-update existing
+   *  records; insert new ones; classify in-window-but-not-detected records by
+   *  their cells: none still borders unknown → VISITED, goal cell occupied →
+   *  INVALIDATED, every live cell taken by another record → removed (duplicate);
+   *  mark out-of-window records as DORMANT; apply robot-proximity dwell visit
+   *  check.
    *
    *  @param fresh        Latest detector output.
    *  @param current_grid The grid the detector ran on (for in-bounds tests

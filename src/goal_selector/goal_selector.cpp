@@ -29,6 +29,7 @@ GoalSelector::GoalSelector(const SelectorParams& params) : params_(params) {
   dp.border_margin_cells = params_.expl_border_margin_cells;
   dp.obstacle_clearance_cells = params_.expl_obstacle_clearance_cells;
   dp.robot_snap_radius_m = params_.expl_robot_snap_radius_m;
+  dp.max_cluster_extent_m = params_.expl_max_cluster_extent_m;
   dp.bounds_enabled = params_.expl_bounds_enabled;
   dp.bounds_min_x = params_.expl_bounds_min_x;
   dp.bounds_max_x = params_.expl_bounds_max_x;
@@ -172,8 +173,8 @@ void GoalSelector::detectAndUpdate(double now, const std::shared_ptr<const OccGr
   auto clusters = frontier_detector_->detect(detect_grid, robot_xy, visited_filter, &frontier_passable_);
 
   // (The ESDF clearance filter is dropped, D3. FrontierManager::update INVALIDATES a record whose
-  //  centroid falls in the occupied band only when the record is not re-matched this cycle; a
-  //  matched record keeps its centroid even in the band.)
+  //  goal cell falls in the occupied band only when the record is not re-matched this cycle; a
+  //  matched record takes the fresh cluster's goal, which is a frontier cell outside the band.)
 
   const auto active_peers = params_.expl_use_minpos
                                 ? peer_tracker_.getActivePeers(now, params_.expl_peer_timeout_sec)
@@ -388,14 +389,14 @@ void GoalSelector::noteFenceGate(double now, FenceGate gate, const char* why, Ou
 // than the gate lets the rover drive) can never be reached, so drop it before ranking instead of
 // letting FAILED statuses invalidate it one by one. Runs after every manager update and at every
 // select tick, so re-detected ones are dropped again. Also checks the published target of the current
-// frontier pursuit (record centroids keep moving by EMA after the commit).
+// frontier pursuit (a record's goal follows its frontier after the commit).
 void GoalSelector::invalidateNogoFrontiers(double now, Output& out) {
   if (!frontier_manager_ || fenceGate(now) != FenceGate::kFilter) return;
 
   std::vector<std::pair<uint64_t, Eigen::Vector2d>> nogo;
   for (const auto& r : frontier_manager_->records()) {
     if (r.state != FrontierState::ACTIVE && r.state != FrontierState::DORMANT) continue;
-    if (!fenceAllowsMap(r.centroid_xy.x(), r.centroid_xy.y())) nogo.emplace_back(r.id, r.centroid_xy);
+    if (!fenceAllowsMap(r.goal_xy.x(), r.goal_xy.y())) nogo.emplace_back(r.id, r.goal_xy);
   }
   if (exploration_active_ && current_.kind == GoalKind::kFrontier &&
       !fenceAllowsMap(current_.target.x(), current_.target.y())) {
@@ -640,11 +641,15 @@ void GoalSelector::selectAndCommit(double now, Output& out) {
     return;
   }
 
-  const Eigen::Vector3d g(next->centroid_xy.x(), next->centroid_xy.y(), params_.expl_default_goal_z);
+  // The goal is a frontier cell (the one nearest the cluster centroid), never the raw centroid,
+  // which for a curved or long frontier can lie deep inside known space.
+  const Eigen::Vector3d g(next->goal_xy.x(), next->goal_xy.y(), params_.expl_default_goal_z);
 
   log(out, LogMessage::Level::kInfo,
-      fmt("Exploration: -> frontier %lu at (%.2f, %.2f), state=%d, u=%.3f",
-          static_cast<unsigned long>(next->id), next->centroid_xy.x(), next->centroid_xy.y(),
+      fmt("Exploration: -> frontier %lu at (%.2f, %.2f) (centroid (%.2f, %.2f), %d cells), state=%d, "
+          "u=%.3f",
+          static_cast<unsigned long>(next->id), next->goal_xy.x(), next->goal_xy.y(),
+          next->centroid_xy.x(), next->centroid_xy.y(), next->size_cells,
           static_cast<int>(next->state), next->cached_utility));
 
   commit(GoalKind::kFrontier, g, now, out);

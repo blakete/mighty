@@ -231,3 +231,149 @@ int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+
+// ---------------------------------------------------------------------------
+// Goal cell, cell-overlap matching and retirement by cells
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 20x20 @0.1 grid, `unknown(ix, iy)` decides each cell (else FREE).
+template <typename Fn>
+std::shared_ptr<const OccGrid2D> MakeGridWhere(Fn unknown) {
+  const int W = 20, H = 20;
+  std::vector<int8_t> data(W * H);
+  for (int iy = 0; iy < H; ++iy)
+    for (int ix = 0; ix < W; ++ix) data[iy * W + ix] = unknown(ix, iy) ? U : F;
+  return OccGrid2D::fromTristate(W, H, 0.1, 0.0, 0.0, data);
+}
+
+// Cluster from cell indices of the 20x20 @0.1 grid: centroid, AABB and the goal (member nearest the
+// centroid), as the detector builds them.
+FrontierCluster MakeCellCluster(const std::vector<std::pair<int, int>>& ij) {
+  FrontierCluster c;
+  Eigen::Vector2d sum = Eigen::Vector2d::Zero();
+  c.aabb_min = Eigen::Vector2d(1e9, 1e9);
+  c.aabb_max = Eigen::Vector2d(-1e9, -1e9);
+  for (const auto& [ix, iy] : ij) {
+    const Eigen::Vector2d p((ix + 0.5) * 0.1, (iy + 0.5) * 0.1);
+    c.cells.push_back(p);
+    sum += p;
+    c.aabb_min = c.aabb_min.cwiseMin(p);
+    c.aabb_max = c.aabb_max.cwiseMax(p);
+  }
+  c.size_cells = static_cast<int>(c.cells.size());
+  c.size_m2 = c.size_cells * 0.01;
+  c.centroid = sum / c.size_cells;
+  double best = 1e18;
+  for (const auto& p : c.cells)
+    if ((p - c.centroid).squaredNorm() < best) {
+      best = (p - c.centroid).squaredNorm();
+      c.goal = p;
+    }
+  return c;
+}
+
+std::vector<std::pair<int, int>> Row(int iy, int ix0, int ix1) {
+  std::vector<std::pair<int, int>> v;
+  for (int ix = ix0; ix <= ix1; ++ix) v.emplace_back(ix, iy);
+  return v;
+}
+
+const FrontierRecord* FindId(const FrontierManager& m, uint64_t id) { return m.find(id); }
+
+}  // namespace
+
+// Scenario: a cluster without cells (hand-made). Expected: goal_xy is the centroid.
+TEST(FrontierManagerGoal, GoalFallsBackToTheCentroidWithoutCells) {
+  FrontierManager mgr(DefaultParams());
+  mgr.update({MakeCluster(0.95, 1.0)}, *MakeHalfUnknownGrid(), Eigen::Vector3d(0.5, 1.0, 0.0), 1.0);
+  ASSERT_EQ(mgr.size(), 1u);
+  EXPECT_DOUBLE_EQ(mgr.records()[0].goal_xy.x(), 0.95);
+  EXPECT_DOUBLE_EQ(mgr.records()[0].goal_xy.y(), 1.0);
+}
+
+// Scenario: a cluster with cells. Expected: the record keeps them and takes the cluster's goal cell.
+TEST(FrontierManagerGoal, RecordTakesTheClusterGoalAndCells) {
+  FrontierManager mgr(DefaultParams());
+  const auto c = MakeCellCluster(Row(9, 2, 11));
+  mgr.update({c}, *MakeGridWhere([](int, int iy) { return iy >= 10; }), Eigen::Vector3d(0.5, 0.5, 0.0), 1.0);
+  ASSERT_EQ(mgr.size(), 1u);
+  EXPECT_EQ(mgr.records()[0].goal_xy, *c.goal);
+  EXPECT_EQ(mgr.records()[0].cells.size(), 10u);
+}
+
+// Scenario: a square ring of frontier cells around a small unknown patch at the centre; then the ring is
+// not re-detected and its cells no longer border unknown, but the patch at the centroid is still unknown.
+// Expected: VISITED (judged by the cells; the old centroid rule left it ACTIVE forever).
+TEST(FrontierManagerGoal, RetiredWhenNoCellBordersUnknownEvenIfTheCentroidAreaIsUnknown) {
+  std::vector<std::pair<int, int>> ring;
+  for (int k = 4; k <= 14; ++k) {
+    ring.emplace_back(k, 4);
+    ring.emplace_back(k, 14);
+  }
+  for (int k = 5; k <= 13; ++k) {
+    ring.emplace_back(4, k);
+    ring.emplace_back(14, k);
+  }
+  FrontierManager mgr(DefaultParams());
+  auto before = MakeGridWhere([](int ix, int iy) { return (ix < 4 || ix > 14 || iy < 4 || iy > 14) && iy > 16; });
+  mgr.update({MakeCellCluster(ring)}, *before, Eigen::Vector3d(0.15, 0.15, 0.0), 1.0);
+  ASSERT_EQ(mgr.size(), 1u);
+  auto after = MakeGridWhere([](int ix, int iy) { return ix >= 8 && ix <= 10 && iy >= 8 && iy <= 10; });
+  mgr.update({}, *after, Eigen::Vector3d(0.15, 0.15, 0.0), 2.0);
+  EXPECT_EQ(mgr.records()[0].state, FrontierState::VISITED);
+}
+
+// Scenario: a 10-cell frontier row; then only its right end still has unknown within 2 cells.
+// Expected: still ACTIVE, shrunk to the live cells, goal moved onto one of them.
+TEST(FrontierManagerGoal, LiveCellsKeepTheRecordAndCarryTheGoal) {
+  FrontierManager mgr(DefaultParams());
+  mgr.update({MakeCellCluster(Row(9, 2, 11))}, *MakeGridWhere([](int, int iy) { return iy >= 10; }),
+             Eigen::Vector3d(0.5, 0.5, 0.0), 1.0);
+  auto after = MakeGridWhere([](int ix, int iy) { return ix >= 13 && iy >= 9; });  // unknown x>=1.3, y>=0.9
+  mgr.update({}, *after, Eigen::Vector3d(0.5, 0.5, 0.0), 2.0);
+  const auto& r = mgr.records()[0];
+  EXPECT_EQ(r.state, FrontierState::ACTIVE);
+  ASSERT_EQ(r.cells.size(), 1u) << "only ix 11 is within 2 cells of the unknown (ix >= 13)";
+  EXPECT_NEAR(r.goal_xy.x(), 1.15, 1e-9);
+}
+
+// Scenario: a frontier row along the grid's top edge; then the grid is all free. Out-of-grid neighbours
+// are not unknown for this test. Expected: VISITED.
+TEST(FrontierManagerGoal, OutOfGridNeighboursDoNotKeepARecordAlive) {
+  FrontierManager mgr(DefaultParams());
+  mgr.update({MakeCellCluster(Row(19, 2, 11))}, *MakeGridWhere([](int, int) { return false; }),
+             Eigen::Vector3d(0.5, 0.5, 0.0), 1.0);
+  mgr.update({}, *MakeGridWhere([](int, int) { return false; }), Eigen::Vector3d(0.5, 0.5, 0.0), 2.0);
+  EXPECT_EQ(mgr.records()[0].state, FrontierState::VISITED);
+}
+
+// Scenario: a frontier grows so that its centroid moves 0.9 m (> merge_radius 0.5) but it still shares
+// cells with the record. Expected: matched by shared cells, same id, no duplicate.
+TEST(FrontierManagerGoal, SharedCellsMatchEvenWhenTheCentroidJumps) {
+  FrontierManager mgr(DefaultParams());
+  auto grid = MakeGridWhere([](int, int iy) { return iy >= 10; });
+  mgr.update({MakeCellCluster(Row(9, 0, 9))}, *grid, Eigen::Vector3d(0.5, 0.5, 0.0), 1.0);
+  const uint64_t id = mgr.records()[0].id;
+  mgr.update({MakeCellCluster(Row(9, 8, 19))}, *grid, Eigen::Vector3d(0.5, 0.5, 0.0), 2.0);
+  ASSERT_EQ(mgr.size(), 1u);
+  EXPECT_EQ(mgr.records()[0].id, id);
+  EXPECT_EQ(mgr.records()[0].size_cells, 12);
+}
+
+// Scenario: two neighbouring records A (ix 0..5) and B (ix 6..11); one fresh cluster now spans both.
+// Expected: the older record A takes it (tie on shared cells), B's cells are all owned by A now, so B is
+// dropped as a duplicate.
+TEST(FrontierManagerGoal, DuplicateWhoseCellsAnotherRecordOwnsIsDropped) {
+  FrontierManager mgr(DefaultParams());
+  auto grid = MakeGridWhere([](int, int iy) { return iy >= 10; });
+  mgr.update({MakeCellCluster(Row(9, 0, 5)), MakeCellCluster(Row(9, 6, 11))}, *grid,
+             Eigen::Vector3d(0.5, 0.5, 0.0), 1.0);
+  ASSERT_EQ(mgr.size(), 2u);
+  const uint64_t a = mgr.records()[0].id;
+  mgr.update({MakeCellCluster(Row(9, 0, 11))}, *grid, Eigen::Vector3d(0.5, 0.5, 0.0), 2.0);
+  ASSERT_EQ(mgr.size(), 1u);
+  ASSERT_NE(FindId(mgr, a), nullptr);
+  EXPECT_EQ(FindId(mgr, a)->size_cells, 12);
+}

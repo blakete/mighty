@@ -202,7 +202,7 @@ TEST(GoalSelectorContract, Status_BeforeAnyGoalIsIgnored) {
 // Goals and stamps
 // =================================================================================================
 
-// Scenario: one frontier commit = exactly one term_goal, equal to the selected record's centroid with
+// Scenario: one frontier commit = exactly one term_goal, equal to the selected record's goal cell with
 // z = expl_default_goal_z (0.25 here), no relocation. The same value goes to exploration_current_goal.
 // Repeated state / grid / tick / status calls afterwards publish nothing more.
 // Why: notes D "One goal published per commit, exactly as selected (no relocation)"; spec 11.15.
@@ -225,8 +225,8 @@ TEST(GoalSelectorContract, Goal_OnePerCommit_AsSelected) {
   ASSERT_NE(r, nullptr);
   const GoalCommand& g = h.goals[0];
   EXPECT_EQ(g.kind, GoalKind::kFrontier);
-  EXPECT_DOUBLE_EQ(g.position.x(), r->centroid_xy.x());
-  EXPECT_DOUBLE_EQ(g.position.y(), r->centroid_xy.y());
+  EXPECT_DOUBLE_EQ(g.position.x(), r->goal_xy.x());
+  EXPECT_DOUBLE_EQ(g.position.y(), r->goal_xy.y());
   EXPECT_DOUBLE_EQ(g.position.z(), 0.25);
   EXPECT_EQ(g.stamp_ns, h.sel.currentStampNs());
   ASSERT_TRUE(h.last_out.exploration_current_goal.has_value());

@@ -7,7 +7,8 @@
 //   * goal_selector_test_ideas.md, section C: "`map2d::inflateUnknown`: never changes the input grid; radius 0
 //     gives no band; grid borders handled; same distance convention as `map2d::inflate`."
 //   * map2d.hpp contract: band[i] = 1 for every NON-unknown cell within radius_m of an unknown cell (cell
-//     centre to cell centre); unknown cells themselves are 0.
+//     centre to cell centre) that the unknown cell can see (no OCCUPIED cell strictly between them on the DDA
+//     line, no diagonal step between two OCCUPIED cells); unknown cells themselves are 0. Walls stop the band.
 //
 // Tests (all on tiny synthetic grids, row-major, index = x + dim_x * y, y = 0 is the FIRST row of the ASCII
 // art; legend: '.' free, '#' occupied, '?' unknown, 'B' = expected band cell):
@@ -23,13 +24,18 @@
 //   SameDistanceConventionAsInflate      -> notes C "same distance convention as inflate" (identical geometry)
 //   OutputBufferIsOverwrittenNotAccumulated -> band is rebuilt on every call
 //   NeverMarksValuesOccupied             -> N1 "It does not mark cells occupied"
+//   WallBlocksBand                       -> walls stop the band (no frontier behind a thin wall)
+//   GapInWallLetsBandThrough             -> an opening in the wall does not block
+//   DiagonalWallBlocksBand               -> a one-cell staircase wall blocks diagonal lines too
 //
 // No ROS, no mighty/ headers: map2d only.
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -70,9 +76,29 @@ std::vector<std::string> render(const std::vector<int8_t>& v, const std::vector<
   return out;
 }
 
-/** Independent oracle: band[i] = 1 iff cell i is NOT unknown and some unknown cell lies within radius_m
- *  (Euclidean distance between cell centres = res * sqrt(dx^2 + dy^2), tiny tolerance for float noise).
- *  Brute force, no seed shortcuts, no offset tables. */
+/** True if an OCCUPIED cell blocks the line from unknown cell (ux, uy) to cell (x, y): a cell strictly
+ *  between them on the DDA line (cell k = (lround(k*dx/n), lround(k*dy/n)), n = max(|dx|, |dy|)) is
+ *  occupied, or a diagonal step of the line passes between two occupied cells. */
+bool oracleBlocked(const std::vector<int8_t>& v, int w, int ux, int uy, int x, int y) {
+  auto occ = [&](int cx, int cy) { return v[static_cast<size_t>(cx) + static_cast<size_t>(w) * cy] == kOccupied; };
+  const int dx = x - ux, dy = y - uy;
+  const int n = std::max(std::abs(dx), std::abs(dy));
+  int px = ux, py = uy;
+  for (int k = 1; k <= n; ++k) {
+    const int cx = ux + static_cast<int>(std::lround(double(k) * dx / n));
+    const int cy = uy + static_cast<int>(std::lround(double(k) * dy / n));
+    if (cx != px && cy != py && occ(cx, py) && occ(px, cy)) return true;
+    if (k < n && occ(cx, cy)) return true;
+    px = cx;
+    py = cy;
+  }
+  return false;
+}
+
+/** Independent oracle: band[i] = 1 iff cell i is NOT unknown and some unknown cell that borders known space
+ *  (a known 4-neighbour) lies within radius_m (Euclidean distance between cell centres = res * sqrt(dx^2 +
+ *  dy^2), tiny tolerance for float noise) and is not blocked by a wall (oracleBlocked). Brute force, no offset
+ *  tables. */
 std::vector<uint8_t> oracleBand(const std::vector<int8_t>& v, int w, int h, double res,
                                 double radius_m) {
   std::vector<uint8_t> band(static_cast<size_t>(w) * h, 0);
@@ -83,9 +109,14 @@ std::vector<uint8_t> oracleBand(const std::vector<int8_t>& v, int w, int h, doub
       if (v[i] == kUnknown) continue;
       for (int uy = 0; uy < h && !band[i]; ++uy)
         for (int ux = 0; ux < w; ++ux) {
-          if (v[static_cast<size_t>(ux) + static_cast<size_t>(w) * uy] != kUnknown) continue;
+          auto known = [&](int cx, int cy) {
+            return cx >= 0 && cx < w && cy >= 0 && cy < h &&
+                   v[static_cast<size_t>(cx) + static_cast<size_t>(w) * cy] != kUnknown;
+          };
+          if (known(ux, uy)) continue;
+          if (!(known(ux - 1, uy) || known(ux + 1, uy) || known(ux, uy - 1) || known(ux, uy + 1))) continue;
           const double d = res * std::hypot(double(ux - x), double(uy - y));
-          if (d <= radius_m + 1e-6) {
+          if (d <= radius_m + 1e-6 && !oracleBlocked(v, w, ux, uy, x, y)) {
             band[i] = 1;
             break;
           }
@@ -259,9 +290,9 @@ TEST(InflateUnknown, OutOfGridIsNotUnknown) {
 
 // Scenario: an irregular grid: a solid unknown block, a one-cell hole, a line of unknown, an occupied wall,
 // at several radii and resolutions (including a non-0.1 resolution and a fractional cell radius).
-// Expected: identical to the brute-force oracle (every non-unknown cell with an unknown cell within
-// radius_m). Why: N1 definition of the unknown band; also checks that the "seed only boundary unknown cells"
-// shortcut in the implementation loses nothing for the block interior.
+// Expected: identical to the brute-force oracle (every non-unknown cell with an unseen-blocked boundary unknown
+// cell within radius_m; the wall at x = 19 shadows the lone unknown cell at x = 23 for radius 0.5 m). Why: N1
+// definition of the unknown band; also checks the offset tables and the visibility rays.
 TEST(InflateUnknown, BandMatchesBruteForceOracleOnIrregularGrid) {
   int w, h;
   auto v = parse({"..............................",
@@ -363,4 +394,68 @@ TEST(InflateUnknown, NeverMarksValuesOccupied) {
   EXPECT_EQ(count(kOccupied), occ);
   EXPECT_EQ(count(kUnknown), unk);
   EXPECT_EQ(count(kFree), fr);
+}
+
+// Scenario: free room | wall | unknown, wall 1 and 3 cells thick, radius 0.5 m at 0.1 m (5 cells).
+// Expected: the band reaches the wall cells that touch the unknown but never the free cells behind the wall,
+// so no frontier forms inside a mapped room whose outside is unknown. Control: the same rows without the wall
+// give a 5-cell band on the free side.
+TEST(InflateUnknown, WallBlocksBand) {
+  for (const std::string wall : {std::string("#"), std::string("###")}) {
+    int w, h;
+    const std::string row = std::string(10, '.') + wall + std::string(6, '?');
+    auto v = parse({row, row, row, row, row}, w, h);
+    std::vector<uint8_t> band;
+    map2d::inflateUnknown(v, w, h, 0.1, 0.5f, band);
+    for (int y = 0; y < h; ++y)
+      for (int x = 0; x < 10; ++x)
+        EXPECT_EQ(band[static_cast<size_t>(x) + static_cast<size_t>(w) * y], 0)
+            << "free cell (" << x << "," << y << ") behind a " << wall.size() << "-cell wall";
+    EXPECT_EQ(band[(9 + wall.size()) + w * 2], 1) << "wall cell next to the unknown is a band cell";
+    EXPECT_EQ(band, oracleBand(v, w, h, 0.1, 0.5));
+  }
+  int w, h;
+  const std::string open_row = std::string(11, '.') + std::string(6, '?');
+  auto v = parse({open_row, open_row, open_row}, w, h);
+  std::vector<uint8_t> band;
+  map2d::inflateUnknown(v, w, h, 0.1, 0.5f, band);
+  for (int x = 6; x <= 10; ++x) EXPECT_EQ(band[x + w * 1], 1) << "control: x " << x;
+  EXPECT_EQ(band[5 + w * 1], 0);
+}
+
+// Scenario: a one-cell wall at x = 10 with a 3-cell gap (y 4..6), unknown behind it.
+// Expected: the band reaches through the gap into the room (the opening is real unexplored space), and stays
+// off the free cells shadowed by the wall far from the gap. Matches the oracle.
+TEST(InflateUnknown, GapInWallLetsBandThrough) {
+  std::vector<std::string> rows;
+  for (int y = 0; y < 11; ++y)
+    rows.push_back(std::string(10, '.') + ((y >= 4 && y <= 6) ? "." : "#") + std::string(6, '?'));
+  int w, h;
+  auto v = parse(rows, w, h);
+  std::vector<uint8_t> band;
+  map2d::inflateUnknown(v, w, h, 0.1, 0.5f, band);
+  EXPECT_EQ(band[8 + w * 5], 1) << "straight through the gap";
+  EXPECT_EQ(band[9 + w * 0], 0) << "shadowed by the wall";
+  EXPECT_EQ(band[9 + w * 10], 0) << "shadowed by the wall";
+  EXPECT_EQ(band, oracleBand(v, w, h, 0.1, 0.5));
+}
+
+// Scenario: a one-cell-thick diagonal (8-connected staircase) wall, free below-left, unknown above-right.
+// Expected: no free cell on the free side is a band cell: diagonal lines cannot slip between the stair cells.
+TEST(InflateUnknown, DiagonalWallBlocksBand) {
+  const int n = 12;
+  std::vector<std::string> rows(n, std::string(n, '.'));
+  for (int y = 0; y < n; ++y)
+    for (int x = 0; x < n; ++x) {
+      if (x == y) rows[y][x] = '#';
+      else if (x > y) rows[y][x] = '?';
+    }
+  int w, h;
+  auto v = parse(rows, w, h);
+  std::vector<uint8_t> band;
+  map2d::inflateUnknown(v, w, h, 0.1, 0.5f, band);
+  for (int y = 0; y < h; ++y)
+    for (int x = 0; x < y; ++x)
+      EXPECT_EQ(band[static_cast<size_t>(x) + static_cast<size_t>(w) * y], 0) << "(" << x << "," << y << ")";
+  EXPECT_EQ(band, oracleBand(v, w, h, 0.1, 0.5));
 }

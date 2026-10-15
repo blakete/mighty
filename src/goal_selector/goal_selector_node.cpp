@@ -194,9 +194,9 @@ GoalSelectorNode::GoalSelectorNode() : Node("goal_selector") {
 
   RCLCPP_INFO(this->get_logger(),
               "Exploration: enabled, select rate=%.1f Hz, min_cells=%d, merge_radius=%.2fm, "
-              "visit_radius=%.2fm",
+              "visit_radius=%.2fm, max_cluster_extent=%.2fm",
               rate_hz, par_.expl_cluster_min_cells, par_.expl_merge_radius_m,
-              par_.expl_visit_radius_m);
+              par_.expl_visit_radius_m, par_.expl_max_cluster_extent_m);
 }
 
 // ----------------------------------------------------------------------------
@@ -220,6 +220,7 @@ void GoalSelectorNode::declareParameters() {
   this->declare_parameter("exploration.detector.border_margin_cells", 2);
   this->declare_parameter("exploration.detector.obstacle_clearance_cells", 1);
   this->declare_parameter("exploration.detector.robot_snap_radius_m", 1.0);
+  this->declare_parameter("exploration.detector.max_cluster_extent_m", 0.0);
   this->declare_parameter("exploration.bounds.enabled", false);
   this->declare_parameter("exploration.bounds.min_x", -50.0);
   this->declare_parameter("exploration.bounds.max_x", 50.0);
@@ -300,6 +301,7 @@ void GoalSelectorNode::readParameters() {
   par_.expl_border_margin_cells = i("exploration.detector.border_margin_cells");
   par_.expl_obstacle_clearance_cells = i("exploration.detector.obstacle_clearance_cells");
   par_.expl_robot_snap_radius_m = d("exploration.detector.robot_snap_radius_m");
+  par_.expl_max_cluster_extent_m = d("exploration.detector.max_cluster_extent_m");
   par_.expl_bounds_enabled = b("exploration.bounds.enabled");
   par_.expl_bounds_min_x = d("exploration.bounds.min_x");
   par_.expl_bounds_max_x = d("exploration.bounds.max_x");
@@ -634,8 +636,9 @@ void GoalSelectorNode::broadcastVisitedMap() {
 }
 
 /**
- * @brief Publish frontier visualization markers (ACTIVE and DORMANT centroids + id labels, the
- *        robot->goal line, and the exploration bounds). One MarkerArray per cycle, prefixed with
+ * @brief Publish frontier visualization markers (ACTIVE and DORMANT goals + id labels, their
+ *        frontier cells, the robot->goal line, and the exploration bounds). The goal markers keep
+ *        the "frontier_centroids" namespace so existing RViz configs still show them. One MarkerArray per cycle, prefixed with
  *        DELETEALL. Moved from MIGHTY_NODE::publishFrontierMarkers.
  */
 void GoalSelectorNode::publishFrontierMarkers() {
@@ -668,17 +671,36 @@ void GoalSelectorNode::publishFrontierMarkers() {
   centroids.scale.z = 0.3;
   centroids.pose.orientation.w = 1.0;
 
+  visualization_msgs::msg::Marker cells;
+  cells.header.frame_id = par_.map_frame_id;
+  cells.header.stamp = stamp;
+  cells.ns = "frontier_cells";
+  cells.id = 0;
+  cells.type = visualization_msgs::msg::Marker::POINTS;
+  cells.action = visualization_msgs::msg::Marker::ADD;
+  cells.scale.x = 0.08;
+  cells.scale.y = 0.08;
+  cells.pose.orientation.w = 1.0;
+
   int label_id = 0;
   for (const auto& r : records) {
     // Only ACTIVE and DORMANT are visualized.
     if (r.state != FrontierState::ACTIVE && r.state != FrontierState::DORMANT) continue;
 
     geometry_msgs::msg::Point p;
-    p.x = r.centroid_xy.x();
-    p.y = r.centroid_xy.y();
+    p.x = r.goal_xy.x();
+    p.y = r.goal_xy.y();
     p.z = z0 + 0.1;
     centroids.points.push_back(p);
     centroids.colors.push_back(colorForState(r.state));
+    for (const auto& c : r.cells) {
+      geometry_msgs::msg::Point q;
+      q.x = c.x();
+      q.y = c.y();
+      q.z = z0 + 0.05;
+      cells.points.push_back(q);
+      cells.colors.push_back(colorForState(r.state));
+    }
 
     visualization_msgs::msg::Marker label;
     label.header.frame_id = par_.map_frame_id;
@@ -687,8 +709,8 @@ void GoalSelectorNode::publishFrontierMarkers() {
     label.id = label_id++;
     label.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
     label.action = visualization_msgs::msg::Marker::ADD;
-    label.pose.position.x = r.centroid_xy.x();
-    label.pose.position.y = r.centroid_xy.y();
+    label.pose.position.x = r.goal_xy.x();
+    label.pose.position.y = r.goal_xy.y();
     label.pose.position.z = z0 + 0.6;
     label.pose.orientation.w = 1.0;
     label.scale.z = 0.4;
@@ -709,6 +731,7 @@ void GoalSelectorNode::publishFrontierMarkers() {
     arr.markers.push_back(label);
   }
   if (!centroids.points.empty()) arr.markers.push_back(centroids);
+  if (!cells.points.empty()) arr.markers.push_back(cells);
 
   // Yellow line from robot to current exploration goal.
   if (selector_->explorationActive() && selector_->stateInitialized()) {
@@ -730,8 +753,8 @@ void GoalSelectorNode::publishFrontierMarkers() {
       a.y = cur.y;
       a.z = z0 + 0.1;
       geometry_msgs::msg::Point b;
-      b.x = r->centroid_xy.x();
-      b.y = r->centroid_xy.y();
+      b.x = selector_->currentTarget().x();  // the published goal
+      b.y = selector_->currentTarget().y();
       b.z = z0 + 0.1;
       line.points.push_back(a);
       line.points.push_back(b);
