@@ -1,0 +1,19 @@
+# JK02 (Clearpath Jackal): MIGHTY parameters pinned for this vehicle. Loaded on hardware by
+# launch/onboard_mighty.launch.py on top of hw_mighty_ground_robot.yaml (mighty_node),
+# hw_goal_selector.yaml (goal_selector) and mpc.yaml (mpc). See README.md in this directory.
+#
+# 2026-10-15: the same values the fleet (JR02-tuned) files carry today, pinned so a fleet-wide
+# retune does not move JK02 without a decision. Jackal: 0.508 x 0.430 m, firmware/teleop cap
+# 1.75 m/s; autonomy stays at the fleet's 0.5 m/s until JK02 has been tested driving itself.
+mighty_node:
+  ros__parameters:
+    v_max: 0.5                  # [m/s] planner max velocity
+    ground_robot_v_max: 0.5     # [m/s] tracking max linear velocity
+    inflation_2d_m: 0.1         # [m] 2D planning-map inflation (~2.5 cm/side wider than a JR: < 1 cell)
+goal_selector:
+  ros__parameters:
+    exploration.enabled: true   # drive to frontiers on its own in AUTO (as JR02)
+mpc:
+  ros__parameters:
+    v_max: 0.5                  # [m/s]
+    w_max: 0.5                  # [rad/s]
