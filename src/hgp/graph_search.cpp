@@ -77,12 +77,17 @@ inline bool GraphSearch::isUnknown(int x, int y, int z) const {
 
 // Real obstacles are never exempt, and a goal inside the band is still rejected
 // by HGPPlanner::plan() before the search runs, so this only lets the path
-// leave the band -- it cannot end in it.
+// leave the band -- it cannot end in it. Geofence band cells get the wider
+// keep-out radius (a rover the gate let creep into the band can plan back into
+// the core); cells outside the fence are real obstacles and never exempt.
 inline bool GraphSearch::isStartEscapeCell(int x, int y) const {
-  if (start_escape_r2_ <= 0.0 || !map_util_ || !map_util_->is2DInflatedOnly(x, y)) return false;
+  if (!map_util_ || !map_util_->is2DInflatedOnly(x, y)) return false;
   const double dx = x - xStart_;
   const double dy = y - yStart_;
-  return dx * dx + dy * dy <= start_escape_r2_;
+  const double d2 = dx * dx + dy * dy;
+  if (start_escape_r2_ > 0.0 && d2 <= start_escape_r2_) return true;
+  return start_escape_keepout_r2_ > 0.0 && d2 <= start_escape_keepout_r2_ &&
+         map_util_->is2DKeepOutBand(x, y);
 }
 
 inline double GraphSearch::getHeur(int x, int y, int z) const {
@@ -112,9 +117,12 @@ bool GraphSearch::plan(int xStart, int yStart, int zStart, int xGoal, int yGoal,
   xStart_ = xStart;
   yStart_ = yStart;
   start_escape_r2_ = 0.0;
+  start_escape_keepout_r2_ = 0.0;
   if (zDim_ == 1 && map_util_ && map_util_->has2DMap() && map_util_->getRes() > 0.0) {
     const double r_cells = map_util_->getInflation2D() / map_util_->getRes();
     if (r_cells > 0.0) start_escape_r2_ = r_cells * r_cells + 1e-6;
+    const double k_cells = map_util_->getKeepOutBand2D() / map_util_->getRes();
+    if (k_cells > 0.0) start_escape_keepout_r2_ = k_cells * k_cells + 1e-6;
   }
 
   // Set start node

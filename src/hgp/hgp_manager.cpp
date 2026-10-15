@@ -1362,6 +1362,7 @@ void HGPManager::updateMap(double wdx, double wdy, double wdz, const Vec3f& cent
 
   // Build 2D ground robot map
   if (is_ground_robot_) {
+    map_util_->setKeepOut2D(grids.keepout, grids.keepout_band_m);  // every builder applies it
     if (grids.occ) {
       // Occ2D mode: tri-state occupancy from mapper + BFS distance-based heat ramp.
       map_util_->buildMap2DFromOcc2D(*grids.occ, grids.esdf_d_safe, par_.static_heat_Hmax);

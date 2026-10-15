@@ -81,20 +81,26 @@ target_include_directories(map2d PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE
 target_link_libraries(map2d PUBLIC Eigen3::Eigen)
 set_target_properties(map2d PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# Geofence goal geometry (goal_fence JSON, polygon tests, rasterizer): ROS-free, shared by the
+# goal selector (goal filter) and the planner (keep-out in its 2D map).
+add_library(goal_fence STATIC src/goal_selector/goal_fence.cpp)
+target_include_directories(goal_fence PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+target_link_libraries(goal_fence nlohmann_json::nlohmann_json)
+set_target_properties(goal_fence PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # add executables
 add_executable(mighty src/mighty/mighty_node.cpp src/mighty/mighty.cpp src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/mighty/utils.cpp src/mighty/lbfgs_solver.cpp src/mighty/lbfgs_solver_utils.cpp)
-target_link_libraries(mighty ${PCL_LIBRARIES} map2d)
+target_link_libraries(mighty ${PCL_LIBRARIES} map2d goal_fence)
 ament_target_dependencies(mighty rclcpp example_interfaces dynus_interfaces goal_selector_msgs visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
 # Goal selector: ROS-free core (linkable by tests) + thin ROS node.
 # The core pulls in nav_msgs headers via OccGrid2D but no rclcpp.
 add_library(goal_selector_core STATIC
   src/goal_selector/goal_selector.cpp
-  src/goal_selector/goal_fence.cpp
   src/mighty/frontier_detector.cpp
   src/mighty/frontier_manager.cpp)
 target_include_directories(goal_selector_core PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
-target_link_libraries(goal_selector_core map2d nlohmann_json::nlohmann_json)
+target_link_libraries(goal_selector_core map2d goal_fence nlohmann_json::nlohmann_json)
 ament_target_dependencies(goal_selector_core nav_msgs Eigen3)
 set_target_properties(goal_selector_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
@@ -215,14 +221,14 @@ if(BUILD_TESTING)
   # buildMap2DFromOcc2D and graph_search.cpp getSucc).
   ament_add_gtest(test_map_2d_tristate
     src/test/test_map_2d_tristate.cpp)
-  target_link_libraries(test_map_2d_tristate ${PCL_LIBRARIES} map2d)
+  target_link_libraries(test_map_2d_tristate ${PCL_LIBRARIES} map2d goal_fence)
   ament_target_dependencies(test_map_2d_tristate
     rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
   ament_add_gtest(test_graph_search_unknown_cost
     src/test/test_graph_search_unknown_cost.cpp
     src/hgp/graph_search.cpp)
-  target_link_libraries(test_graph_search_unknown_cost ${PCL_LIBRARIES} map2d)
+  target_link_libraries(test_graph_search_unknown_cost ${PCL_LIBRARIES} map2d goal_fence)
   ament_target_dependencies(test_graph_search_unknown_cost
     rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
@@ -233,7 +239,7 @@ if(BUILD_TESTING)
     src/test/test_planner_unknown_paths.cpp
     src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp
     src/mighty/utils.cpp)
-  target_link_libraries(test_planner_unknown_paths ${PCL_LIBRARIES} map2d)
+  target_link_libraries(test_planner_unknown_paths ${PCL_LIBRARIES} map2d goal_fence)
   ament_target_dependencies(test_planner_unknown_paths
     rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
@@ -241,9 +247,22 @@ if(BUILD_TESTING)
     src/test/test_planner_prefix_trim.cpp
     src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp
     src/mighty/utils.cpp)
-  target_link_libraries(test_planner_prefix_trim ${PCL_LIBRARIES} map2d)
+  target_link_libraries(test_planner_prefix_trim ${PCL_LIBRARIES} map2d goal_fence)
   ament_target_dependencies(test_planner_prefix_trim
     rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
+
+  # Geofence keep-out in the planner's 2D map (goal_fence polygons -> A*), through solveHGP.
+  ament_add_gtest(test_planner_keepout
+    src/test/test_planner_keepout.cpp
+    src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp
+    src/mighty/utils.cpp)
+  target_link_libraries(test_planner_keepout ${PCL_LIBRARIES} map2d goal_fence)
+  ament_target_dependencies(test_planner_keepout
+    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
+
+  # goal_fence rasterizer == goalFenceAllows at every cell centre (ROS-free).
+  ament_add_gtest(test_goal_fence_raster src/test/test_goal_fence_raster.cpp)
+  target_link_libraries(test_goal_fence_raster goal_fence)
 
   # HGPManager mapper-grid handoff locking (no rclcpp::init).
   ament_add_gtest(test_hgp_manager_2d
@@ -253,7 +272,7 @@ if(BUILD_TESTING)
     src/hgp/graph_search.cpp
     src/hgp/utils.cpp
     src/mighty/utils.cpp)
-  target_link_libraries(test_hgp_manager_2d ${PCL_LIBRARIES} map2d)
+  target_link_libraries(test_hgp_manager_2d ${PCL_LIBRARIES} map2d goal_fence)
   ament_target_dependencies(test_hgp_manager_2d
     rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 

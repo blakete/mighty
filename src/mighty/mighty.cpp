@@ -2011,6 +2011,8 @@ void MIGHTY::updateMap2DOnly() {
     auto esdf_grid_snap = getEsdfGridSnapshot();
     if (occ_grid_2d_snap) hgp_manager_.setOccGrid2D(occ_grid_2d_snap);
     if (esdf_grid_snap) hgp_manager_.setEsdfGrid(esdf_grid_snap, par_.esdf_weight, par_.esdf_d_safe);
+    const auto keepout = getKeepOut2DSnapshot();  // also when null: that turns the keep-out off
+    hgp_manager_.setKeepOut2D(keepout.first, keepout.second);
   }
 
   // Same window bookkeeping as updateOccupancyMap().

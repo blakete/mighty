@@ -15,6 +15,7 @@
  * not ready the selector pauses new goals. ROS-free (nlohmann_json only).
  */
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -48,5 +49,22 @@ bool parseGoalFence(const std::string& json, GoalFence& out, std::string& frame_
  *  engaged = the geofence is required for AUTO (ENGAGED intent present; false when off or in shadow).
  *  @return false if it is not one (not JSON, or no boolean "engaged"): ignore it. */
 bool parseGateEcho(const std::string& json, bool& engaged);
+
+/** @brief Cell classes of rasterizeGoalFence(). */
+enum FenceCell : uint8_t {
+  kFenceAllowed = 0,    ///< inside the core: at least band_m from every fence edge
+  kFenceBand = 1,       ///< allowed area, but closer than band_m to a fence edge
+  kFenceForbidden = 2,  ///< outside keep_in or inside a keep_out
+};
+
+/** @brief Classify every cell CENTRE of a dim_x x dim_y window (cell (x, y) centre =
+ *  origin + (x + 0.5, y + 0.5) * res, index x + dim_x * y) against the fence, with the arithmetic of
+ *  goalFenceAllows(): kFenceForbidden where the centre is not inside keep_in or is inside a keep_out
+ *  (even-odd per ring), else kFenceBand where it is closer than band_m to a ring edge, else kFenceAllowed.
+ *  So goalFenceAllows(f, cx, cy, extra) == (cell == kFenceAllowed) when band_m == f.offset_m + extra.
+ *  A fence that is not ready (or has no keep_in) gives all kFenceAllowed. band_m <= 0: no band.
+ *  Cost: one pass over the window plus the cells near each edge. */
+void rasterizeGoalFence(const GoalFence& f, int dim_x, int dim_y, double res, double origin_x,
+                        double origin_y, double band_m, std::vector<uint8_t>& out);
 
 }  // namespace goal_selector

@@ -301,6 +301,21 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
         std::bind(&MIGHTY_NODE::occ2DCallback, this, std::placeholders::_1), options_map);
     RCLCPP_INFO(this->get_logger(),
                 "Occ2D: subscribed to raw %s for HGP/A*", par_.occ_2d_topic_name.c_str());
+
+    // Geofence keep-out for A* (2 Hz from the geofence; same serialized map group as occ_2d).
+    if (keepout_enabled_ && par_.use_2d_planning) {
+      rclcpp::QoS keepout_qos(rclcpp::KeepLast(1));
+      keepout_qos.reliable().durability_volatile();
+      sub_keepout_ = this->create_subscription<std_msgs::msg::String>(
+          keepout_topic_, keepout_qos,
+          std::bind(&MIGHTY_NODE::goalFenceCallback, this, std::placeholders::_1), options_map);
+      RCLCPP_INFO(this->get_logger(),
+                  "Keep-out: geofence '%s' -> planner 2D map (max age %.1f s, band = offset_m - %.2f m)",
+                  keepout_topic_.c_str(), keepout_max_age_sec_, keepout_slack_m_);
+    } else {
+      RCLCPP_INFO(this->get_logger(), "Keep-out: off (keepout_2d.enabled=%s)",
+                  keepout_enabled_ ? "true, but not 2D planning" : "false");
+    }
   }
 }
 
@@ -562,6 +577,10 @@ void MIGHTY_NODE::declareParameters() {
   this->declare_parameter("use_esdf_cost", false);
   this->declare_parameter("esdf_2d_topic_name", std::string("esdf_2d_topic"));
   this->declare_parameter("occ_2d_topic_name", std::string("occ_2d_topic"));
+  this->declare_parameter("keepout_2d.enabled", false);
+  this->declare_parameter("keepout_2d.topic_name", std::string("geofence/goal_fence"));
+  this->declare_parameter("keepout_2d.max_age_sec", 2.0);
+  this->declare_parameter("keepout_2d.slack_m", 0.05);
   this->declare_parameter("esdf_weight", 1e+3);
   this->declare_parameter("esdf_d_safe", 1.0);
   this->declare_parameter("esdf_truncation_distance", 10);
@@ -873,6 +892,10 @@ void MIGHTY_NODE::setParameters() {
   par_.use_esdf_cost = this->get_parameter("use_esdf_cost").as_bool();
   par_.esdf_2d_topic_name = this->get_parameter("esdf_2d_topic_name").as_string();
   par_.occ_2d_topic_name = this->get_parameter("occ_2d_topic_name").as_string();
+  keepout_enabled_ = this->get_parameter("keepout_2d.enabled").as_bool();
+  keepout_topic_ = this->get_parameter("keepout_2d.topic_name").as_string();
+  keepout_max_age_sec_ = this->get_parameter("keepout_2d.max_age_sec").as_double();
+  keepout_slack_m_ = std::max(0.0, this->get_parameter("keepout_2d.slack_m").as_double());
   par_.esdf_weight = this->get_parameter("esdf_weight").as_double();
   par_.esdf_d_safe = this->get_parameter("esdf_d_safe").as_double();
   par_.esdf_truncation_distance = this->get_parameter("esdf_truncation_distance").as_int();
@@ -2966,10 +2989,58 @@ void MIGHTY_NODE::occ2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr ms
     }
   }
   occ_grid_2d_ = OccGrid2D::fromOccupancyGrid(*msg);
+  updateKeepOut2D(msg->header.frame_id);
   mighty_ptr_->setOccGrid2D(occ_grid_2d_);
   if (par_.use_hardware && par_.use_2d_planning && par_.vehicle_type == "ground_robot") {
     mighty_ptr_->updateMap2DOnly();
     publishPlanningMap2D(msg->header, msg->info.origin.position.z);
+  }
+}
+
+void MIGHTY_NODE::goalFenceCallback(const std_msgs::msg::String::SharedPtr msg) {
+  goal_selector::GoalFence f;
+  std::string frame_id, error;
+  if (!goal_selector::parseGoalFence(msg->data, f, frame_id, error)) {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 10000, "Keep-out: ignoring '%s': %s",
+                         keepout_topic_.c_str(), error.c_str());
+    return;
+  }
+  if (!error.empty())
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 10000,
+                         "Keep-out: goal_fence not usable (%s): no keep-out while it is", error.c_str());
+  keepout_fence_ = std::make_shared<const goal_selector::GoalFence>(std::move(f));
+  keepout_frame_ = frame_id;
+  keepout_rx_t_ = this->now().seconds();
+}
+
+void MIGHTY_NODE::updateKeepOut2D(const std::string& grid_frame) {
+  if (!keepout_enabled_) return;
+  std::shared_ptr<const goal_selector::GoalFence> use;
+  double band_m = 0.0;
+  char state[256];
+  // No keep-out while the fence is not enforcing (shadow / off: nothing to respect) or not usable
+  // (silent, localizing): the drive gate holds the robot and the goal selector pauses meanwhile.
+  if (!keepout_fence_) {
+    snprintf(state, sizeof(state), "off (no goal_fence received)");
+  } else if (this->now().seconds() - keepout_rx_t_ > keepout_max_age_sec_) {
+    snprintf(state, sizeof(state), "off (goal_fence older than %.1f s)", keepout_max_age_sec_);
+  } else if (!keepout_fence_->active) {
+    snprintf(state, sizeof(state), "off (fence not enforcing)");
+  } else if (!keepout_fence_->ready) {
+    snprintf(state, sizeof(state), "off (fence not ready: localizing / anchor)");
+  } else if (keepout_frame_ != grid_frame) {
+    snprintf(state, sizeof(state), "off (goal_fence frame '%s' != occ_2d frame '%s')",
+             keepout_frame_.c_str(), grid_frame.c_str());
+  } else {
+    use = keepout_fence_;
+    band_m = std::max(0.0, use->offset_m - keepout_slack_m_);
+    snprintf(state, sizeof(state), "on (fence enforcing, band %.2f m = offset %.2f - slack %.2f, 1 + %zu rings)",
+             band_m, use->offset_m, keepout_slack_m_, use->keep_out.size());
+  }
+  mighty_ptr_->setKeepOut2D(use, band_m);
+  if (keepout_state_ != state) {
+    keepout_state_ = state;
+    RCLCPP_INFO(this->get_logger(), "Keep-out: %s", state);
   }
 }
 

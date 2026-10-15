@@ -100,6 +100,16 @@ TEST(HGPManager2D, GridSettersConcurrentWithMapUpdates) {
     for (int i = 0; i < N; ++i) {
       g.mgr.setOccGrid2D(Grid(g.origin, {{45, 45}}));
       g.mgr.setEsdfGrid(nullptr, 1.0, 0.5);
+      // geofence keep-out handoff (MIGHTY::updateMap2DOnly), on and off
+      if (i % 2 == 0) {
+        auto f = std::make_shared<goal_selector::GoalFence>();
+        f->active = f->ready = true;
+        f->offset_m = 0.3;
+        f->keep_in = {{-100.0, -100.0}, {100.0, -100.0}, {100.0, 100.0}, {-100.0, 100.0}};
+        g.mgr.setKeepOut2D(f, 0.3);
+      } else {
+        g.mgr.setKeepOut2D(nullptr, 0.0);
+      }
       g.mgr.setupHGPPlanner("astar_heat", false, RES, 1.0, 1.0, 1.0, 100, 1000, 2.0, 0.0, 0.0,
                             0.0);
     }
