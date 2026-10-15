@@ -264,6 +264,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_goal_fence_raster src/test/test_goal_fence_raster.cpp)
   target_link_libraries(test_goal_fence_raster goal_fence)
 
+  # Map-age check + hold state machine (map2d/map_age.hpp, header-only, ROS-free).
+  ament_add_gtest(test_map_age src/test/test_map_age.cpp)
+  target_link_libraries(test_map_age map2d)
+
   # HGPManager mapper-grid handoff locking (no rclcpp::init).
   ament_add_gtest(test_hgp_manager_2d
     src/test/test_hgp_manager_2d.cpp
@@ -350,6 +354,11 @@ if(BUILD_TESTING)
     src/test/test_goal_selector_geofence.cpp)
   target_link_libraries(test_goal_selector_geofence goal_selector_core)
   ament_target_dependencies(test_goal_selector_geofence Eigen3 nav_msgs)
+
+  ament_add_gtest(test_goal_selector_map_age
+    src/test/test_goal_selector_map_age.cpp)
+  target_link_libraries(test_goal_selector_map_age goal_selector_core)
+  ament_target_dependencies(test_goal_selector_map_age Eigen3 nav_msgs)
 endif()
 
 ament_package()

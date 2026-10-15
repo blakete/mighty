@@ -9,6 +9,7 @@
 # are no longer in hw_mighty_ground_robot.yaml. goal_radius is intentionally also kept
 # in the planner YAML (the planner uses it); keep the two in step.
 # exploration.detector.min_obstacle_distance_m is gone (D3): not used by the selector.
+# map_max_age_sec (stale-map pause) is also read from the planner layer: one key for both nodes.
 goal_selector:
     ros__parameters:
 

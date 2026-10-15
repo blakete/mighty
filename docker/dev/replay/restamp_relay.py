@@ -7,7 +7,11 @@ use_sim_time. Instead, play the bag with each topic remapped under IN_PREFIX
 (ros2 bag play --remap /RR08/livox/lidar:=/replay/RR08/livox/lidar ...) and let
 this node republish it on the original name with ONE constant offset added to
 every stamp:  offset = now - stamp_of_first_message.  Relative timing between
-messages and topics is therefore exact; only the epoch moves.
+messages and topics is therefore exact; only the epoch moves. The offset is fixed from
+the first message with a real stamp on a topic other than /tf_static: a latched static
+transform can carry a stamp from long before the recording (publisher start), which would
+shift every other topic into the future -- and mighty's map-age hold reads that as stale.
+Messages that arrive before the offset is fixed are held and relayed right after.
 
 Handles: any message with header.stamp; tf2_msgs/TFMessage (each transform);
 sensor_msgs/PointCloud2 with a Livox per-point float64 'timestamp' field in ns
@@ -43,7 +47,8 @@ def set_stamp_ns(stamp, ns):
 class RestampRelay(Node):
     def __init__(self, in_prefix, topics):
         super().__init__('restamp_relay')
-        self.offset_ns = None          # fixed once, from the first message seen
+        self.offset_ns = None          # fixed once, from the first usable message (see docstring)
+        self.pending = []              # (topic, msg) relayed once the offset is fixed
         self.count = {}
         self.pubs = {}
         qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
@@ -97,10 +102,17 @@ class RestampRelay(Node):
     def relay(self, topic, msg):
         if self.offset_ns is None:
             first = self.first_stamp_ns(msg)
-            if first is None:
+            if topic.endswith('tf_static') or first is None or first <= 0:
+                self.pending.append((topic, msg))
                 return
             self.offset_ns = self.get_clock().now().nanoseconds - first
             self.get_logger().info(f'offset fixed from {topic}: +{self.offset_ns / NS:.3f} s')
+            pending, self.pending = self.pending, []
+            for t, m in pending:
+                self.publish_shifted(t, m)
+        self.publish_shifted(topic, msg)
+
+    def publish_shifted(self, topic, msg):
         self.shift(msg)
         self.pubs[topic].publish(msg)
         self.count[topic] += 1

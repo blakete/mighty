@@ -84,6 +84,19 @@ parameters (`mighty_node`'s are a computed merge of `mighty.yaml` ←
 `hw_mighty_ground_robot.yaml` plus overrides; `goal_selector`'s are that same merge with
 `hw_goal_selector.yaml` layered on top — never hand-roll them as `ros2 run`).
 
+### Map-age hold (`map_max_age_sec`, `<ns>/map_hold`)
+
+When the `occ_2d_topic` / `esdf_2d_topic` header stamps get older than `map_max_age_sec`
+(1.5 s on hardware) the planner stops the robot: one two-point path to the MPC (it treats it
+as a reached goal and ramps to 0), no replans and no `planner_status`. `<ns>/map_hold`
+(`std_msgs/Bool`, latched, 1 Hz) is `true` meanwhile, and the goal selector pauses without
+dropping its frontier or a manual goal. Both resume on their own once the maps are fresh
+again. The stamp is the DLIO cloud time: a dead Orin / `local_mapper` / `mapping` makes the
+grids stop, while a dead lidar or DLIO leaves the elevation mapper republishing with a
+frozen stamp, so check them in that order when `map_hold` is `true`. The planner's own log
+lines are invisible on a rover (`--log-level error`) except these, which log at ERROR:
+`ros2 topic echo <ns>/map_hold` is the check.
+
 Only the planner and MPC panes gate on `wait_for_tf.py <ns>/map <ns>/odom` (the
 `/tf_static` startup-race fix); the state converter and goal selector never touch TF. `wait_for_tf.py`
 warns and continues on timeout, so the stack never deadlocks. Restarting the MPC pane is
@@ -323,6 +336,16 @@ one to test an image against, on the NAS at
 
 Gotcha: the MPC reads its pose from `dlio/odom_node/pose` (`mpc.yaml: pose_topic`), not
 from `/state` or TF — leave that topic out of the replay and every command is exactly 0.
+
+Gotcha: the reference bag (2026-09-17) predates `persistent_map/grid`, while the hardware
+goal selector detects frontiers on it (`exploration.persistent_map.enabled: true`): with that
+bag the selector never commits a goal. Set it to `false` in the checkout's
+`config/hw_goal_selector.yaml` for the run (it then detects on `occ_2d`), or record a newer bag.
+
+Gotcha: once the bag ends the grids stop, so the map-age hold engages (`map_hold` true) and
+RViz goals do nothing in a `KEEP_RUNNING=1` session. For interactive goals on the last map set
+`map_max_age_sec: 0` in the checkout's `config/hw_mighty_ground_robot.yaml` (bind-mounted)
+and restart the planner pane.
 
 ## Env & networking
 

@@ -88,6 +88,7 @@ Output GoalSelector::onState(double now, const Pose& pose) {
   Output out;
   pose_ = pose;
   state_initialized_ = true;
+  updateMapGuard(now, out);
 
   // MinPos: broadcast own position to peers (throttled). (stateCallback in mighty_node)
   if (params_.expl_enabled && params_.expl_use_minpos && params_.expl_peer_publish_rate_hz > 0.0) {
@@ -101,8 +102,12 @@ Output GoalSelector::onState(double now, const Pose& pose) {
   // Manual-goal stuck watchdog (N4): runs here (not on the select tick) so it also works with
   // exploration disabled, where there is no select timer.
   // Two checks: start timeout (never moved after commit), then the normal stuck watchdog.
-  const bool manual_start_timeout = manual_goal_active_ && manualStartTimeoutFired(now);
-  const bool manual_stuck = manual_goal_active_ && !manual_start_timeout && stuckWatchdogFired(now);
+  // Stale maps: the planner holds the robot, so neither check may run (it would release the goal).
+  const bool map_paused = map_guard_.held();
+  if (map_paused) holdManualClocks(now);
+  const bool manual_start_timeout = !map_paused && manual_goal_active_ && manualStartTimeoutFired(now);
+  const bool manual_stuck =
+      !map_paused && manual_goal_active_ && !manual_start_timeout && stuckWatchdogFired(now);
   if (manual_start_timeout || manual_stuck) {
     if (manual_start_timeout) {
       log(out, LogMessage::Level::kWarn,
@@ -212,6 +217,7 @@ void GoalSelector::detectAndUpdate(double now, const std::shared_ptr<const OccGr
 
 Output GoalSelector::onOccGrid(double now, GridInput grid) {
   Output out;
+  occ_stamp_ = grid.stamp;  // map age (map_max_age_sec), also with exploration off
 
   // Remember the mapper's ground-plane z so the visited map renders at the same height.
   occ2d_origin_z_ = grid.origin_z;
@@ -424,8 +430,34 @@ void GoalSelector::invalidateNogoFrontiers(double now, Output& out) {
 Output GoalSelector::onSelectTick(double now) {
   Output out;
   if (select_start_t_ < 0.0) select_start_t_ = now;
+  updateMapGuard(now, out);
+  // The select timer also runs when no state arrives (dead DLIO): hold a manual goal's clock here
+  // too, or the first state after the outage would see the whole outage as "no motion".
+  if (map_guard_.held()) holdManualClocks(now);
   selectAndCommit(now, out);
   return out;
+}
+
+void GoalSelector::updateMapGuard(double now, Output& out) {
+  using Transition = map2d::MapAgeGuard::Transition;
+  const Transition t = map_guard_.update(now, params_.map_max_age_sec, occ_stamp_);
+  if (t == Transition::kExitHold) {
+    log(out, LogMessage::Level::kInfo,
+        fmt("Maps fresh again after %.1f s -> resuming goals", map_guard_.lastHoldSec()));
+    return;
+  }
+  if (!map_guard_.held()) return;
+  if (t == Transition::kEnterHold || now - last_map_log_t_ >= 5.0) {
+    last_map_log_t_ = now;
+    log(out, LogMessage::Level::kWarn,
+        fmt("Maps stale (occ_2d %.1f s old > %.1f s; the planner holds the robot) -> pausing new "
+            "goals",
+            map_guard_.age(), params_.map_max_age_sec));
+  }
+}
+
+void GoalSelector::holdManualClocks(double now) {
+  if (manual_goal_active_ && explore_last_progress_t_ >= 0.0) explore_last_progress_t_ = now;
 }
 
 // Stuck watchdog (frontier and manual pursuit): armed after the robot first moves more than
@@ -475,12 +507,13 @@ bool GoalSelector::stuckWatchdogFired(double now) {
   return false;
 }
 
-// While the fence pause holds the current frontier pursuit, the gate is holding the robot too: keep
-// the pursuit's stuck and pursuit-timeout clocks from running, or the first tick after the fence is
-// ready again drops a valid goal as stuck / timed out. Both clocks run normally again on resume.
+// While the fence or map pause holds the current frontier pursuit, the gate / the planner's map hold
+// is holding the robot too: keep the pursuit's stuck and pursuit-timeout clocks from running, or the
+// first tick after the pause drops a valid goal as stuck / timed out. Both clocks run normally again
+// on resume. Back-to-back map and fence pauses share pause_tick_t_, so no paused time is lost.
 void GoalSelector::holdPursuitClocks(double now) {
-  const double dt = fence_pause_tick_t_ >= 0.0 ? now - fence_pause_tick_t_ : 0.0;
-  fence_pause_tick_t_ = now;
+  const double dt = pause_tick_t_ >= 0.0 ? now - pause_tick_t_ : 0.0;
+  pause_tick_t_ = now;
   if (!exploration_active_) return;
   if (explore_last_progress_t_ >= 0.0) explore_last_progress_t_ = now;
   frontier_manager_->extendPursuit(current_explore_id_, dt);
@@ -493,6 +526,13 @@ void GoalSelector::selectAndCommit(double now, Output& out) {
   if (!frontier_grid_) return;
   if (!state_initialized_) return;
 
+  // Stale maps (map_max_age_sec): the planner holds the robot (map_hold) and detection would run on
+  // a frozen map, so no commits, preemption or watchdog switches; the pursuit clocks are held.
+  if (map_guard_.held()) {
+    holdPursuitClocks(now);
+    return;
+  }
+
   // Geofence goal filter: pause while the fence is enforcing but not usable (holds the current
   // pursuit; no commits, preemption or watchdog switches); otherwise drop no-go frontiers before
   // ranking, also when the fence arrived after the last detection pass.
@@ -503,7 +543,7 @@ void GoalSelector::selectAndCommit(double now, Output& out) {
     holdPursuitClocks(now);
     return;
   }
-  fence_pause_tick_t_ = -1.0;
+  pause_tick_t_ = -1.0;
   if (gate == FenceGate::kFilter) invalidateNogoFrontiers(now, out);
 
   // If we still have an in-progress exploration goal that hasn't been marked VISITED/INVALIDATED

@@ -68,6 +68,7 @@
 
 #include "goal_selector/goal_fence.hpp"
 #include "map2d/map2d.hpp"
+#include "map2d/map_age.hpp"
 #include "mighty/frontier_detector.hpp"
 #include "mighty/frontier_manager.hpp"
 #include "mighty/occ_grid_2d.hpp"
@@ -141,6 +142,12 @@ struct SelectorParams {
   double expl_geofence_max_age_sec{2.0};
   double expl_geofence_gate_max_age_sec{2.0};  ///< [s] gate echo older than this is ignored
   double expl_geofence_startup_wait_sec{0.0};  ///< [s] 0 = none (unit tests); the node defaults to 10
+  // Map age (map_max_age_sec, the planner's key, layered in): while the latest occ_2d header stamp is
+  // older than this (map2d::MapAgeGuard: dead mapper, or dead lidar / DLIO with the mapper
+  // republishing a frozen stamp), the planner holds the robot and no new goals are committed; the
+  // current frontier pursuit and a manual goal keep their stuck / pursuit-timeout clocks held, so
+  // they survive the outage.
+  double map_max_age_sec{0.0};  ///< [s] 0 = off (unit tests); the node defaults to 1.5
   // Preemption
   bool   expl_preempt_enabled{false};
   double expl_preempt_margin{2.0};
@@ -201,6 +208,7 @@ struct GridInput {
   double origin_y{0.0};
   double origin_z{0.0};
   std::vector<int8_t> data;  ///< row-major, index = x + width * y
+  double stamp{-1.0};        ///< header stamp [s]; <= 0: none (onOccGrid: no map-age check)
 };
 
 /** @brief 2D rigid transform taking a point in map_frame_id into another frame:
@@ -350,6 +358,8 @@ class GoalSelector {
   bool selectorMap(SelectorMap& m) const;
   /** @brief True if a raw occ_2d grid has been received. */
   bool hasOccGrid() const { return occ_grid_2d_ != nullptr; }
+  /** @brief True while new goals are paused because occ_2d is older than map_max_age_sec. */
+  bool mapPaused() const { return map_guard_.held(); }
 
  private:
   struct Commitment {
@@ -405,7 +415,12 @@ class GoalSelector {
   FenceGate last_fence_gate_{FenceGate::kOpen};
   std::string last_fence_why_;
   double last_fence_pause_log_t_{-1.0e18};
-  double fence_pause_tick_t_{-1.0};  // last select tick spent in kPause (-1: not paused)
+  double pause_tick_t_{-1.0};  // last select tick spent paused, fence or map (-1: not paused)
+  double occ_stamp_{-1.0};     // header stamp of the latest occ_2d (onOccGrid), -1: none
+  map2d::MapAgeGuard map_guard_;
+  double last_map_log_t_{-1.0e18};
+  void updateMapGuard(double now, Output& out);  // map_max_age_sec: transitions + throttled log
+  void holdManualClocks(double now);  // map pause: a manual goal's start / stuck clock does not run
   bool fenceAllowsMap(double x, double y) const;   // goalFenceAllows on a map_frame_id point
   void noteFenceGate(double now, FenceGate gate, const char* why, Output& out);
   void holdPursuitClocks(double now);  // kPause: stuck / pursuit-timeout clocks do not run
