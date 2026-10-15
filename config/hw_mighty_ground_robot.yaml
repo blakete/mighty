@@ -88,8 +88,8 @@ mighty_node:
 
         # --- Global Planner ---
         global_planner: "astar_heat"                    # ["sjps", "astar_heat"]
-        inflation_hgp: 0.3                              # [m] Static obstacle inflation (0 when using ESDF/occ_2d)
-        hgp_timeout_duration_ms: 10000                  # [ms] Global planner timeout
+        inflation_hgp: 0.0                              # [m] Static obstacle inflation (0 when using ESDF/occ_2d)
+        hgp_timeout_duration_ms: 150                  # [ms] Global planner timeout
         max_expand: 1000000                               # [-] Max A* node expansions
         hgp_stop_distance_m: 0.0                          # [m] Safety stand-off on A* FALLBACK (best_node) paths: back off the path tail so the last WAYPOINT (robot center target) keeps this clearance from the nearest REAL occupied, unknown or out-of-window cell. inflation_2d_m band cells are ignored (measured from the wall, not the band edge). Cell-center to cell-center, quantized up by ceil(dist/res). Excludes footprint -> body clearance ~= this - robot_radius. 0 = disabled (main had 0.6).
         trim_min_unknown_run_cells: 3                   # [cells] The EXECUTED path (prefix) is cut where it enters a run of this many consecutive UNKNOWN cells of the raw occ_2d_topic grid (edge of observed space), then backed off unknown_inflation_2d_m; shorter unknown pockets (the mapper leaves <=4-cell holes as -1 on purpose) are driven through. The global path still reaches the goal through unknown, priced by w_unknown.
@@ -97,7 +97,7 @@ mighty_node:
         unknown_inflation_2d_m: 0.5                     # [m] Unknown inflation radius, one value read by both nodes. Planner: the executed path (prefix) ends this far back (arc length) from the start of an unknown run, i.e. keeps this standoff from the edge of unknown. Goal selector: radius of the unknown band around unknown cells in which frontiers are generated (so frontiers sit farther from real unknown); walls stop the band (no frontier behind a wall). The band is not occupied. 0 = no back-off / no band.
 
         # --- Local Planning ---
-        horizon: 30.0                                   # [m] Planning horizon
+        horizon: 15.0                                   # [m] Planning horizon
         goal_radius: 0.5                                # [m] Goal reached threshold
         goal_seen_radius: 0.4                           # [m] Distance to stop replanning
 
@@ -143,10 +143,10 @@ mighty_node:
         # (+ robot and goal) and the A* runs to the goal itself; otherwise the straight-line subgoal at
         # `horizon`, clamped onto the robot-centred window, as before. A goal whose cell is occupied (e.g. a
         # remembered obstacle) falls back to the straight-line subgoal in the same tick.
-        plan_to_terminal_goal: false                    # [-] JR02: true (with map_fusion's composite occ_2d)
-        max_window_m: 0.0                               # [m] terminal-goal window cap per axis, 0 = none (JR02: 46 = 40 m composite + 2 x margin)
+        plan_to_terminal_goal: true                    # [-] JR02: true (with map_fusion's composite occ_2d)
+        max_window_m: 46.0                               # [m] terminal-goal window cap per axis, 0 = none (JR02: 46 = 40 m composite + 2 x margin)
         goal_window_margin_m: 3.0                       # [m] window margin around robot and goal beyond the grid
-        planning_map_2d_period_s: 0.0                   # [s] planning_map_2d publish period, 0 = every occ_2d grid (JR02: 1.0; it is the whole window)
+        planning_map_2d_period_s: 1.0                   # [s] planning_map_2d publish period, 0 = every occ_2d grid (JR02: 1.0; it is the whole window)
 
         # --- Sensor ---
         depth_camera_depth_max: 10.0                    # [m] Max depth camera range (d435 in simulation)
