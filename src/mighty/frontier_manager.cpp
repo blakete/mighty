@@ -495,6 +495,7 @@ std::optional<FrontierRecord> FrontierManager::selectNextGoalMinPos(
         if ((p.position - records_[i].goal_xy).norm() < d_self) ++rank;
       }
       const double u = computeUtility(records_[i], robot_pose, current_grid);
+      if (u < params_.goal_select_threshold) continue;  // same cutoff as selectNextGoal
       cands.push_back({static_cast<int>(i), rank, d_self, u});
     }
     std::sort(cands.begin(), cands.end(), [](const Candidate& a, const Candidate& b) {
