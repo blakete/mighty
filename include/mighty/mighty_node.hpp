@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <atomic>
 #include <fstream>
 #include <optional>
@@ -212,6 +213,7 @@ class MIGHTY_NODE : public rclcpp::Node {
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_heat_cloud_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_ground_2d_occ_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr pub_planning_map_2d_;
+  std::chrono::steady_clock::time_point planning_map_2d_pub_at_{};  // planning_map_2d_period_s throttle
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_ground_2d_heat_;
   rclcpp::Publisher<decomp_ros_msgs::msg::PolyhedronArray>::SharedPtr pub_poly_whole_;
   rclcpp::Publisher<decomp_ros_msgs::msg::PolyhedronArray>::SharedPtr pub_poly_safe_;

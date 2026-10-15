@@ -14,6 +14,28 @@ namespace map2d {
 
 int windowCells(double wd, double res) { return std::max(1, (int)std::lround(wd / res)); }
 
+GoalWindow terminalGoalWindow(double ax, double ay, double gx, double gy, double grid_x0, double grid_y0,
+                              double grid_x1, double grid_y1, double margin, double min_wdx, double min_wdy) {
+  GoalWindow w;
+  const double x0 = std::min(grid_x0, std::min(ax, gx) - margin);
+  const double x1 = std::max(grid_x1, std::max(ax, gx) + margin);
+  const double y0 = std::min(grid_y0, std::min(ay, gy) - margin);
+  const double y1 = std::max(grid_y1, std::max(ay, gy) + margin);
+  w.center_x = 0.5 * (x0 + x1);
+  w.center_y = 0.5 * (y0 + y1);
+  w.wdx = std::max(x1 - x0, min_wdx);
+  w.wdy = std::max(y1 - y0, min_wdy);
+  return w;
+}
+
+bool useTerminalGoal(double gx, double gy, double grid_x0, double grid_y0, double grid_x1, double grid_y1,
+                     const GoalWindow& w, double max_wd) {
+  if (!(std::isfinite(gx) && std::isfinite(gy))) return false;
+  if (gx < grid_x0 || gx >= grid_x1 || gy < grid_y0 || gy >= grid_y1) return false;
+  if (max_wd > 0.0 && (w.wdx > max_wd || w.wdy > max_wd)) return false;
+  return true;
+}
+
 WindowGeometry windowGeometry(double center_x, double center_y, int cells_x, int cells_y,
                               double res, double inflation_hgp) {
   // Compute X/Y dims with inflation pad

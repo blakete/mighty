@@ -125,6 +125,14 @@ struct parameters {
   double min_wdy;
   double min_wdz;
   double res;
+  // Terminal-goal A* (2D ground robots): when the terminal goal lies inside the received occ_2d grid
+  // (e.g. map_fusion's composite of the persistent map and the live window), the window covers that
+  // whole grid (+ robot and goal) and the A* runs to the goal itself, instead of to the straight-line
+  // subgoal at `horizon` clamped onto a robot-centred window. Off = the straight-line subgoal always.
+  bool plan_to_terminal_goal{false};
+  double max_window_m{0.0};             // [m] terminal-goal window cap per axis (0 = none)
+  double goal_window_margin_m{3.0};     // [m] window margin around robot and goal beyond the grid
+  double planning_map_2d_period_s{0.0}; // [s] planning_map_2d publish period (0 = every occ_2d grid)
 
   // Heat map parameters (soft cost layer)
   bool use_heat_map{false};

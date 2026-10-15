@@ -8,6 +8,10 @@
 
 #include "mighty/mighty.hpp"
 
+#include <chrono>
+
+#include "map2d/map2d.hpp"
+
 using namespace mighty;
 using namespace termcolor;
 
@@ -586,6 +590,59 @@ void MIGHTY::computeMapSize(const Eigen::Vector3d& min_pos, const Eigen::Vector3
 
 // ----------------------------------------------------------------------------
 
+bool MIGHTY::computeTerminalGoalWindow(const Eigen::Vector3d& robot, const Eigen::Vector3d& goal) {
+  if (!par_.plan_to_terminal_goal || !terminal_goal_initialized_) return false;
+  const auto occ = getOccGrid2DSnapshot();
+  if (!occ || occ->width() <= 0 || occ->height() <= 0) return false;
+  const double gx0 = occ->originX(), gy0 = occ->originY();
+  const double gx1 = gx0 + occ->width() * occ->resolution();
+  const double gy1 = gy0 + occ->height() * occ->resolution();
+  const map2d::GoalWindow w =
+      map2d::terminalGoalWindow(robot.x(), robot.y(), goal.x(), goal.y(), gx0, gy0, gx1, gy1,
+                                par_.goal_window_margin_m, par_.min_wdx, par_.min_wdy);
+  if (!map2d::useTerminalGoal(goal.x(), goal.y(), gx0, gy0, gx1, gy1, w, par_.max_window_m)) return false;
+  wdx_ = w.wdx;
+  wdy_ = w.wdy;
+  wdz_ = std::max(std::abs(robot.z() - goal.z()) + 2 * par_.map_buffer, par_.min_wdz);
+  map_center_ = Vec3f(w.center_x, w.center_y, robot.z());
+  return true;
+}
+
+void MIGHTY::noteAstarTarget(bool terminal, bool fell_back, bool solved, double ms) {
+  if (!par_.plan_to_terminal_goal) return;
+  AstarTargetStats& s = astar_stats_;
+  if (fell_back)
+    s.fallback++;
+  else if (terminal)
+    s.terminal++;
+  else
+    s.subgoal++;
+  if (!solved) s.failed++;
+  s.ms.push_back(ms);
+  const double now =
+      std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  if (s.t_last_log < 0.0) s.t_last_log = now;
+  if (now - s.t_last_log < 10.0) return;
+  std::vector<double> v = s.ms;
+  std::sort(v.begin(), v.end());
+  auto at = [&v](double q) { return v[std::min(v.size() - 1, static_cast<size_t>(q * (v.size() - 1) + 0.5))]; };
+  RCLCPP_INFO(rclcpp::get_logger("mighty"),
+              "[A* x%zu in %.0f s] target: terminal goal %d, straight-line subgoal %d, subgoal after an "
+              "occupied terminal goal %d | failed %d | solve ms p50 %.1f p95 %.1f max %.1f",
+              v.size(), now - s.t_last_log, s.terminal, s.subgoal, s.fallback, s.failed, at(0.5), at(0.95),
+              v.back());
+  s = AstarTargetStats();
+  s.t_last_log = now;
+}
+
+bool MIGHTY::terminalGoalInWindow(const Eigen::Vector3d& goal) {
+  std::lock_guard<std::mutex> lock(mtx_plan_window_2d_);
+  const PlanWindow2D& w = plan_window_2d_;
+  return w.terminal && goal.x() >= w.x0 && goal.x() < w.x1 && goal.y() >= w.y0 && goal.y() < w.y1;
+}
+
+// ----------------------------------------------------------------------------
+
 bool MIGHTY::checkPointWithinMap(const Eigen::Vector3d& point) const {
   // Check if the point is within the map boundaries for each axis
   return (std::abs(point[0] - map_center_[0]) <= wdx_ / 2.0) &&
@@ -876,9 +933,16 @@ bool MIGHTY::generateGlobalPath(vec_Vecf<3>& global_path, double current_time,
     hgp_manager_.setMaxDistVertexes2D(par_.max_dist_vertexes);
   }
 
+  // The A* target: the terminal goal itself when the 2D map was built for it (terminal-goal window,
+  // see updateMap2DOnly), else the straight-line subgoal G at `horizon`. A goal that changed since the
+  // last map build plans to G this tick; the next occ_2d grid (<= 200 ms) rebuilds the window.
+  const bool to_terminal = par_.plan_to_terminal_goal && par_.vehicle_type == "ground_robot" &&
+                           par_.use_2d_planning && terminalGoalInWindow(local_G_term.pos);
+  Vec3f astar_goal = to_terminal ? Vec3f(local_G_term.pos) : Vec3f(local_G.pos);
+
   // Free start and goal if necessary
   if (par_.use_free_start) hgp_manager_.freeStart(local_A.pos, par_.free_start_factor);
-  if (par_.use_free_goal) hgp_manager_.freeGoal(local_G.pos, par_.free_goal_factor);
+  if (par_.use_free_goal) hgp_manager_.freeGoal(astar_goal, par_.free_goal_factor);
   if (par_.debug_verbose)
     printf("[TIMING]   HGP setup: %.2f ms\n", timer_setup.getElapsedMicros() / 1000.0);
 
@@ -886,13 +950,14 @@ bool MIGHTY::generateGlobalPath(vec_Vecf<3>& global_path, double current_time,
   if (par_.vehicle_type != "uav") {
     local_A.pos[2] = par_.default_goal_z;
     local_G.pos[2] = par_.default_goal_z;
+    astar_goal[2] = par_.default_goal_z;
   }
 
   // 1) Build a direction hint from the *previous* global path
   vec_Vecf<3> prev_global;
   getGlobalPath(prev_global);  // last successful global path
 
-  Eigen::Vector3d dir_hint = (local_G.pos - local_A.pos).normalized();
+  Eigen::Vector3d dir_hint = (astar_goal - local_A.pos).normalized();
   if (prev_global.size() >= 2) {
     Eigen::Vector3d s0 = prev_global[0];
     Eigen::Vector3d s1 = prev_global[1];
@@ -901,7 +966,7 @@ bool MIGHTY::generateGlobalPath(vec_Vecf<3>& global_path, double current_time,
       dir_hint = seg.normalized();
     }
   } else {
-    dir_hint = local_G.pos - local_A.pos;
+    dir_hint = astar_goal - local_A.pos;
     if (dir_hint.norm() > 1e-8) dir_hint.normalize();
   }
 
@@ -913,9 +978,22 @@ bool MIGHTY::generateGlobalPath(vec_Vecf<3>& global_path, double current_time,
   // Solve HGP
   MyTimer timer_solve(true);
   vec_Vecf<3> raw_global_path;
-  if (!hgp_manager_.solveHGP(local_A.pos, start_dir_hint, local_G.pos, final_g_,
-                             par_.global_planner_heuristic_weight, A_time, global_path,
-                             raw_global_path)) {
+  bool solved = hgp_manager_.solveHGP(local_A.pos, start_dir_hint, astar_goal, final_g_,
+                                      par_.global_planner_heuristic_weight, A_time, global_path,
+                                      raw_global_path);
+  bool fell_back = false;
+  if (!solved && to_terminal && hgp_manager_.plannerStatus() == 2) {
+    // The terminal goal's cell is occupied (or in the inflation band): e.g. a remembered obstacle that
+    // has since moved. Head for the straight-line subgoal this tick, as without the terminal-goal A*;
+    // the live window clears the cell once the robot sees it again.
+    if (par_.use_free_goal) hgp_manager_.freeGoal(local_G.pos, par_.free_goal_factor);
+    solved = hgp_manager_.solveHGP(local_A.pos, start_dir_hint, local_G.pos, final_g_,
+                                   par_.global_planner_heuristic_weight, A_time, global_path,
+                                   raw_global_path);
+    fell_back = true;
+  }
+  noteAstarTarget(to_terminal, fell_back, solved, timer_solve.getElapsedMicros() / 1000.0);
+  if (!solved) {
     if (par_.debug_verbose)
       printf("[TIMING]   HGP solve (FAILED): %.2f ms\n", timer_solve.getElapsedMicros() / 1000.0);
     hgp_failure_count_++;
@@ -2015,11 +2093,22 @@ void MIGHTY::updateMap2DOnly() {
     hgp_manager_.setKeepOut2D(keepout.first, keepout.second);
   }
 
-  // Same window bookkeeping as updateOccupancyMap().
-  state local_state, local_G;
+  // Same window bookkeeping as updateOccupancyMap(), unless the A* can reach the terminal goal on
+  // the received map: then the window holds the robot and the terminal goal.
+  state local_state, local_G, local_G_term;
   getState(local_state);
   getG(local_G);
-  computeMapSize(local_state.pos, local_G.pos);
+  getGterm(local_G_term);
+  const bool terminal = computeTerminalGoalWindow(local_state.pos, local_G_term.pos);
+  if (!terminal) computeMapSize(local_state.pos, local_G.pos);
+  {
+    std::lock_guard<std::mutex> lock(mtx_plan_window_2d_);
+    plan_window_2d_.terminal = terminal;
+    plan_window_2d_.x0 = map_center_.x() - 0.5 * wdx_;
+    plan_window_2d_.x1 = map_center_.x() + 0.5 * wdx_;
+    plan_window_2d_.y0 = map_center_.y() - 0.5 * wdy_;
+    plan_window_2d_.y1 = map_center_.y() + 0.5 * wdy_;
+  }
 
   auto trajs = getTrajs();
   vec_Vecf<3> obst_pos, obst_bbox;

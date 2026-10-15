@@ -396,6 +396,8 @@ class HGPManager {
  public:
   /** @brief True if the last solveHGP A* search reached the exact goal (false: partial path). */
   bool reachedGoal() const { return planner_ptr_ && planner_ptr_->reachedGoal(); }
+  // Status of the last plan(): 0 ok, 1 start occupied, 2 goal occupied (incl. inflation band), -1 none.
+  int plannerStatus() const { return planner_ptr_ ? planner_ptr_->status() : 0; }
 
   /** @brief Check if 2D ground robot planning mode is active. */
   bool isGroundRobot() const { return is_ground_robot_; }

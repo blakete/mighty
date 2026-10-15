@@ -98,6 +98,29 @@ int windowCells(double wd, double res);
 WindowGeometry windowGeometry(double center_x, double center_y, int cells_x, int cells_y,
                               double res, double inflation_hgp);
 
+/** @brief A planner window (centre + extent) that holds both the robot and the terminal goal. */
+struct GoalWindow {
+  double center_x = 0.0;
+  double center_y = 0.0;
+  double wdx = 0.0;
+  double wdy = 0.0;
+};
+
+/** @brief The window for running the A* all the way to the terminal goal over a large (composite)
+ *  map: per axis, the received map's extent [grid_x0, grid_x1) x [grid_y0, grid_y1) joined with the
+ *  bounding box of the robot (ax, ay) and the terminal goal (gx, gy) grown by `margin`, at least
+ *  min_wdx x min_wdy, centred on that union (not on the robot). The whole map, so a detour through
+ *  remembered space far off the straight line (a gap at the end of a wall) is inside the search. */
+GoalWindow terminalGoalWindow(double ax, double ay, double gx, double gy, double grid_x0, double grid_y0,
+                              double grid_x1, double grid_y1, double margin, double min_wdx, double min_wdy);
+
+/** @brief Whether to plan to the terminal goal: it lies inside the received map's extent
+ *  [grid_x0, grid_x1) x [grid_y0, grid_y1) and the window `w` fits in max_wd on both axes
+ *  (max_wd <= 0: no cap). Otherwise the planner keeps the straight-line subgoal at `horizon`,
+ *  clamped onto its robot-centred window. */
+bool useTerminalGoal(double gx, double gy, double grid_x0, double grid_y0, double grid_x1, double grid_y1,
+                     const GoalWindow& w, double max_wd);
+
 /** @brief floor((p - origin) / res) as int. */
 inline int worldToCell(double p, double origin, double res) {
   return static_cast<int>(std::floor((p - origin) / res));

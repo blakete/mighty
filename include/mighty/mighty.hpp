@@ -262,6 +262,13 @@ class MIGHTY {
    *  @param max_pos Maximum corner of the map.
    */
   void computeMapSize(const Eigen::Vector3d& min_pos, const Eigen::Vector3d& max_pos);
+  // Terminal-goal A* (par_.plan_to_terminal_goal): size the 2D window for the robot and the terminal
+  // goal when the goal lies inside the received occ_2d grid. True when it did (else nothing changed).
+  bool computeTerminalGoalWindow(const Eigen::Vector3d& robot, const Eigen::Vector3d& goal);
+  // Whether the window the 2D map was last built with was a terminal-goal window holding `goal`.
+  bool terminalGoalInWindow(const Eigen::Vector3d& goal);
+  // Count one A* solve by target and log the counts + solve times every ~10 s (terminal-goal mode).
+  void noteAstarTarget(bool terminal, bool fell_back, bool solved, double ms);
 
   /** @brief Check if a point lies within the current map bounds.
    *  @param point Query position.
@@ -576,6 +583,24 @@ class MIGHTY {
   // (changeDroneStatusForGoal). Guarded by mtx_goal_gen_; lock order is always
   // mtx_goal_gen_ -> mtx_G_term_.
   std::mutex mtx_goal_gen_;
+
+  // The window the 2D planning map was last built with (updateMap2DOnly), read by the replan to decide
+  // whether the A* may target the terminal goal itself.
+  struct PlanWindow2D {
+    bool terminal = false;
+    double x0 = 0.0, y0 = 0.0, x1 = 0.0, y1 = 0.0;
+  };
+  std::mutex mtx_plan_window_2d_;
+  PlanWindow2D plan_window_2d_;
+
+  // A* target statistics, logged every ~10 s while planning (terminal goal / straight-line subgoal /
+  // straight-line after an occupied terminal goal; solve ms).
+  struct AstarTargetStats {
+    int terminal = 0, subgoal = 0, fallback = 0, failed = 0;
+    std::vector<double> ms;
+    double t_last_log = -1.0;
+  };
+  AstarTargetStats astar_stats_;
   uint64_t goal_gen_ = 0;
 
   // Corridor-hop turn-in-place override (ground robot only). When true, the

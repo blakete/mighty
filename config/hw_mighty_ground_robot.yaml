@@ -138,6 +138,15 @@ mighty_node:
         initial_wdx: 30.0                               # [m] Initial map window width
         initial_wdy: 30.0                               # [m] Initial map window depth
         initial_wdz: 0.10                               # [m] Match map res — 2D ground-robot mode only needs a single z-layer
+        # Terminal-goal A*: when the goal lies inside the received occ_2d grid (map_fusion's composite of the
+        # persistent map and the live window, up to composite_max_extent_m), the window covers that grid
+        # (+ robot and goal) and the A* runs to the goal itself; otherwise the straight-line subgoal at
+        # `horizon`, clamped onto the robot-centred window, as before. A goal whose cell is occupied (e.g. a
+        # remembered obstacle) falls back to the straight-line subgoal in the same tick.
+        plan_to_terminal_goal: false                    # [-] JR02: true (with map_fusion's composite occ_2d)
+        max_window_m: 0.0                               # [m] terminal-goal window cap per axis, 0 = none (JR02: 46 = 40 m composite + 2 x margin)
+        goal_window_margin_m: 3.0                       # [m] window margin around robot and goal beyond the grid
+        planning_map_2d_period_s: 0.0                   # [s] planning_map_2d publish period, 0 = every occ_2d grid (JR02: 1.0; it is the whole window)
 
         # --- Sensor ---
         depth_camera_depth_max: 10.0                    # [m] Max depth camera range (d435 in simulation)
