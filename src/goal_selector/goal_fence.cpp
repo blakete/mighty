@@ -110,4 +110,11 @@ bool parseGoalFence(const std::string& json, GoalFence& out, std::string& frame_
   return true;
 }
 
+bool parseGateEcho(const std::string& json, bool& engaged) {
+  const nlohmann::json j = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
+  if (j.is_discarded() || !j.is_object() || !j.contains("engaged") || !j["engaged"].is_boolean()) return false;
+  engaged = j["engaged"].get<bool>();
+  return true;
+}
+
 }  // namespace goal_selector

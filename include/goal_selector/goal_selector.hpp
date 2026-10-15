@@ -120,11 +120,19 @@ struct SelectorParams {
   // Geofence goal filter (exploration.geofence.*, onGoalFence): while the latest goal_fence is
   // active and ready, a frontier that is not a valid goal (goalFenceAllows: inside keep_in, outside
   // every keep_out, >= offset_m + expl_geofence_margin_m from every edge = the gate's core) is
-  // INVALIDATED; while active and not ready, no new goals are committed (pause). No message, one
-  // older than expl_geofence_max_age_sec, or not active -> no filtering (fail open).
+  // INVALIDATED; while active and not ready, no new goals are committed (pause). A fresh goal_fence
+  // that is not active (shadow / goal_fence off) -> no filtering.
+  // No goal_fence fresher than expl_geofence_max_age_sec: the drive gate's echo (onGateEcho) says
+  // whether the geofence is expected. Once a goal_fence has been heard, a fresh echo with engaged ->
+  // pause (geofence restarting; the gate holds the robot meanwhile), otherwise no filtering. Before
+  // the first goal_fence, pause for up to expl_geofence_startup_wait_sec from the first select tick
+  // unless a fresh echo says not engaged; then no filtering (geofence off, or an older image without
+  // goal_fence).
   bool   expl_geofence_enabled{true};
   double expl_geofence_margin_m{0.0};      ///< [m] extra beyond the fence's offset_m (which has the footprint)
   double expl_geofence_max_age_sec{2.0};
+  double expl_geofence_gate_max_age_sec{2.0};  ///< [s] gate echo older than this is ignored
+  double expl_geofence_startup_wait_sec{0.0};  ///< [s] 0 = none (unit tests); the node defaults to 10
   // Preemption
   bool   expl_preempt_enabled{false};
   double expl_preempt_margin{2.0};
@@ -275,10 +283,15 @@ class GoalSelector {
    *  next detection pass and select tick; see the expl_geofence_* params and fenceGate(). */
   void onGoalFence(double now, GoalFence fence, const Transform2D& map_to_fence);
 
-  /** @brief kOpen: no filtering (disabled, no / stale goal_fence, fence not active). kFilter: drop
-   *  frontiers that are not valid goals. kPause: fence active but not ready -> no new commits. */
+  /** @brief Latest drive gate echo (/<R>/safety_node/geofence_gate, 2 Hz from the drive): engaged =
+   *  the geofence is required for AUTO. Tells a restarting geofence (pause) from an off one. */
+  void onGateEcho(double now, bool engaged);
+
+  /** @brief kOpen: no filtering. kFilter: drop frontiers that are not valid goals. kPause: no new
+   *  commits (fence active but not ready, or expected but silent). See the expl_geofence_* params.
+   *  why (optional) gets a short reason for the log. */
   enum class FenceGate { kOpen, kFilter, kPause };
-  FenceGate fenceGate(double now) const;
+  FenceGate fenceGate(double now, const char** why = nullptr) const;
 
   /** @brief One planner_status message. goal_stamp_ns is the message's goal_stamp in nanoseconds. */
   Output onPlannerStatus(double now, PlannerStatus status, int64_t goal_stamp_ns);
@@ -378,11 +391,15 @@ class GoalSelector {
   std::optional<GoalFence> goal_fence_;
   Transform2D map_to_fence_;
   double fence_t_{-1.0};
+  bool gate_engaged_{false};        // latest drive gate echo (onGateEcho) and its arrival time
+  double gate_t_{-1.0};
+  double select_start_t_{-1.0};     // first select tick (start of expl_geofence_startup_wait_sec)
   FenceGate last_fence_gate_{FenceGate::kOpen};
+  std::string last_fence_why_;
   double last_fence_pause_log_t_{-1.0e18};
   double fence_pause_tick_t_{-1.0};  // last select tick spent in kPause (-1: not paused)
   bool fenceAllowsMap(double x, double y) const;   // goalFenceAllows on a map_frame_id point
-  void noteFenceGate(double now, FenceGate gate, Output& out);
+  void noteFenceGate(double now, FenceGate gate, const char* why, Output& out);
   void holdPursuitClocks(double now);  // kPause: stuck / pursuit-timeout clocks do not run
   void invalidateNogoFrontiers(double now, Output& out);
   std::shared_ptr<const OccGrid2D> frontier_grid_;  // derived from the detect grid (N1/N5)

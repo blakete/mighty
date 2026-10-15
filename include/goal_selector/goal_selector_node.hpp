@@ -14,6 +14,8 @@
  *                                                                 exploration.persistent_map.enabled)
  *   sub  exploration.geofence.topic_name  std_msgs/String JSON  reliable, KeepLast(1) (only with
  *                                 exploration.enabled + exploration.geofence.enabled; default geofence/goal_fence)
+ *   sub  exploration.geofence.gate_topic_name  std_msgs/String JSON  reliable, KeepLast(5) (same condition;
+ *                                 default safety_node/geofence_gate: the drive gate's echo, engaged or not)
  *   sub  term_goal_rviz           geometry_msgs/PoseStamped      reliable, KeepLast(10), volatile
  *   sub  planner_status           goal_selector_msgs/PlannerStatus  critical_qos (reliable)
  *   pub  term_goal                geometry_msgs/PoseStamped      critical_qos (as the planner's subscription)
@@ -72,6 +74,7 @@ class GoalSelectorNode : public rclcpp::Node {
   void occ2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
   void persistentMapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
   void goalFenceCallback(const std_msgs::msg::String::SharedPtr msg);
+  void gateEchoCallback(const std_msgs::msg::String::SharedPtr msg);
   void manualGoalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
   void plannerStatusCallback(const goal_selector_msgs::msg::PlannerStatus::SharedPtr msg);
   void selectTimerCallback();
@@ -98,9 +101,11 @@ class GoalSelectorNode : public rclcpp::Node {
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr sub_occ_2d_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr sub_persistent_map_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_goal_fence_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_gate_echo_;
   std::string occ_2d_topic_{"occ_2d_topic"};
   std::string persistent_map_topic_{"persistent_map/grid"};
   std::string goal_fence_topic_{"geofence/goal_fence"};
+  std::string gate_echo_topic_{"safety_node/geofence_gate"};
   // map_frame_id -> goal_fence frame (the robot's odom; map->odom moves once SLAM corrects it).
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::unique_ptr<tf2_ros::TransformListener> tf_listener_;

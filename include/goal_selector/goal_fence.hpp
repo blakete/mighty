@@ -43,4 +43,10 @@ bool goalFenceAllows(const GoalFence& f, double x, double y, double extra_m = 0.
  *  false and `error` says why (an active fence that cannot be used pauses goals instead of being trusted). */
 bool parseGoalFence(const std::string& json, GoalFence& out, std::string& frame_id, std::string& error);
 
+/** @brief Parse the drive gate's echo (`/<R>/safety_node/geofence_gate`, std_msgs/String JSON, 2 Hz from
+ *  the drive, independent of the geofence process): {"gate": 1, "engaged": true, "holding": ..., ...}.
+ *  engaged = the geofence is required for AUTO (ENGAGED intent present; false when off or in shadow).
+ *  @return false if it is not one (not JSON, or no boolean "engaged"): ignore it. */
+bool parseGateEcho(const std::string& json, bool& engaged);
+
 }  // namespace goal_selector

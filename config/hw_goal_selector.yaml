@@ -87,12 +87,19 @@ goal_selector:
         # While the fence is ENFORCING, a frontier is invalidated before ranking unless it is inside
         # keep_in, outside every keep_out and >= offset_m + margin_m from every fence edge (= the
         # gate's core, whole fence, exact). While enforcing but not ready (localizing / no anchor)
-        # no new goals are committed. Shadow/off, an older geofence (no topic) or a message older
-        # than max_age_sec -> no filtering (fail open; the planner's grid still holds the fence).
+        # no new goals are committed. Shadow / goal_fence off (message not active) -> no filtering.
+        # No goal_fence fresher than max_age_sec: the drive gate's echo (gate_topic_name, 2 Hz from
+        # the drive) decides. Gate engaged -> pause (geofence restarting; the gate holds the robot
+        # anyway). Gate not engaged (geofence off / shadow) or no echo -> no filtering. Before the
+        # first goal_fence after start, goals pause for up to startup_wait_sec (unless the gate says
+        # not engaged); then no filtering (geofence off, or an older image without goal_fence).
         exploration.geofence.enabled: true
         exploration.geofence.topic_name: "geofence/goal_fence"  # [-] relative to the robot namespace
         exploration.geofence.margin_m: 0.0              # [m] extra beyond the fence's offset_m (which has the footprint)
-        exploration.geofence.max_age_sec: 2.0           # [s] older message -> no filtering (fail open)
+        exploration.geofence.max_age_sec: 2.0           # [s] older goal_fence -> the gate echo decides
+        exploration.geofence.gate_topic_name: "safety_node/geofence_gate"  # [-] drive gate echo, relative to the robot namespace
+        exploration.geofence.gate_max_age_sec: 2.0      # [s] older gate echo is ignored
+        exploration.geofence.startup_wait_sec: 10.0     # [s] max pause for the first goal_fence after start
         # Goal preemption: while pursuing a frontier, keep re-ranking every
         # select tick (select_rate_hz) and SWITCH goals when another frontier
         # beats the current one's freshly recomputed utility by more than

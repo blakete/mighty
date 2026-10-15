@@ -134,7 +134,8 @@ GoalSelectorNode::GoalSelectorNode() : Node("goal_selector") {
 
   // Geofence goal geometry (2 Hz from the geofence): while the fence is enforcing, frontiers that are
   // not valid goals are invalidated before ranking, and new goals pause while it is not ready. Its
-  // frame is the robot's odom; TF gives map -> odom.
+  // frame is the robot's odom; TF gives map -> odom. The drive gate's echo (2 Hz from the drive) says
+  // whether the geofence is engaged, so a silent geofence pauses goals (restarting) only when it is.
   if (par_.expl_geofence_enabled) {
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
@@ -143,7 +144,11 @@ GoalSelectorNode::GoalSelectorNode() : Node("goal_selector") {
     sub_goal_fence_ = this->create_subscription<std_msgs::msg::String>(
         goal_fence_topic_, fence_qos,
         std::bind(&GoalSelectorNode::goalFenceCallback, this, std::placeholders::_1), options);
-    RCLCPP_INFO(this->get_logger(), "Geofence: goal filter from '%s'", goal_fence_topic_.c_str());
+    sub_gate_echo_ = this->create_subscription<std_msgs::msg::String>(
+        gate_echo_topic_, rclcpp::QoS(rclcpp::KeepLast(5)).reliable().durability_volatile(),
+        std::bind(&GoalSelectorNode::gateEchoCallback, this, std::placeholders::_1), options);
+    RCLCPP_INFO(this->get_logger(), "Geofence: goal filter from '%s', drive gate echo '%s'",
+                goal_fence_topic_.c_str(), gate_echo_topic_.c_str());
   }
 
   // MinPos peer pose / visited-map sharing (global topics, all agents pub+sub)
@@ -245,6 +250,9 @@ void GoalSelectorNode::declareParameters() {
   this->declare_parameter("exploration.geofence.topic_name", std::string("geofence/goal_fence"));
   this->declare_parameter("exploration.geofence.margin_m", 0.0);
   this->declare_parameter("exploration.geofence.max_age_sec", 2.0);
+  this->declare_parameter("exploration.geofence.gate_topic_name", std::string("safety_node/geofence_gate"));
+  this->declare_parameter("exploration.geofence.gate_max_age_sec", 2.0);
+  this->declare_parameter("exploration.geofence.startup_wait_sec", 10.0);
   this->declare_parameter("exploration.manager.preempt_enabled", false);
   this->declare_parameter("exploration.manager.preempt_margin", 2.0);
   this->declare_parameter("exploration.manager.preempt_min_commit_sec", 2.0);
@@ -322,6 +330,9 @@ void GoalSelectorNode::readParameters() {
   goal_fence_topic_ = this->get_parameter("exploration.geofence.topic_name").as_string();
   par_.expl_geofence_margin_m = d("exploration.geofence.margin_m");
   par_.expl_geofence_max_age_sec = d("exploration.geofence.max_age_sec");
+  gate_echo_topic_ = this->get_parameter("exploration.geofence.gate_topic_name").as_string();
+  par_.expl_geofence_gate_max_age_sec = d("exploration.geofence.gate_max_age_sec");
+  par_.expl_geofence_startup_wait_sec = d("exploration.geofence.startup_wait_sec");
   par_.expl_preempt_enabled = b("exploration.manager.preempt_enabled");
   par_.expl_preempt_margin = d("exploration.manager.preempt_margin");
   par_.expl_preempt_min_commit_sec = d("exploration.manager.preempt_min_commit_sec");
@@ -378,9 +389,11 @@ void GoalSelectorNode::printParameters() const {
               par_.expl_preempt_enabled, par_.expl_use_minpos);
   RCLCPP_INFO(lg, "Manual goal start_timeout: %.1f s", par_.manual_start_timeout_sec);
   RCLCPP_INFO(lg, "Automatic return home: %s", par_.expl_return_home_enabled ? "on" : "off");
-  RCLCPP_INFO(lg, "Geofence goal filter: %s (topic %s, extra margin %.2f m, max age %.1f s)",
+  RCLCPP_INFO(lg, "Geofence goal filter: %s (topic %s, extra margin %.2f m, max age %.1f s, "
+              "gate echo %s max age %.1f s, startup wait %.1f s)",
               par_.expl_geofence_enabled ? "on" : "off", goal_fence_topic_.c_str(),
-              par_.expl_geofence_margin_m, par_.expl_geofence_max_age_sec);
+              par_.expl_geofence_margin_m, par_.expl_geofence_max_age_sec, gate_echo_topic_.c_str(),
+              par_.expl_geofence_gate_max_age_sec, par_.expl_geofence_startup_wait_sec);
 }
 
 // ----------------------------------------------------------------------------
@@ -452,6 +465,17 @@ void GoalSelectorNode::goalFenceCallback(const std_msgs::msg::String::SharedPtr 
     }
   }
   selector_->onGoalFence(this->now().seconds(), std::move(f), t);
+}
+
+void GoalSelectorNode::gateEchoCallback(const std_msgs::msg::String::SharedPtr msg) {
+  bool engaged = false;
+  if (!parseGateEcho(msg->data, engaged)) {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 10000,
+                         "Geofence: ignoring '%s': not a gate echo (no boolean \"engaged\")",
+                         gate_echo_topic_.c_str());
+    return;
+  }
+  selector_->onGateEcho(this->now().seconds(), engaged);
 }
 
 void GoalSelectorNode::persistentMapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {

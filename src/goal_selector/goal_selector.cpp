@@ -331,11 +331,34 @@ void GoalSelector::onGoalFence(double now, GoalFence fence, const Transform2D& m
   fence_t_ = now;
 }
 
-GoalSelector::FenceGate GoalSelector::fenceGate(double now) const {
-  if (!params_.expl_geofence_enabled || !goal_fence_ ||
-      now - fence_t_ > params_.expl_geofence_max_age_sec || !goal_fence_->active)
-    return FenceGate::kOpen;  // fail open: the planner's grid and the drive gate still hold the fence
-  return goal_fence_->ready ? FenceGate::kFilter : FenceGate::kPause;
+void GoalSelector::onGateEcho(double now, bool engaged) {
+  gate_engaged_ = engaged;
+  gate_t_ = now;
+}
+
+GoalSelector::FenceGate GoalSelector::fenceGate(double now, const char** why) const {
+  const auto out = [why](FenceGate g, const char* w) {
+    if (why) *why = w;
+    return g;
+  };
+  if (!params_.expl_geofence_enabled) return out(FenceGate::kOpen, "disabled");
+  if (goal_fence_ && now - fence_t_ <= params_.expl_geofence_max_age_sec) {
+    if (!goal_fence_->active) return out(FenceGate::kOpen, "fence not enforcing");
+    if (goal_fence_->ready) return out(FenceGate::kFilter, "fence enforcing");
+    return out(FenceGate::kPause, "fence enforcing but not ready (localizing / anchor)");
+  }
+  // No fresh goal_fence. The drive gate's echo tells a restarting geofence from one that is off.
+  const bool gate_fresh = gate_t_ >= 0.0 && now - gate_t_ <= params_.expl_geofence_gate_max_age_sec;
+  if (gate_fresh && !gate_engaged_) return out(FenceGate::kOpen, "geofence not engaged");
+  if (goal_fence_) {
+    if (gate_fresh) return out(FenceGate::kPause, "no fresh goal_fence while the drive gate is engaged (geofence restarting?)");
+    return out(FenceGate::kOpen, "no fresh goal_fence and no drive gate echo");
+  }
+  // Never heard a goal_fence: wait a little for the first one (startup), then fail open (geofence off
+  // or an older image without goal_fence; the planner's grid and the drive gate still hold the fence).
+  if (select_start_t_ >= 0.0 && now - select_start_t_ < params_.expl_geofence_startup_wait_sec)
+    return out(FenceGate::kPause, "waiting for the first goal_fence");
+  return out(FenceGate::kOpen, "no goal_fence received (geofence off or an older image)");
 }
 
 bool GoalSelector::fenceAllowsMap(double x, double y) const {
@@ -345,20 +368,19 @@ bool GoalSelector::fenceAllowsMap(double x, double y) const {
                          params_.expl_geofence_margin_m);
 }
 
-void GoalSelector::noteFenceGate(double now, FenceGate gate, Output& out) {
-  if (gate != last_fence_gate_) {
-    last_fence_gate_ = gate;
-    if (gate == FenceGate::kFilter)
-      log(out, LogMessage::Level::kInfo,
-          fmt("Geofence: goal filter on (fence enforcing, offset %.2f m + margin %.2f m)",
-              goal_fence_->offset_m, params_.expl_geofence_margin_m));
-    else if (gate == FenceGate::kOpen)
-      log(out, LogMessage::Level::kInfo, "Geofence: goal filter off (no fresh goal_fence or fence not enforcing)");
-  }
-  if (gate == FenceGate::kPause && now - last_fence_pause_log_t_ >= 5.0) {
+void GoalSelector::noteFenceGate(double now, FenceGate gate, const char* why, Output& out) {
+  const bool changed = gate != last_fence_gate_ || last_fence_why_ != why;
+  last_fence_gate_ = gate;
+  last_fence_why_ = why;
+  if (gate == FenceGate::kFilter && changed)
+    log(out, LogMessage::Level::kInfo,
+        fmt("Geofence: goal filter on (fence enforcing, offset %.2f m + margin %.2f m)",
+            goal_fence_->offset_m, params_.expl_geofence_margin_m));
+  else if (gate == FenceGate::kOpen && changed)
+    log(out, LogMessage::Level::kInfo, fmt("Geofence: goal filter off (%s)", why));
+  if (gate == FenceGate::kPause && (changed || now - last_fence_pause_log_t_ >= 5.0)) {
     last_fence_pause_log_t_ = now;
-    log(out, LogMessage::Level::kWarn,
-        "Geofence: fence enforcing but not ready (localizing / anchor) -> pausing new exploration goals");
+    log(out, LogMessage::Level::kWarn, fmt("Geofence: %s -> pausing new exploration goals", why));
   }
 }
 
@@ -400,6 +422,7 @@ void GoalSelector::invalidateNogoFrontiers(double now, Output& out) {
 
 Output GoalSelector::onSelectTick(double now) {
   Output out;
+  if (select_start_t_ < 0.0) select_start_t_ = now;
   selectAndCommit(now, out);
   return out;
 }
@@ -472,8 +495,9 @@ void GoalSelector::selectAndCommit(double now, Output& out) {
   // Geofence goal filter: pause while the fence is enforcing but not usable (holds the current
   // pursuit; no commits, preemption or watchdog switches); otherwise drop no-go frontiers before
   // ranking, also when the fence arrived after the last detection pass.
-  const FenceGate gate = fenceGate(now);
-  noteFenceGate(now, gate, out);
+  const char* why = "";
+  const FenceGate gate = fenceGate(now, &why);
+  noteFenceGate(now, gate, why, out);
   if (gate == FenceGate::kPause) {
     holdPursuitClocks(now);
     return;

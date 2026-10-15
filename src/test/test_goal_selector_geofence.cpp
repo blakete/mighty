@@ -20,6 +20,7 @@ using goal_selector::FencePoint;
 using goal_selector::GoalFence;
 using goal_selector::Transform2D;
 using goal_selector::goalFenceAllows;
+using goal_selector::parseGateEcho;
 using goal_selector::parseGoalFence;
 using Gate = goal_selector::GoalSelector::FenceGate;
 
@@ -214,6 +215,156 @@ TEST(GoalSelectorGeofence, StalePauseFailsOpen) {
   h.cycle();
   ASSERT_FALSE(h.goals.empty());
   EXPECT_TRUE(GoalNear(h.goals.front(), kLeftX, kCorridorY));
+}
+
+// --- Silent geofence: the drive gate echo tells "restarting" (pause) from "off" (open) -----------------
+
+namespace {
+/** @brief A ready fence that allows both frontiers (so LEFT, the nearer, wins). */
+GoalFence AllowAll() { return KeepIn(-10.0, 40.0); }
+}  // namespace
+
+TEST(GoalSelectorGeofence, SilentFenceWithEngagedGatePauses) {
+  // JR02 2026-10-14 19:18: geofence restarted, goal_fence stale > 2 s -> the old rule failed open and a
+  // preemption committed a frontier with no fence check. With the gate still engaged it must pause.
+  Harness h(BaseParams());
+  InitCorridor(h);
+  h.sel.onGateEcho(h.now, true);
+  h.sel.onGoalFence(h.now, AllowAll(), Transform2D{});
+  h.cycle();
+  ASSERT_TRUE(GoalNear(h.goals.back(), kLeftX, kCorridorY));
+  const auto left_id = h.sel.currentExploreId();
+  const size_t n_goals = h.goals.size();
+
+  for (int i = 0; i < 10; ++i) {  // geofence silent for 10 s, the drive keeps echoing "engaged"
+    h.advance(1.0);
+    h.sel.onGateEcho(h.now, true);
+    h.cycle();
+  }
+  EXPECT_EQ(h.sel.fenceGate(h.now), Gate::kPause);
+  EXPECT_EQ(h.goals.size(), n_goals) << "no commits while the engaged geofence is silent";
+  EXPECT_EQ(h.sel.currentExploreId(), left_id);
+  EXPECT_TRUE(h.hasLog(LogMessage::Level::kWarn, "drive gate is engaged"));
+  EXPECT_FALSE(h.hasLog(LogMessage::Level::kInfo, "goal filter off"));
+
+  h.advance(1.0);  // back: filtering again
+  h.sel.onGateEcho(h.now, true);
+  h.sel.onGoalFence(h.now, AllowAll(), Transform2D{});
+  h.cycle();
+  EXPECT_EQ(h.sel.fenceGate(h.now), Gate::kFilter);
+}
+
+TEST(GoalSelectorGeofence, SilentFenceWithGateNotEngagedFailsOpen) {
+  Harness h(BaseParams());
+  InitCorridor(h);
+  h.sel.onGoalFence(h.now - 5.0, KeepIn(4.0, 25.0), Transform2D{});  // heard once, long ago
+  h.sel.onGateEcho(h.now, false);                                       // geofence off / shadow
+  h.cycle();
+  EXPECT_EQ(h.sel.fenceGate(h.now), Gate::kOpen);
+  ASSERT_FALSE(h.goals.empty());
+  EXPECT_TRUE(GoalNear(h.goals.front(), kLeftX, kCorridorY)) << "no filtering: LEFT is allowed again";
+  EXPECT_TRUE(h.hasLog(LogMessage::Level::kInfo, "geofence not engaged"));
+}
+
+TEST(GoalSelectorGeofence, SilentFenceWithStaleGateEchoFailsOpen) {
+  Harness h(BaseParams());
+  InitCorridor(h);
+  h.sel.onGateEcho(h.now - 5.0, true);  // the drive went quiet too
+  h.sel.onGoalFence(h.now - 5.0, KeepIn(4.0, 25.0), Transform2D{});
+  h.cycle();
+  EXPECT_EQ(h.sel.fenceGate(h.now), Gate::kOpen);
+  ASSERT_FALSE(h.goals.empty());
+}
+
+TEST(GoalSelectorGeofence, FreshInactiveFenceFailsOpenEvenWithEngagedGate) {
+  // goal_fence switched off on the geofence (goal_fence.enabled: false) publishes active = false.
+  Harness h(BaseParams());
+  InitCorridor(h);
+  GoalFence f = KeepIn(4.0, 25.0);
+  f.active = false;
+  h.sel.onGateEcho(h.now, true);
+  h.sel.onGoalFence(h.now, f, Transform2D{});
+  h.cycle();
+  EXPECT_EQ(h.sel.fenceGate(h.now), Gate::kOpen);
+  ASSERT_FALSE(h.goals.empty());
+  EXPECT_TRUE(GoalNear(h.goals.front(), kLeftX, kCorridorY));
+}
+
+TEST(GoalSelectorGeofence, StartupWaitsForTheFirstGoalFence) {
+  // JR02 2026-10-14 19:08: the first commit came 0.1 s before the first goal_fence.
+  SelectorParams p = BaseParams();
+  p.expl_geofence_startup_wait_sec = 10.0;
+  Harness h(p);
+  InitCorridor(h);
+  h.cycle();
+  EXPECT_EQ(h.sel.fenceGate(h.now), Gate::kPause);
+  EXPECT_TRUE(h.goals.empty()) << "nothing committed before the first goal_fence";
+  EXPECT_TRUE(h.hasLog(LogMessage::Level::kWarn, "waiting for the first goal_fence"));
+
+  h.advance(0.5);
+  h.sel.onGateEcho(h.now, true);
+  h.cycle();
+  EXPECT_TRUE(h.goals.empty()) << "gate engaged, still no goal_fence";
+
+  h.advance(0.5);
+  h.sel.onGateEcho(h.now, true);
+  h.sel.onGoalFence(h.now, KeepIn(4.0, 25.0), Transform2D{});  // LEFT outside
+  h.cycle();
+  ASSERT_FALSE(h.goals.empty());
+  EXPECT_TRUE(GoalNear(h.goals.front(), kRightX, kCorridorY)) << "first commit is already filtered";
+}
+
+TEST(GoalSelectorGeofence, StartupWithGateNotEngagedDoesNotWait) {
+  SelectorParams p = BaseParams();
+  p.expl_geofence_startup_wait_sec = 10.0;
+  Harness h(p);
+  InitCorridor(h);
+  h.sel.onGateEcho(h.now, false);
+  h.cycle();
+  ASSERT_FALSE(h.goals.empty());
+  EXPECT_TRUE(GoalNear(h.goals.front(), kLeftX, kCorridorY));
+}
+
+TEST(GoalSelectorGeofence, OlderGeofenceWithoutGoalFenceDoesNotStall) {
+  // Gate engaged but the geofence image predates goal_fence: pause only for the startup wait.
+  SelectorParams p = BaseParams();
+  p.expl_geofence_startup_wait_sec = 10.0;
+  Harness h(p);
+  InitCorridor(h);
+  for (int i = 0; i < 10; ++i) {
+    h.sel.onGateEcho(h.now, true);
+    h.cycle();
+    EXPECT_TRUE(h.goals.empty()) << "t+" << i << " s: still inside the startup wait";
+    h.advance(1.0);
+  }
+  h.sel.onGateEcho(h.now, true);
+  h.cycle();
+  ASSERT_FALSE(h.goals.empty()) << "startup wait over: no filtering";
+  EXPECT_TRUE(h.hasLog(LogMessage::Level::kInfo, "no goal_fence received"));
+}
+
+TEST(GoalSelectorGeofence, NoGeofenceNoGateWaitsOnlyTheStartupWait) {
+  SelectorParams p = BaseParams();
+  p.expl_geofence_startup_wait_sec = 3.0;
+  Harness h(p);
+  InitCorridor(h);
+  h.cycle();
+  EXPECT_TRUE(h.goals.empty());
+  h.advance(3.0);
+  h.cycle();
+  ASSERT_FALSE(h.goals.empty());
+}
+
+TEST(GoalSelectorGeofence, ParseGateEcho) {
+  bool engaged = false;
+  EXPECT_TRUE(parseGateEcho(R"({"gate": 1, "engaged": true, "holding": false})", engaged));
+  EXPECT_TRUE(engaged);
+  EXPECT_TRUE(parseGateEcho(R"({"engaged": false})", engaged));
+  EXPECT_FALSE(engaged);
+  EXPECT_FALSE(parseGateEcho(R"({"holding": true})", engaged));
+  EXPECT_FALSE(parseGateEcho(R"({"engaged": "yes"})", engaged));
+  EXPECT_FALSE(parseGateEcho("not json", engaged));
+  EXPECT_FALSE(parseGateEcho("[true]", engaged));
 }
 
 TEST(GoalSelectorGeofence, FilterAppliesOnSelectTickWithoutNewDetection) {
