@@ -452,6 +452,10 @@ void MIGHTY_NODE::declareParameters() {
   this->declare_parameter("min_wdy", 10.0);
   this->declare_parameter("min_wdz", 2.0);
   this->declare_parameter("mighty_map_res", 0.1);
+  this->declare_parameter("plan_to_terminal_goal", false);
+  this->declare_parameter("max_window_m", 0.0);
+  this->declare_parameter("goal_window_margin_m", 3.0);
+  this->declare_parameter("planning_map_2d_period_s", 0.0);
 
   // Heat map parameters
   this->declare_parameter("use_heat_map", false);
@@ -753,6 +757,10 @@ void MIGHTY_NODE::setParameters() {
   par_.min_wdy = this->get_parameter("min_wdy").as_double();
   par_.min_wdz = this->get_parameter("min_wdz").as_double();
   par_.res = this->get_parameter("mighty_map_res").as_double();
+  par_.plan_to_terminal_goal = this->get_parameter("plan_to_terminal_goal").as_bool();
+  par_.max_window_m = this->get_parameter("max_window_m").as_double();
+  par_.goal_window_margin_m = this->get_parameter("goal_window_margin_m").as_double();
+  par_.planning_map_2d_period_s = this->get_parameter("planning_map_2d_period_s").as_double();
 
   // Heat map parameters
   par_.use_heat_map = this->get_parameter("use_heat_map").as_bool();
@@ -996,8 +1004,10 @@ void MIGHTY_NODE::printParameters() {
     if (par_.horizon > half_w) {
       RCLCPP_WARN(this->get_logger(),
                   "horizon %.1f m > planner window half-width %.1f m (min(min_wdx,min_wdy)/2 - "
-                  "map_buffer): a subgoal projected that far sits on the window's edge",
-                  par_.horizon, half_w);
+                  "map_buffer): a subgoal projected that far sits on the window's edge%s",
+                  par_.horizon, half_w,
+                  par_.plan_to_terminal_goal ? " (only for goals outside the received occ_2d grid: inside "
+                                               "it the A* targets the terminal goal)" : "");
     }
   }
   RCLCPP_INFO(this->get_logger(), "w_align: %f", par_.w_align);
@@ -1030,6 +1040,9 @@ void MIGHTY_NODE::printParameters() {
 
   // Map parameters
   RCLCPP_INFO(this->get_logger(), "Local Map Buffer: %f", par_.map_buffer);
+  RCLCPP_INFO(this->get_logger(),
+              "Terminal-goal A*: %s (window margin %.1f m, cap %.1f m per axis; 0 = none)",
+              par_.plan_to_terminal_goal ? "on" : "off", par_.goal_window_margin_m, par_.max_window_m);
   RCLCPP_INFO(this->get_logger(), "Center Shift Factor: %f", par_.center_shift_factor);
   RCLCPP_INFO(this->get_logger(), "initial_wdx: %f", par_.initial_wdx);
   RCLCPP_INFO(this->get_logger(), "initial_wdy: %f", par_.initial_wdy);
@@ -3088,19 +3101,25 @@ void MIGHTY_NODE::occ2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr ms
   // (traversable at w_unknown per step, never free). Before 2026-09 it was FREE,
   // which let goals beyond the mapper's coverage be reached through whichever gap
   // in the observed edge was cheapest that cycle -- the exit flipped every update.
+  // A composite occ_2d (persistent map + live window) changes size whenever the map grows, so the
+  // line is logged at most every 30 s.
   {
     static double logged_cov_x = -1.0, logged_cov_y = -1.0;
+    static std::chrono::steady_clock::time_point logged_at{};
     const double cov_x = msg->info.width * msg->info.resolution;
     const double cov_y = msg->info.height * msg->info.resolution;
-    if (cov_x != logged_cov_x || cov_y != logged_cov_y) {
+    const auto now = std::chrono::steady_clock::now();
+    if ((cov_x != logged_cov_x || cov_y != logged_cov_y) &&
+        (logged_cov_x < 0.0 || now - logged_at >= std::chrono::seconds(30))) {
       logged_cov_x = cov_x;
       logged_cov_y = cov_y;
+      logged_at = now;
       RCLCPP_INFO(this->get_logger(),
                   "occ_2d coverage %.1f x %.1f m (res %.2f); planner window >= %.1f x %.1f m "
                   "(min_wdx/min_wdy), horizon %.1f m, w_unknown %.2f",
                   cov_x, cov_y, msg->info.resolution, par_.min_wdx, par_.min_wdy, par_.horizon,
                   par_.w_unknown);
-      if (cov_x < par_.min_wdx || cov_y < par_.min_wdy) {
+      if (!par_.plan_to_terminal_goal && (cov_x < par_.min_wdx || cov_y < par_.min_wdy)) {
         RCLCPP_WARN(this->get_logger(),
                     "planner window exceeds mapper coverage: window cells outside the %.1f x %.1f m "
                     "grid are UNKNOWN (priced at w_unknown=%.2f per step); goals out there are "
@@ -3114,7 +3133,14 @@ void MIGHTY_NODE::occ2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr ms
   mighty_ptr_->setOccGrid2D(occ_grid_2d_);
   if (par_.use_hardware && par_.use_2d_planning && par_.vehicle_type == "ground_robot") {
     mighty_ptr_->updateMap2DOnly();
-    publishPlanningMap2D(msg->header, msg->info.origin.position.z);
+    // planning_map_2d is the planner window: with the terminal-goal A* on a composite occ_2d it can be
+    // tens of metres a side, so it may be throttled (planning_map_2d_period_s; 0 = every grid).
+    const auto now = std::chrono::steady_clock::now();
+    if (par_.planning_map_2d_period_s <= 0.0 ||
+        now - planning_map_2d_pub_at_ >= std::chrono::duration<double>(par_.planning_map_2d_period_s)) {
+      planning_map_2d_pub_at_ = now;
+      publishPlanningMap2D(msg->header, msg->info.origin.position.z);
+    }
   }
   // Stamp last, after the planning map is rebuilt (see esdfCallback).
   occ_2d_stamp_ns_.store(rclcpp::Time(msg->header.stamp).nanoseconds());

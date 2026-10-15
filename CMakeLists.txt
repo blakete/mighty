@@ -268,6 +268,17 @@ if(BUILD_TESTING)
   ament_add_gtest(test_map_age src/test/test_map_age.cpp)
   target_link_libraries(test_map_age map2d)
 
+  # Terminal-goal A* window over a composite occ_2d (ROS-free) and through the planner stack.
+  ament_add_gtest(test_plan_window src/test/test_plan_window.cpp)
+  target_link_libraries(test_plan_window map2d)
+  ament_add_gtest(test_planner_terminal_goal
+    src/test/test_planner_terminal_goal.cpp
+    src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp
+    src/mighty/utils.cpp)
+  target_link_libraries(test_planner_terminal_goal ${PCL_LIBRARIES} map2d goal_fence)
+  ament_target_dependencies(test_planner_terminal_goal
+    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
+
   # HGPManager mapper-grid handoff locking (no rclcpp::init).
   ament_add_gtest(test_hgp_manager_2d
     src/test/test_hgp_manager_2d.cpp
