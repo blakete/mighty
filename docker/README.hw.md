@@ -29,7 +29,7 @@ Change a dependency by bumping its pin in `mighty.repos` and rebuilding.
 |---|---|---|
 | DLIO odometry, seed pose, `map->odom` | `dlio.service` (`dlio_ws`) | `<ns>/dlio/odom_node/odom`, TF |
 | Livox MID-360, D455, `base_link->lidar` | `sensors.service` | `<ns>/livox/lidar` |
-| occupancy / ESDF | `elevation_mapping_cupy` on the OX08 Orin, or `mapping.service` (rover repo: global_mapper + map_fusion, own container) with map fusion | `<ns>/occ_2d_topic` (raw: A*, goal selector), `<ns>/esdf_2d_topic` (soft cost); `planning_occ_2d_topic` is no longer read |
+| occupancy / ESDF | `elevation_mapping_cupy` on the OX08 Orin, or `mapping.service` ([mapping_ws](https://gitlab.com/mit-acl/ugv/redrover/mapping_ws): global_mapper + map_fusion, own container) with map fusion | `<ns>/occ_2d_topic` (raw: A*, goal selector), `<ns>/esdf_2d_topic` (soft cost); `planning_occ_2d_topic` is no longer read |
 | geofence | `geofence.service` (geofence_ws) | `<ns>/geofence/goal_fence`: goal selector filter and the planner's keep-out (`keepout_2d.*`; the raw occ_2d never carries the fence) |
 | zenoh router `:7447` | `drive.service` | everything above, over zenoh |
 
