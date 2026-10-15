@@ -354,6 +354,11 @@ if(BUILD_TESTING)
     src/test/test_goal_selector_geofence.cpp)
   target_link_libraries(test_goal_selector_geofence goal_selector_core)
   ament_target_dependencies(test_goal_selector_geofence Eigen3 nav_msgs)
+
+  ament_add_gtest(test_goal_selector_map_age
+    src/test/test_goal_selector_map_age.cpp)
+  target_link_libraries(test_goal_selector_map_age goal_selector_core)
+  ament_target_dependencies(test_goal_selector_map_age Eigen3 nav_msgs)
 endif()
 
 ament_package()

@@ -254,6 +254,7 @@ void GoalSelectorNode::declareParameters() {
   this->declare_parameter("exploration.geofence.gate_topic_name", std::string("safety_node/geofence_gate"));
   this->declare_parameter("exploration.geofence.gate_max_age_sec", 2.0);
   this->declare_parameter("exploration.geofence.startup_wait_sec", 10.0);
+  this->declare_parameter("map_max_age_sec", 1.5);
   this->declare_parameter("exploration.manager.preempt_enabled", false);
   this->declare_parameter("exploration.manager.preempt_margin", 2.0);
   this->declare_parameter("exploration.manager.preempt_min_commit_sec", 2.0);
@@ -335,6 +336,7 @@ void GoalSelectorNode::readParameters() {
   gate_echo_topic_ = this->get_parameter("exploration.geofence.gate_topic_name").as_string();
   par_.expl_geofence_gate_max_age_sec = d("exploration.geofence.gate_max_age_sec");
   par_.expl_geofence_startup_wait_sec = d("exploration.geofence.startup_wait_sec");
+  par_.map_max_age_sec = d("map_max_age_sec");
   par_.expl_preempt_enabled = b("exploration.manager.preempt_enabled");
   par_.expl_preempt_margin = d("exploration.manager.preempt_margin");
   par_.expl_preempt_min_commit_sec = d("exploration.manager.preempt_min_commit_sec");
@@ -396,6 +398,8 @@ void GoalSelectorNode::printParameters() const {
               par_.expl_geofence_enabled ? "on" : "off", goal_fence_topic_.c_str(),
               par_.expl_geofence_margin_m, par_.expl_geofence_max_age_sec, gate_echo_topic_.c_str(),
               par_.expl_geofence_gate_max_age_sec, par_.expl_geofence_startup_wait_sec);
+  RCLCPP_INFO(lg, "Map age pause: %s (occ_2d header stamp older than %.1f s -> no new goals)",
+              par_.map_max_age_sec > 0.0 ? "on" : "off", par_.map_max_age_sec);
 }
 
 // ----------------------------------------------------------------------------
@@ -411,6 +415,7 @@ GridInput GoalSelectorNode::toGridInput(const nav_msgs::msg::OccupancyGrid& msg)
   g.origin_y = msg.info.origin.position.y;
   g.origin_z = msg.info.origin.position.z;
   g.data = msg.data;
+  g.stamp = rclcpp::Time(msg.header.stamp).seconds();
   return g;
 }
 

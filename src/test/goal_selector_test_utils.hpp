@@ -209,6 +209,8 @@ class Harness {
   Output last_out;
 
   void setMap(const GridInput& g) { map_ = g; }
+  /** @brief Header stamp [s] that feed() hands the selector with the map (-1: none, the default). */
+  void setMapStamp(double stamp) { map_.stamp = stamp; }
   void setRobot(double x, double y, double yaw = 0.0) { pose_ = Pose{x, y, 0.0, yaw}; }
   const Pose& robot() const { return pose_; }
   void advance(double dt) { now += dt; }
