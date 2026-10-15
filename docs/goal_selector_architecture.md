@@ -15,7 +15,7 @@ Topic names: relative names (no leading `/`) resolve under the robot namespace, 
 flowchart LR
   subgraph P_mighty_node["process: MIGHTY planner"]
     direction TB
-    N_mighty_node["mighty_node<br/>(mighty / mighty)<br/>declares 204 parameters<br/>(waits for TF map and odom)"]
+    N_mighty_node["mighty_node<br/>(mighty / mighty)<br/>declares 209 parameters<br/>(waits for TF map and odom)"]
   end
   subgraph P_convert_odom_to_state["process: convert_odom_to_state"]
     direction TB
@@ -23,7 +23,7 @@ flowchart LR
   end
   subgraph P_goal_selector["process: goal_selector"]
     direction TB
-    N_goal_selector["goal_selector<br/>(mighty / goal_selector)<br/>declares 73 parameters"]
+    N_goal_selector["goal_selector<br/>(mighty / goal_selector)<br/>declares 74 parameters"]
   end
   subgraph P_mpc["process: MPC"]
     direction TB
@@ -91,6 +91,7 @@ flowchart LR
   N_mighty_node -.->|"command_to_exec_time<br/>std_msgs/Float64"| UNUSED
   N_mighty_node -.->|"goal<br/>dynus_interfaces/Goal"| UNUSED
   N_mighty_node -.->|"goal_reached<br/>std_msgs/Empty"| UNUSED
+  N_mighty_node -.->|"map_hold<br/>std_msgs/Bool"| UNUSED
   N_mighty_node -.->|"planning_map_2d<br/>nav_msgs/OccupancyGrid"| UNUSED
   N_mapper -.->|"planning_occ_2d_topic<br/>nav_msgs/OccupancyGrid"| UNUSED
   N_goal_selector -.->|"selector_map_2d<br/>nav_msgs/OccupancyGrid"| UNUSED
@@ -101,6 +102,7 @@ flowchart LR
   NOPUB -.->|"/frame_align/#lt;ns#gt;/#lt;other_name#gt;<br/>geometry_msgs/TransformStamped"| N_mighty_node
   NOPUB -.->|"#lt;gate_echo_topic_#gt;<br/>std_msgs/String"| N_goal_selector
   NOPUB -.->|"#lt;goal_fence_topic_#gt;<br/>std_msgs/String"| N_goal_selector
+  NOPUB -.->|"#lt;keepout_topic_#gt;<br/>std_msgs/String"| N_mighty_node
   NOPUB -.->|"#lt;occ_2d_topic_#gt;<br/>nav_msgs/OccupancyGrid"| N_goal_selector
   NOPUB -.->|"#lt;par_.esdf_2d_topic_name#gt;<br/>nav_msgs/OccupancyGrid"| N_mighty_node
   NOPUB -.->|"#lt;par_.occ_2d_topic_name#gt;<br/>nav_msgs/OccupancyGrid"| N_mighty_node
@@ -119,14 +121,14 @@ flowchart LR
 
 | node | executable | sources scanned | parameter files in load order (later wins) | declared parameters |
 |---|---|---|---|---|
-| `mighty_node` | `mighty/mighty` | `src/mighty/mighty_node.cpp`<br>`src/mighty/mighty.cpp`<br>`src/hgp/hgp_manager.cpp`<br>`src/hgp/utils.cpp`<br>`src/hgp/hgp_planner.cpp`<br>`src/hgp/graph_search.cpp`<br>`src/mighty/utils.cpp`<br>`src/mighty/lbfgs_solver.cpp`<br>`src/mighty/lbfgs_solver_utils.cpp`<br>`src/map2d/map2d.cpp` | 1. `mighty_ground_robot.yaml` (inactive on hardware) [use_ground_robot]<br>2. `mighty.yaml` [not (use_ground_robot)]<br>3. `hw_mighty_ground_robot.yaml` [use_hardware and robot_type in [RED_ROVER, STAR_ROBOT]]<br>4. `hw_mighty.yaml` (inactive on hardware) [use_hardware and not (robot_type in [RED_ROVER, STAR_ROBOT])] | 204 |
+| `mighty_node` | `mighty/mighty` | `src/mighty/mighty_node.cpp`<br>`src/mighty/mighty.cpp`<br>`src/hgp/hgp_manager.cpp`<br>`src/hgp/utils.cpp`<br>`src/hgp/hgp_planner.cpp`<br>`src/hgp/graph_search.cpp`<br>`src/mighty/utils.cpp`<br>`src/mighty/lbfgs_solver.cpp`<br>`src/mighty/lbfgs_solver_utils.cpp`<br>`src/map2d/map2d.cpp`<br>`src/goal_selector/goal_fence.cpp` | 1. `mighty_ground_robot.yaml` (inactive on hardware) [use_ground_robot]<br>2. `mighty.yaml` [not (use_ground_robot)]<br>3. `hw_mighty_ground_robot.yaml` [use_hardware and robot_type in [RED_ROVER, STAR_ROBOT]]<br>4. `hw_mighty.yaml` (inactive on hardware) [use_hardware and not (robot_type in [RED_ROVER, STAR_ROBOT])] | 209 |
 | `convert_odom_to_state` | `mighty/convert_odom_to_state` | `src/mighty/convert_odom_to_state.cpp` | none | 0 |
-| `goal_selector` | `mighty/goal_selector` | `src/goal_selector/goal_selector_node.cpp`<br>`src/goal_selector/goal_selector.cpp`<br>`src/goal_selector/goal_fence.cpp`<br>`src/mighty/frontier_detector.cpp`<br>`src/mighty/frontier_manager.cpp`<br>`src/map2d/map2d.cpp` | 1. `mighty_ground_robot.yaml` (inactive on hardware) [use_ground_robot]<br>2. `mighty.yaml` [not (use_ground_robot)]<br>3. `hw_mighty_ground_robot.yaml` [use_hardware and robot_type in [RED_ROVER, STAR_ROBOT]]<br>4. `hw_mighty.yaml` (inactive on hardware) [use_hardware and not (robot_type in [RED_ROVER, STAR_ROBOT])]<br>5. `hw_goal_selector.yaml` [use_hardware] | 73 |
+| `goal_selector` | `mighty/goal_selector` | `src/goal_selector/goal_selector_node.cpp`<br>`src/goal_selector/goal_selector.cpp`<br>`src/mighty/frontier_detector.cpp`<br>`src/mighty/frontier_manager.cpp`<br>`src/map2d/map2d.cpp`<br>`src/goal_selector/goal_fence.cpp` | 1. `mighty_ground_robot.yaml` (inactive on hardware) [use_ground_robot]<br>2. `mighty.yaml` [not (use_ground_robot)]<br>3. `hw_mighty_ground_robot.yaml` [use_hardware and robot_type in [RED_ROVER, STAR_ROBOT]]<br>4. `hw_mighty.yaml` (inactive on hardware) [use_hardware and not (robot_type in [RED_ROVER, STAR_ROBOT])]<br>5. `hw_goal_selector.yaml` [use_hardware] | 74 |
 | `mpc` | `mpc/mpc_node` | (external code) | 1. `mpc.yaml` [use_hardware]<br>2. `mpc_sim.yaml` (inactive on hardware) [not (use_hardware)] | - |
 
-`mighty_node`: 204 declared parameters; provided by file (any layer may override): `mighty.yaml` 182, `hw_mighty_ground_robot.yaml` 190; declared but in no active file (code default only): 7.
+`mighty_node`: 209 declared parameters; provided by file (any layer may override): `mighty.yaml` 182, `hw_mighty_ground_robot.yaml` 195; declared but in no active file (code default only): 7.
 
-`goal_selector`: 73 declared parameters; provided by file (any layer may override): `mighty.yaml` 45, `hw_mighty_ground_robot.yaml` 6, `hw_goal_selector.yaml` 67; declared but in no active file (code default only): 1.
+`goal_selector`: 74 declared parameters; provided by file (any layer may override): `mighty.yaml` 45, `hw_mighty_ground_robot.yaml` 7, `hw_goal_selector.yaml` 67; declared but in no active file (code default only): 1.
 
 ## Topics
 
@@ -141,6 +143,7 @@ flowchart LR
 | `/trajs` | `dynus_interfaces/DynTraj` | `mighty_node`<br>`peer_planners` | `mighty_node` | pub mighty_node: reliable, volatile, keep_last 10<br>pub peer_planners: reliable, volatile, keep_last 10<br>sub mighty_node: reliable, volatile, keep_last 10 | `docs/external_nodes.yaml`<br>`src/mighty/mighty_node.cpp:174`<br>`src/mighty/mighty_node.cpp:186` |  |
 | `<gate_echo_topic_>` | `std_msgs/String` | - | `goal_selector` | sub goal_selector: reliable, volatile, keep_last 5 | `src/goal_selector/goal_selector_node.cpp:147` | **no publisher in this stack**<br>sub goal_selector only if `expl_enabled && expl_geofence_enabled` |
 | `<goal_fence_topic_>` | `std_msgs/String` | - | `goal_selector` | sub goal_selector: reliable, volatile, keep_last 1 | `src/goal_selector/goal_selector_node.cpp:144` | **no publisher in this stack**<br>sub goal_selector only if `expl_enabled && expl_geofence_enabled` |
+| `<keepout_topic_>` | `std_msgs/String` | - | `mighty_node` | sub mighty_node: reliable, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:309` | **no publisher in this stack**<br>sub mighty_node only if `keepout_enabled && use_2d_planning` |
 | `<occ_2d_topic_>` | `nav_msgs/OccupancyGrid` | - | `goal_selector` | sub goal_selector: best_effort, volatile, keep_last 5 | `src/goal_selector/goal_selector_node.cpp:111` | **no publisher in this stack** |
 | `<par_.esdf_2d_topic_name>` | `nav_msgs/OccupancyGrid` | - | `mighty_node` | sub mighty_node: best_effort, volatile, keep_last 5 | `src/mighty/mighty_node.cpp:290` | **no publisher in this stack** |
 | `<par_.occ_2d_topic_name>` | `nav_msgs/OccupancyGrid` | - | `mighty_node` | sub mighty_node: best_effort, volatile, keep_last 5 | `src/mighty/mighty_node.cpp:299` | **no publisher in this stack** |
@@ -171,6 +174,7 @@ flowchart LR
 | `livox/lidar` | `sensor_msgs/PointCloud2` | `sensors` | `mapper` | pub sensors: unspecified<br>sub mapper: unspecified | `docs/external_nodes.yaml` | mapper entry unverified<br>mapper: mapper input; sensors.service publishes it (docker/mighty_hw.sh:37); the mapper's own code is not in this workspace<br>sensors entry unverified<br>sensors: driver code not in this workspace; docker/mighty_hw.sh:37 and the launch remap lidar_cloud_in -> livox/lidar name the topic |
 | `local_global_path_after_push_marker` | `visualization_msgs/MarkerArray` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:136` | **no subscriber in this stack** |
 | `local_global_path_marker` | `visualization_msgs/MarkerArray` | `mighty_node` | - | pub mighty_node: best_effort, volatile, keep_last 1 | `src/mighty/mighty_node.cpp:133` | **no subscriber in this stack** |
+| `map_hold` | `std_msgs/Bool` | `mighty_node` | - | pub mighty_node: reliable, transient_local, keep_last 1 | `src/mighty/mighty_node.cpp:328` | **no subscriber in this stack**<br>pub mighty_node only if `map_guard_on` |
 | `mpc_waypoints` | `dynus_interfaces/SpeedyPath` | `mighty_node` | `mpc` | pub mighty_node: reliable, volatile, keep_last 10<br>sub mpc: reliable, volatile, keep_last 10 | `docs/external_nodes.yaml`<br>`src/mighty/mighty_node.cpp:178` | mpc: mpc_node.py:231 (path_topic parameter) |
 | `occ_2d_topic` | `nav_msgs/OccupancyGrid` | `mapper` | `rviz` | pub mapper: best_effort, volatile<br>sub rviz: reliable, volatile, keep_last 5 | `docs/external_nodes.yaml` | QoS WARNING (mapper -> rviz): subscriber reliable, publisher best_effort: no delivery<br>mapper: raw tri-state 2D grid; consumed by planner and selector since Phase 5<br>rviz: rviz/mighty_RR04.rviz:655, Map display 'RR04 2D Occ from ACL Mapper' |
 | `occupancy_grid` | `sensor_msgs/PointCloud2` | - | `mighty_node`<br>`mighty_node` (sim only) | sub mighty_node: reliable, volatile, keep_last 5 (from_rmw copies only history+depth; reliability/durability stay default)<br>sub mighty_node: best_effort, volatile, keep_last 5 | `src/mighty/mighty_node.cpp:260`<br>`src/mighty/mighty_node.cpp:272` | **no publisher in this stack**<br>sub mighty_node inactive on hardware (not drawn): `!use_hardware && sim_env != "fake_sim"` |
@@ -216,9 +220,9 @@ None: no `create_client` / `create_service` call exists in the scanned sources.
 - topic `occ_2d_topic`: mapper -> rviz: subscriber reliable, publisher best_effort: no delivery
 - topic `unknown_grid`: mighty_node -> mighty_node: subscriber reliable, publisher best_effort: no delivery
 
-Published but with no subscriber in this stack (collapsed visualization topics excluded): `command_to_exec_time`, `goal`, `goal_reached`, `planning_map_2d`, `planning_occ_2d_topic`, `selector_map_2d`, `trajectory`, `yaw_output`.
+Published but with no subscriber in this stack (collapsed visualization topics excluded): `command_to_exec_time`, `goal`, `goal_reached`, `map_hold`, `planning_map_2d`, `planning_occ_2d_topic`, `selector_map_2d`, `trajectory`, `yaw_output`.
 
-Subscribed (on hardware) but with no publisher in this stack: `/frame_align/<ns>/<other_name>`, `<gate_echo_topic_>`, `<goal_fence_topic_>`, `<occ_2d_topic_>`, `<par_.esdf_2d_topic_name>`, `<par_.occ_2d_topic_name>`, `<persistent_map_topic_>`, `occupancy_grid`, `predicted_trajs`.
+Subscribed (on hardware) but with no publisher in this stack: `/frame_align/<ns>/<other_name>`, `<gate_echo_topic_>`, `<goal_fence_topic_>`, `<keepout_topic_>`, `<occ_2d_topic_>`, `<par_.esdf_2d_topic_name>`, `<par_.occ_2d_topic_name>`, `<persistent_map_topic_>`, `occupancy_grid`, `predicted_trajs`.
 
 Launch remappings that do not match any topic the node creates (dead remaps):
 
