@@ -337,6 +337,16 @@ one to test an image against, on the NAS at
 Gotcha: the MPC reads its pose from `dlio/odom_node/pose` (`mpc.yaml: pose_topic`), not
 from `/state` or TF — leave that topic out of the replay and every command is exactly 0.
 
+Gotcha: the reference bag (2026-09-17) predates `persistent_map/grid`, while the hardware
+goal selector detects frontiers on it (`exploration.persistent_map.enabled: true`): with that
+bag the selector never commits a goal. Set it to `false` in the checkout's
+`config/hw_goal_selector.yaml` for the run (it then detects on `occ_2d`), or record a newer bag.
+
+Gotcha: once the bag ends the grids stop, so the map-age hold engages (`map_hold` true) and
+RViz goals do nothing in a `KEEP_RUNNING=1` session. For interactive goals on the last map set
+`map_max_age_sec: 0` in the checkout's `config/hw_mighty_ground_robot.yaml` (bind-mounted)
+and restart the planner pane.
+
 ## Env & networking
 
 - Identity/transport from **`/etc/rover/rover.env`** via compose `env_file`
