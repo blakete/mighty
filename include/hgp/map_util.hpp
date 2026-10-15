@@ -32,6 +32,7 @@
 #include <mighty/occ_grid_2d.hpp>
 
 #include "map2d/map2d.hpp"
+#include "goal_selector/goal_fence.hpp"
 
 namespace mighty {
 
@@ -104,6 +105,9 @@ class MapUtil {
         has_2d_map_(other.has_2d_map_),
         inflation_2d_m_(other.inflation_2d_m_),
         inflated_only_2d_(other.inflated_only_2d_),
+        keepout_2d_(other.keepout_2d_),
+        keepout_band_m_(other.keepout_band_m_),
+        keepout_band_2d_(other.keepout_band_2d_),
         coverage_2d_valid_(other.coverage_2d_valid_),
         coverage_2d_min_x_(other.coverage_2d_min_x_),
         coverage_2d_min_y_(other.coverage_2d_min_y_),
@@ -1691,6 +1695,11 @@ class MapUtil {
   bool has_2d_map_{false};
   float inflation_2d_m_{0.0f};             // Planning-map inflation radius [m], 0 = off
   std::vector<uint8_t> inflated_only_2d_;  // 1 = OCCUPIED only because of inflate2DMap()
+  // Geofence keep-out (setKeepOut2D / applyKeepOut2D): goal_fence rings in the window frame, the band
+  // width [m], and 1 = cell OCCUPIED (or kept occupied) because it is in the fence band.
+  std::shared_ptr<const goal_selector::GoalFence> keepout_2d_;
+  double keepout_band_m_{0.0};
+  std::vector<uint8_t> keepout_band_2d_;
   // World-frame rectangle covered by the mapper grid the 2D map was last built
   // from. Window cells outside it are the unknown ring around the mapper's area.
   bool coverage_2d_valid_{false};
@@ -1884,6 +1893,7 @@ class MapUtil {
 
     coverage_2d_valid_ = false;
     inflate2DMap();
+    applyKeepOut2D();
     has_2d_map_ = true;
   }
 
@@ -1924,6 +1934,27 @@ class MapUtil {
    *  2D map builder applies it via inflate2DMap(). */
   void setInflation2D(float radius_m) { inflation_2d_m_ = std::max(0.0f, radius_m); }
   float getInflation2D() const { return inflation_2d_m_; }
+
+  /** @brief Geofence keep-out for the 2D map: the goal_fence rings (in this window's frame) and the
+   *  band width [m] kept from every fence edge; nullptr = none. Every 2D map builder applies it after
+   *  inflation (applyKeepOut2D): outside keep_in / inside a keep_out -> OCCUPIED (a real obstacle),
+   *  inside the allowed area but closer than band_m to an edge -> OCCUPIED, inflated-only (A* may
+   *  leave it from a start inside it, see GraphSearch, but never plans into it or ends there). */
+  void setKeepOut2D(std::shared_ptr<const goal_selector::GoalFence> fence, double band_m) {
+    keepout_2d_ = std::move(fence);
+    keepout_band_m_ = std::max(0.0, band_m);
+  }
+  bool has2DKeepOut() const { return keepout_2d_ != nullptr; }
+  double getKeepOutBand2D() const { return keepout_2d_ ? keepout_band_m_ : 0.0; }
+  /** @brief True if the 2D cell is OCCUPIED because it is in the geofence band (not a real obstacle,
+   *  not outside the fence). Out-of-bounds is false. */
+  bool is2DKeepOutBand(int x, int y) const {
+    const int dimX = dim_(0);
+    const int dimY = dim_(1);
+    if (x < 0 || x >= dimX || y < 0 || y >= dimY) return false;
+    const size_t idx = static_cast<size_t>(x) + static_cast<size_t>(dimX) * y;
+    return idx < keepout_band_2d_.size() && keepout_band_2d_[idx] != 0;
+  }
 
   /** @brief True if the 2D cell is OCCUPIED only because of inflation, i.e. it is
    *  not a real obstacle from the mapper. Out-of-bounds is false. */
@@ -2129,6 +2160,38 @@ class MapUtil {
     map2d::inflate(map_2d_, inflated_only_2d_, dim_(0), dim_(1), res_, inflation_2d_m_);
   }
 
+  /** @brief Burn the geofence keep-out (setKeepOut2D) into map_2d_; runs after inflate2DMap() so the
+   *  obstacle inflation is not grown around fence cells (the band is the fence's clearance). Forbidden
+   *  cells become real obstacles; band cells become (or stay) OCCUPIED and inflated-only and are
+   *  recorded in keepout_band_2d_. Real mapper obstacles are left as they are. */
+  void applyKeepOut2D() {
+    keepout_band_2d_.clear();
+    if (!keepout_2d_) return;
+    const int dimX = dim_(0);
+    const int dimY = dim_(1);
+    const size_t n2d = static_cast<size_t>(dimX) * dimY;
+    if (map_2d_.size() != n2d) return;
+    std::vector<uint8_t> cls;
+    goal_selector::rasterizeGoalFence(*keepout_2d_, dimX, dimY, res_, origin_d_(0), origin_d_(1),
+                                      keepout_band_m_, cls);
+    if (inflated_only_2d_.size() != n2d) inflated_only_2d_.assign(n2d, 0);
+    keepout_band_2d_.assign(n2d, 0);
+    for (size_t i = 0; i < n2d; ++i) {
+      if (cls[i] == goal_selector::kFenceForbidden) {
+        map_2d_[i] = val_occ_;
+        inflated_only_2d_[i] = 0;
+      } else if (cls[i] == goal_selector::kFenceBand) {
+        if (map_2d_[i] != val_occ_) {
+          map_2d_[i] = val_occ_;
+          inflated_only_2d_[i] = 1;
+          keepout_band_2d_[i] = 1;
+        } else if (inflated_only_2d_[i]) {
+          keepout_band_2d_[i] = 1;
+        }
+      }
+    }
+  }
+
   void buildMap2DFromEsdf(const EsdfGrid2D& esdf, double d_safe, double h_max) {
     const int dimX = dim_(0);
     const int dimY = dim_(1);
@@ -2172,6 +2235,7 @@ class MapUtil {
       }
     }
     inflate2DMap();
+    applyKeepOut2D();
     mergeDynamicHeatInto2D();
     has_2d_map_ = true;
   }
@@ -2252,6 +2316,7 @@ class MapUtil {
       }
     }
     inflate2DMap();
+    applyKeepOut2D();
     mergeDynamicHeatInto2D();
     has_2d_map_ = true;
   }

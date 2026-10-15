@@ -419,6 +419,20 @@ class MIGHTY {
     return occ_grid_2d_;
   }
 
+  /** @brief Geofence keep-out for the 2D planning map (goal_fence rings in the planning frame + band
+   *  width [m]; nullptr = none). Applied from the next 2D map build on. Locked: see setEsdfGrid(). */
+  void setKeepOut2D(std::shared_ptr<const goal_selector::GoalFence> fence, double band_m) {
+    std::lock_guard<std::mutex> lock(mtx_2d_grids_);
+    keepout_2d_ = std::move(fence);
+    keepout_band_m_ = band_m;
+  }
+
+  /** @brief Thread-safe copy of the keep-out (fence pointer, band width [m]). */
+  std::pair<std::shared_ptr<const goal_selector::GoalFence>, double> getKeepOut2DSnapshot() {
+    std::lock_guard<std::mutex> lock(mtx_2d_grids_);
+    return {keepout_2d_, keepout_band_m_};
+  }
+
   /** @brief Apply the initial pose transform to a piecewise polynomial trajectory.
    *  @param pwp Trajectory to transform in place.
    */
@@ -488,9 +502,11 @@ class MIGHTY {
       safe_corridor_polytopes_whole_;  // Polytope (Linear) constraints for whole trajectory
   std::shared_ptr<lbfgs::SolverLBFGS>
       whole_traj_solver_ptr_;                    // L-BFGS solver pointer for the whole trajectory
-  std::mutex mtx_2d_grids_;  // Guards esdf_grid_/occ_grid_2d_ -- see setEsdfGrid()
+  std::mutex mtx_2d_grids_;  // Guards esdf_grid_/occ_grid_2d_/keepout_2d_ -- see setEsdfGrid()
   std::shared_ptr<const class EsdfGrid2D> esdf_grid_;  // 2D ESDF grid (ground robot only)
   std::shared_ptr<const class OccGrid2D> occ_grid_2d_;  // Binary 2D occupancy (ground robot only)
+  std::shared_ptr<const goal_selector::GoalFence> keepout_2d_;  // geofence keep-out (ground robot only)
+  double keepout_band_m_ = 0.0;
   std::vector<std::shared_ptr<dynTraj>> trajs_;  // Dynamic trajectory
   Eigen::Vector3d v_max_3d_;                     // Maximum velocity
   Eigen::Vector3d a_max_3d_;                     // Maximum acceleration

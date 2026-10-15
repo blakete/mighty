@@ -19,6 +19,7 @@
 
 // Map includes
 #include <hgp/read_map.hpp>
+#include "goal_selector/goal_fence.hpp"
 
 // HGP includes
 #include <hgp/data_utils.hpp>
@@ -375,15 +376,21 @@ class HGPManager {
   // Binary 2D occupancy for ground robot A* planning
   std::shared_ptr<const class OccGrid2D> occ_grid_2d_;
 
+  // Geofence keep-out for the 2D map (setKeepOut2D): goal_fence rings + band width [m].
+  std::shared_ptr<const goal_selector::GoalFence> keepout_2d_;
+  double keepout_band_m_ = 0.0;
+
   struct Grids2D {
     std::shared_ptr<const class OccGrid2D> occ;
     std::shared_ptr<const EsdfGrid2D> esdf;
     double esdf_weight = 0.0;
     double esdf_d_safe = 0.0;
+    std::shared_ptr<const goal_selector::GoalFence> keepout;
+    double keepout_band_m = 0.0;
   };
   Grids2D get2DGridsSnapshot() {
     std::lock_guard<std::mutex> lock(mtx_grids_);
-    return {occ_grid_2d_, esdf_grid_, esdf_weight_astar_, esdf_d_safe_astar_};
+    return {occ_grid_2d_, esdf_grid_, esdf_weight_astar_, esdf_d_safe_astar_, keepout_2d_, keepout_band_m_};
   }
 
  public:
@@ -398,6 +405,15 @@ class HGPManager {
   void setOccGrid2D(std::shared_ptr<const class OccGrid2D> grid) {
     std::lock_guard<std::mutex> lock(mtx_grids_);
     occ_grid_2d_ = grid;
+  }
+
+  /** @brief Geofence keep-out burnt into the next 2D map builds (MapUtil::setKeepOut2D):
+   *  goal_fence rings in the 2D window's frame and the band width [m]; nullptr = none.
+   *  Locked: see mtx_grids_. */
+  void setKeepOut2D(std::shared_ptr<const goal_selector::GoalFence> fence, double band_m) {
+    std::lock_guard<std::mutex> lock(mtx_grids_);
+    keepout_2d_ = std::move(fence);
+    keepout_band_m_ = band_m;
   }
 
   /** @brief Set max distance between waypoints for 2D path resampling. */

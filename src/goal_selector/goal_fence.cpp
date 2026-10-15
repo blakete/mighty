@@ -110,6 +110,78 @@ bool parseGoalFence(const std::string& json, GoalFence& out, std::string& frame_
   return true;
 }
 
+namespace {
+
+// Crossing x positions of one ring on the horizontal line y, by insideRing()'s rule: insideRing(x, y)
+// is true iff an odd number of them are > x.
+void ringCrossings(const std::vector<FencePoint>& r, double y, std::vector<double>& xs) {
+  xs.clear();
+  for (size_t i = 0, j = r.size() - 1; i < r.size(); j = i++) {
+    const FencePoint& a = r[j];
+    const FencePoint& b = r[i];
+    if ((a.y > y) != (b.y > y)) xs.push_back(a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y));
+  }
+  std::sort(xs.begin(), xs.end());
+}
+
+// insideRing(x, y) for a row's sorted crossings.
+bool insideByCrossings(const std::vector<double>& xs, double x) {
+  const auto above = xs.end() - std::upper_bound(xs.begin(), xs.end(), x);  // crossings with x < x_at
+  return (above & 1) != 0;
+}
+
+// Mark non-forbidden cells closer than band_m to the edges of ring r (closed) as band.
+void markBand(const std::vector<FencePoint>& r, int dim_x, int dim_y, double res, double origin_x,
+              double origin_y, double band_m, std::vector<uint8_t>& out) {
+  const double band2 = band_m * band_m;
+  for (size_t i = 0, j = r.size() - 1; i < r.size(); j = i++) {
+    const FencePoint& a = r[j];
+    const FencePoint& b = r[i];
+    // Cells whose centre lies in the edge's bbox grown by band_m.
+    const int x0 = std::max(0, static_cast<int>(std::ceil((std::min(a.x, b.x) - band_m - origin_x) / res - 0.5)));
+    const int x1 = std::min(dim_x - 1, static_cast<int>(std::floor((std::max(a.x, b.x) + band_m - origin_x) / res - 0.5)));
+    const int y0 = std::max(0, static_cast<int>(std::ceil((std::min(a.y, b.y) - band_m - origin_y) / res - 0.5)));
+    const int y1 = std::min(dim_y - 1, static_cast<int>(std::floor((std::max(a.y, b.y) + band_m - origin_y) / res - 0.5)));
+    for (int y = y0; y <= y1; ++y) {
+      const double cy = origin_y + (y + 0.5) * res;
+      for (int x = x0; x <= x1; ++x) {
+        uint8_t& cell = out[static_cast<size_t>(x) + static_cast<size_t>(dim_x) * y];
+        if (cell != kFenceAllowed) continue;
+        if (segmentDist2(a, b, origin_x + (x + 0.5) * res, cy) < band2) cell = kFenceBand;
+      }
+    }
+  }
+}
+
+}  // namespace
+
+void rasterizeGoalFence(const GoalFence& f, int dim_x, int dim_y, double res, double origin_x,
+                        double origin_y, double band_m, std::vector<uint8_t>& out) {
+  out.assign(static_cast<size_t>(std::max(0, dim_x)) * std::max(0, dim_y), kFenceAllowed);
+  if (!f.ready || f.keep_in.size() < 3 || dim_x <= 0 || dim_y <= 0 || res <= 0.0) return;
+
+  // Forbidden: row by row, the same even-odd crossings goalFenceAllows() evaluates per point.
+  std::vector<double> in_xs, out_xs;
+  for (int y = 0; y < dim_y; ++y) {
+    const double cy = origin_y + (y + 0.5) * res;
+    ringCrossings(f.keep_in, cy, in_xs);
+    uint8_t* row = out.data() + static_cast<size_t>(dim_x) * y;
+    for (int x = 0; x < dim_x; ++x)
+      if (!insideByCrossings(in_xs, origin_x + (x + 0.5) * res)) row[x] = kFenceForbidden;
+    for (const auto& ring : f.keep_out) {
+      if (ring.size() < 3) continue;
+      ringCrossings(ring, cy, out_xs);
+      if (out_xs.empty()) continue;
+      for (int x = 0; x < dim_x; ++x)
+        if (insideByCrossings(out_xs, origin_x + (x + 0.5) * res)) row[x] = kFenceForbidden;
+    }
+  }
+  if (band_m <= 0.0) return;
+  markBand(f.keep_in, dim_x, dim_y, res, origin_x, origin_y, band_m, out);
+  for (const auto& ring : f.keep_out)
+    if (ring.size() >= 2) markBand(ring, dim_x, dim_y, res, origin_x, origin_y, band_m, out);
+}
+
 bool parseGateEcho(const std::string& json, bool& engaged) {
   const nlohmann::json j = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
   if (j.is_discarded() || !j.is_object() || !j.contains("engaged") || !j["engaged"].is_boolean()) return false;

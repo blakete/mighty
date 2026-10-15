@@ -286,6 +286,16 @@ mighty_node:
         use_esdf_cost: true                             # [-] Enable ESDF distance cost in L-BFGS
         esdf_2d_topic_name: "esdf_2d_topic"             # [-] ESDF grid topic, relative to the robot namespace
         occ_2d_topic_name: "occ_2d_topic"               # [-] raw 2D occupancy grid topic (planner A*, and the goal selector via the layered params), relative to the namespace
+        # Geofence keep-out for A*: the raw occ_2d above never carries the fence (map_fusion burns the geofence
+        # walls only into planning_occ_2d / esdf_2d), so without this A* plans through no-go zones. The planner
+        # reads the geofence's goal_fence (keep_in / keep_out rings in <R>/odom + offset_m = footprint radius +
+        # margin) and marks its 2D map: outside the fence = obstacle; within (offset_m - slack_m) of a fence edge
+        # = band (never planned into, a start inside it may leave it). Only while the fence is enforcing and
+        # ready; shadow / off / silent / localizing -> no keep-out (the drive gate holds the robot meanwhile).
+        keepout_2d.enabled: true                        # [-] off: A* ignores the geofence (the gate still holds it)
+        keepout_2d.topic_name: "geofence/goal_fence"    # [-] relative to the robot namespace
+        keepout_2d.max_age_sec: 2.0                     # [s] older goal_fence -> no keep-out
+        keepout_2d.slack_m: 0.05                        # [m] band = offset_m - slack_m (half a cell, so goals the selector accepts at offset_m stay plannable)
         esdf_weight: 5.0e+4                             # [-] ESDF cost weight in objective
         esdf_d_safe: 0.7                                # [m] Safety distance threshold
         esdf_truncation_distance: 15                    # [voxels] Must match mapper's distance_grid_2d.truncation_distance

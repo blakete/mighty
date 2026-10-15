@@ -330,6 +330,7 @@ class GraphSearch {
   int xGoal_, yGoal_, zGoal_;
   int xStart_ = 0, yStart_ = 0;
   double start_escape_r2_ = 0.0;  // [cells^2] 0 = no start exemption
+  double start_escape_keepout_r2_ = 0.0;  // [cells^2] geofence band exemption radius, 0 = none
   bool use_jps_ = false;
   bool use_heat_ = false;  // only true when global_planner_=="astar_heat"
   // Set true only when the exact goal node is popped; false on any best_node

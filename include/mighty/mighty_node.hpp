@@ -38,6 +38,7 @@
 
 #include <mighty/utils.hpp>
 
+#include "goal_selector/goal_fence.hpp"
 #include "hgp/utils.hpp"
 #include "mighty/mighty.hpp"
 #include "mighty/mighty_type.hpp"
@@ -265,6 +266,24 @@ class MIGHTY_NODE : public rclcpp::Node {
   // occ_2d_topic (raw) -> occ_grid_2d_ : HGP/A* planner (ground robot only).
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr sub_occ_2d_;
   std::shared_ptr<const class OccGrid2D> occ_grid_2d_;
+
+  // keepout_2d.* : geofence goal_fence (keep_in / keep_out rings in <R>/odom + offset_m) -> keep-out
+  // burnt into the planner's 2D map (MapUtil::applyKeepOut2D). The raw occ_2d never carries the
+  // fence (map_fusion puts it only into planning_occ_2d / esdf_2d), so without this A* plans through
+  // no-go zones. Written by goalFenceCallback and read by occ2DCallback, both on cb_group_map_ (no lock).
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_keepout_;
+  bool keepout_enabled_{false};
+  std::string keepout_topic_{"geofence/goal_fence"};
+  double keepout_max_age_sec_{2.0};
+  double keepout_slack_m_{0.05};
+  std::shared_ptr<const goal_selector::GoalFence> keepout_fence_;  // latest parsed goal_fence
+  std::string keepout_frame_;
+  double keepout_rx_t_{-1.0};
+  std::string keepout_state_;  // last logged keep-out state
+  void goalFenceCallback(const std_msgs::msg::String::SharedPtr msg);
+  /** @brief Hand the planner the keep-out for the next 2D build: the latest goal_fence if fresh,
+   *  enforcing, ready and in grid_frame (the occ_2d frame the window is built in), else none. */
+  void updateKeepOut2D(const std::string& grid_frame);
 
   // Wall-clock seconds of the last visualization publish in replanCallback.
   // The replan loop runs at 100 Hz which is fine for control but floods RViz

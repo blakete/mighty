@@ -16,6 +16,7 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 
+#include "goal_selector/goal_fence.hpp"
 #include "hgp/hgp_manager.hpp"
 #include "mighty/mighty_type.hpp"
 #include "mighty/occ_grid_2d.hpp"
@@ -42,6 +43,13 @@ class PlannerWorld {
       : n(n_cells), res(resolution), src(static_cast<size_t>(n_cells) * n_cells, 0) {}
 
   int8_t& at(int x, int y) { return src[static_cast<size_t>(y) * n + x]; }
+
+  /** Optional geofence keep-out (applied by build()). Rings are in CELL-CORNER coordinates of the
+   *  window (cell (x, y) spans [x, x+1] x [y, y+1]); build() moves them to world coordinates. */
+  bool keepout = false;
+  goal_selector::GoalFence fence_cells;  ///< active/ready are forced true; offset_m is unused
+  double keepout_band_m = 0.0;
+  goal_selector::GoalFence fence;         ///< the world-frame fence build() handed to the planner
 
   /** Fill the full-height column band [x0, x1] with `value`. */
   void fillColumns(int x0, int x1, int8_t value) {
@@ -89,6 +97,17 @@ class PlannerWorld {
     mu = mgr.getMapUtilSharedPtr();
     const Vec3f o = mu->getOrigin();
     mgr.setOccGrid2D(OccGrid2D::fromTristate(n, n, res, o(0), o(1), src));
+    if (keepout) {
+      fence = fence_cells;
+      fence.active = fence.ready = true;
+      fence.offset_m = keepout_band_m;
+      auto to_world = [&](std::vector<goal_selector::FencePoint>& ring) {
+        for (auto& p : ring) p = {o(0) + p.x * res, o(1) + p.y * res};
+      };
+      to_world(fence.keep_in);
+      for (auto& r : fence.keep_out) to_world(r);
+      mgr.setKeepOut2D(std::make_shared<const goal_selector::GoalFence>(fence), keepout_band_m);
+    }
     mgr.updateMap(n * res, n * res, res, centre, empty, empty, no_pos, no_bbox, 0.0);
 
     mgr.setupHGPPlanner("astar_heat", false, res, 1.0, 1.0, 1.0, 10000, -1, k.w_unknown, 0.0,
