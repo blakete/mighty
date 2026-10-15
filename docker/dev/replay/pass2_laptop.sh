@@ -2,11 +2,17 @@
 # PASS 2 — run ON A LAPTOP. Plays the planner INPUTS of a pass1_rover.sh
 # recording (TF, DLIO odom + pose, the three 2-D grids) through the re-stamp
 # relay into the --dev stack running under the recording rover's name, and
-# counts what the LAPTOP's own planner/MPC emit. No mapper, no sim time.
+# counts what the LAPTOP's own planner/MPC/goal_selector emit (mighty_hw.sh
+# start --dev brings up the goal_selector pane; it gets `state` from the
+# convert_odom_to_state pane and the 2-D grids from the relay, and publishes
+# exploration/current_goal, which is what the counter below watches). No mapper, no sim time.
 # Verified on alienware-02 2026-09-17: same 15 exploration goals as the rover run,
 # MPC ramps to v_max, 0 TF/solver failures.
 #
 #   pass2_laptop.sh <augmented bag dir> [rover env file, default rover.RR08.env]
+#
+# /$R/persistent_map/grid (the mapper's growing accumulated grid) is replayed too, for the goal
+# selector's exploration.persistent_map.* option. Bags without it just skip it.
 #
 # GOTCHA: MPC takes its pose from dlio/odom_node/pose (mpc.yaml pose_topic), NOT
 # from /state or TF — leave that topic out and every cmd_vel_auto is exactly 0.
@@ -14,7 +20,7 @@
 # KEEP_RUNNING=1 pass2_laptop.sh <bag> — skip the final `mighty_hw.sh stop`, so
 # hw-mighty (and its dev zenoh router) stay up after the bag finishes playing,
 # for interactive use (e.g. RViz "2D Goal Pose" against a manually-set term_goal
-# — see config/hw_mighty_ground_robot.yaml's exploration.enabled). Default
+# — see config/hw_goal_selector.yaml's exploration.enabled). Default
 # (unset) keeps the original verified-regression-test behavior: full teardown.
 set -uo pipefail
 BAG="${1:?augmented bag dir}"
@@ -51,8 +57,8 @@ rclpy.init(); c=C(); t0=time.time()
 while time.time()-t0<int(os.environ['W']): rclpy.spin_once(c, timeout_sec=0.2)
 print('laptop outputs:', c.n); print('max |cmd_vel_auto| (lin+ang):', round(c.vmax,3)); print('distinct exploration goals:', len(c.goals))
 PY"
-T="/tf /tf_static /$R/dlio/odom_node/odom /$R/dlio/odom_node/pose /$R/occ_2d_topic /$R/esdf_2d_topic /$R/planning_occ_2d_topic"
-PAIRS="/tf=tf2_msgs/msg/TFMessage /tf_static=tf2_msgs/msg/TFMessage /$R/dlio/odom_node/odom=nav_msgs/msg/Odometry /$R/dlio/odom_node/pose=geometry_msgs/msg/PoseStamped /$R/occ_2d_topic=nav_msgs/msg/OccupancyGrid /$R/esdf_2d_topic=nav_msgs/msg/OccupancyGrid /$R/planning_occ_2d_topic=nav_msgs/msg/OccupancyGrid"
+T="/tf /tf_static /$R/dlio/odom_node/odom /$R/dlio/odom_node/pose /$R/occ_2d_topic /$R/esdf_2d_topic /$R/planning_occ_2d_topic /$R/persistent_map/grid"
+PAIRS="/tf=tf2_msgs/msg/TFMessage /tf_static=tf2_msgs/msg/TFMessage /$R/dlio/odom_node/odom=nav_msgs/msg/Odometry /$R/dlio/odom_node/pose=geometry_msgs/msg/PoseStamped /$R/occ_2d_topic=nav_msgs/msg/OccupancyGrid /$R/esdf_2d_topic=nav_msgs/msg/OccupancyGrid /$R/planning_occ_2d_topic=nav_msgs/msg/OccupancyGrid /$R/persistent_map/grid=nav_msgs/msg/OccupancyGrid"
 REMAP=""; for t in $T; do REMAP="$REMAP $t:=/replay$t"; done
 docker exec -d replay2 bash -c "source /opt/ros/humble/setup.bash && exec python3 /relay.py $PAIRS > /tmp/relay.log 2>&1"
 sleep 3

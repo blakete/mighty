@@ -15,6 +15,7 @@
   <depend>rclcpp_components</depend>
   <depend>example_interfaces</depend>
   <depend>dynus_interfaces</depend>
+  <depend>goal_selector_msgs</depend>
   <depend>visualization_msgs</depend>
   <depend>decomp_ros_msgs</depend>
   <depend>gazebo_msgs</depend>
@@ -28,6 +29,8 @@
   <depend>decomp_test_node</depend>
   <depend>std_srvs</depend>
   <depend>pcl_ros</depend>
+  <depend>tf2_ros</depend>
+  <depend>nlohmann-json-dev</depend>
   <exec_depend>mpc</exec_depend>
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

@@ -345,7 +345,10 @@ void MIGHTY::computeG_corridorHop(const state& A, const state& G_term,
  */
 
 bool MIGHTY::needReplan(const state& local_state, const state& local_G_term,
-                        const state& last_plan_state) {
+                        const state& last_plan_state, uint64_t goal_gen) {
+  // Status transitions below are computed against local_G_term; they go through
+  // changeDroneStatusForGoal() so they are dropped if a new goal arrived since
+  // replan() read it (otherwise the new goal could be marked GOAL_REACHED at once).
   // Compute the distance to the terminal goal. Non-UAV vehicles measure it in
   // xy only: the goal z is pinned to default_goal_z while the state z is raw
   // odometry, so a z offset >= goal_radius would make GOAL_REACHED unreachable
@@ -360,13 +363,13 @@ bool MIGHTY::needReplan(const state& local_state, const state& local_G_term,
   double dist_from_last_plan_state_to_term_G = dist(last_plan_state.pos, local_G_term.pos);
 
   if (dist_to_term_G < par_.goal_radius) {
-    changeDroneStatus(DroneStatus::GOAL_REACHED);
+    changeDroneStatusForGoal(DroneStatus::GOAL_REACHED, goal_gen);
     return false;
   }
 
   if (dist_to_term_G < par_.goal_seen_radius) {
-    changeDroneStatus(
-        DroneStatus::GOAL_SEEN);  // This triggers to use the hard final state constraint
+    // This triggers to use the hard final state constraint
+    if (!changeDroneStatusForGoal(DroneStatus::GOAL_SEEN, goal_gen)) return false;
   }
 
   if (drone_status_ == DroneStatus::GOAL_SEEN &&
@@ -389,8 +392,8 @@ bool MIGHTY::needReplan(const state& local_state, const state& local_G_term,
     const double dist_G_to_term = (G_now.pos - local_G_term.pos).norm();
     const bool G_is_final = dist_G_to_term < 1e-3;
     if (!G_is_final && dist_to_G < par_.goal_radius) {
-      corridor_hop_yawing_ = true;
-      changeDroneStatus(DroneStatus::YAWING);
+      corridor_hop_yawing_ = true;  // set before YAWING, as the yaw controller reads both
+      if (!changeDroneStatusForGoal(DroneStatus::YAWING, goal_gen)) corridor_hop_yawing_ = false;
       return false;
     }
   }
@@ -471,19 +474,6 @@ bool MIGHTY::findAandAtime(state& A, double& A_time, double current_time,
   }
 
   return true;
-}
-
-// ----------------------------------------------------------------------------
-
-bool MIGHTY::checkIfPointOccupied(const Vec3f& point) {
-  // Check if the point is free
-  return hgp_manager_.checkIfPointOccupied(point);
-}
-
-// ----------------------------------------------------------------------------
-
-bool MIGHTY::checkIfPointOccupied2D(const Vec3f& point) {
-  return hgp_manager_.checkIfPointOccupied2D(point);
 }
 
 // ----------------------------------------------------------------------------
@@ -719,8 +709,12 @@ void MIGHTY::retrieveCPs(std::vector<Eigen::Matrix<double, 3, 6>>& cps) { cps = 
  * @brief Replans the trajectory.
  * @param double last_replaning_computation_time: Last replanning computation time.
  * @param double current_time: Current timestamp.
+ * @param ReplanOutcome* outcome: Optional; set to the global-plan outcome of this call.
  */
-std::tuple<bool, bool> MIGHTY::replan(double last_replaning_computation_time, double current_time) {
+std::tuple<bool, bool> MIGHTY::replan(double last_replaning_computation_time, double current_time,
+                                      ReplanOutcome* outcome) {
+  if (outcome) *outcome = ReplanOutcome::SKIPPED;
+
   /* -------------------- Housekeeping -------------------- */
 
   MyTimer timer_housekeeping(true);
@@ -729,32 +723,24 @@ std::tuple<bool, bool> MIGHTY::replan(double last_replaning_computation_time, do
   resetData();
 
   // Check if we need to replan
-  if (!checkReadyToReplan()) return std::make_tuple(false, false);
+  if (!checkReadyToReplan()) return std::make_tuple(false, false);  // outcome: SKIPPED
 
   // Get states we need
   state local_state, local_G_term, last_plan_state;
   getState(local_state);
-  getGterm(local_G_term);
+  uint64_t goal_gen;
+  {
+    // G_term_ and its generation together: needReplan's status transitions are
+    // tied to this goal (see changeDroneStatusForGoal).
+    std::lock_guard<std::mutex> lock(mtx_goal_gen_);
+    getGterm(local_G_term);
+    goal_gen = goal_gen_;
+  }
   getLastPlanState(last_plan_state);
 
-  // Re-run goal sanitization each replan: as the planning window slides
-  // forward and previously-unknown cells become observed, an occupied goal
-  // may only become detectable now. sanitizeTerminalGoal is a no-op when
-  // the goal is already free or unknown, so this is cheap in the common case.
-  if (par_.relocate_occupied_goal) {
-    state goal_before = local_G_term;
-    if (sanitizeTerminalGoal(local_G_term)) {
-      if ((local_G_term.pos - goal_before.pos).norm() > 1e-6) {
-        setGterm(local_G_term);  // persist the relocation for the next cycle
-      }
-    }
-    // If sanitize returned false, leave the stored G_term_ unchanged and
-    // let the planner try; the next sensor update may make a non-occupied
-    // cell available.
-  }
-
   // Check if we need to replan based on the distance to the terminal goal
-  if (!needReplan(local_state, local_G_term, last_plan_state)) return std::make_tuple(false, false);
+  if (!needReplan(local_state, local_G_term, last_plan_state, goal_gen))
+    return std::make_tuple(false, false);  // outcome: SKIPPED
 
   if (par_.debug_verbose)
     printf("[TIMING] Housekeeping: %.2f ms\n", timer_housekeeping.getElapsedMicros() / 1000.0);
@@ -767,8 +753,13 @@ std::tuple<bool, bool> MIGHTY::replan(double last_replaning_computation_time, do
     if (par_.debug_verbose)
       printf("[TIMING] Global Planning (FAILED): %.2f ms\n",
              timer_global.getElapsedMicros() / 1000.0);
+    if (outcome) *outcome = ReplanOutcome::FAILED;
     return std::make_tuple(false, false);
   }
+  // generateGlobalPath succeeded, so solveHGP -> HGPPlanner::plan ran A* during this call and
+  // set its reached-goal flag. Only the replan timer drives this path, so the value is not stale.
+  if (outcome)
+    *outcome = hgp_manager_.reachedGoal() ? ReplanOutcome::SUCCESS : ReplanOutcome::PARTIAL;
   if (par_.debug_verbose)
     printf("[TIMING] Global Planning: %.2f ms\n", timer_global.getElapsedMicros() / 1000.0);
 
@@ -1730,149 +1721,6 @@ void MIGHTY::yaw(double diff, state& next_goal) {
 // ----------------------------------------------------------------------------
 
 /**
- * @brief If the goal is inside an occupied voxel, relocate it to the nearest
- *        free or unknown cell, then push outward along that direction by
- *        ||drone_bbox|| so the new goal sits clear of the obstacle. No-op if
- *        the goal is already non-occupied or if the map isn't ready yet.
- */
-bool MIGHTY::sanitizeTerminalGoal(state& goal) {
-  // NEW BRANCH: ground-robot 2D deployments have no 3D point-cloud source, so
-  // the 3D voxel map this function checks below is never populated (see
-  // updateMap2DOnly()) and checkIfPointOccupied()/findClosestNonOccupiedPoint()
-  // cannot see real occupancy from occ_2d_topic. Route those to the 2D-map
-  // equivalent instead. To revert to the original (3D-map-based) behavior for
-  // ground robots too, delete this if-block; everything below is unchanged.
-  if (par_.vehicle_type == "ground_robot" && par_.use_2d_planning) {
-    return sanitizeTerminalGoal2D(goal);
-  }
-
-  // Map not initialized yet (e.g. very first goal at startup): trust the user.
-  if (!hgp_manager_.isMapInitialized()) return true;
-
-  // Already free or unknown: nothing to do.
-  if (!hgp_manager_.checkIfPointOccupied(goal.pos)) return true;
-
-  // BFS for the closest free/unknown cell.
-  Vec3f closest;
-  hgp_manager_.findClosestNonOccupiedPoint(goal.pos, closest);
-
-  // findClosestNonOccupiedPoint returns the input unchanged if it found nothing.
-  if ((closest - goal.pos).norm() < 1e-6) {
-    printf("[MIGHTY] sanitizeTerminalGoal: goal is occupied and no free/unknown "
-           "cell found within BFS budget; dropping goal.\n");
-    return false;
-  }
-
-  // Direction outward from the occupied goal toward free/unknown space.
-  const Vec3f dir = (closest - goal.pos).normalized();
-
-  // Required clearance from the original occupied point: ||drone_bbox||.
-  // drone_bbox is a [x,y,z] full-extent vector; using its norm gives the
-  // bounding-box diagonal as the safety margin.
-  double clearance = 0.0;
-  if (par_.drone_bbox.size() >= 3) {
-    clearance = std::sqrt(par_.drone_bbox[0] * par_.drone_bbox[0] +
-                          par_.drone_bbox[1] * par_.drone_bbox[1] +
-                          par_.drone_bbox[2] * par_.drone_bbox[2]);
-  }
-
-  Vec3f new_pos = goal.pos + dir * clearance;
-
-  // Safety loop: if pushing by `clearance` lands us back inside an obstacle
-  // (thin wall, etc.), keep walking outward by one resolution at a time.
-  // Cap iterations so we never spin forever.
-  const double step = par_.res > 0.0 ? par_.res : 0.1;
-  for (int i = 0; i < 20 && hgp_manager_.checkIfPointOccupied(new_pos); ++i) {
-    new_pos += dir * step;
-  }
-
-  if (hgp_manager_.checkIfPointOccupied(new_pos)) {
-    printf("[MIGHTY] sanitizeTerminalGoal: could not escape occupied region "
-           "after %d steps; dropping goal.\n", 20);
-    return false;
-  }
-
-  const Vec3f original = goal.pos;
-  goal.pos = new_pos;
-  printf("[MIGHTY] Goal relocated from (%.2f,%.2f,%.2f) to (%.2f,%.2f,%.2f) "
-         "(was inside occupied voxel, clearance=%.2f m)\n",
-         original.x(), original.y(), original.z(),
-         new_pos.x(), new_pos.y(), new_pos.z(), clearance);
-  return true;
-}
-
-// ----------------------------------------------------------------------------
-
-/**
- * @brief NEW: 2D-map counterpart of sanitizeTerminalGoal(), for ground-robot
- *        2D deployments -- see the branch at the top of sanitizeTerminalGoal()
- *        for why this exists. Same relocate-and-push-out algorithm as the
- *        original, but checks/searches the 2D tri-state map (occ_2d_topic-
- *        derived) instead of the (unpopulated, for these deployments) 3D
- *        voxel map.
- */
-bool MIGHTY::sanitizeTerminalGoal2D(state& goal) {
-  // Map not initialized yet (e.g. very first goal at startup): trust the user.
-  if (!hgp_manager_.isMapInitialized()) return true;
-
-  // Already free, unknown, or outside the 2D window (unobserved; plan() clamps
-  // it to the window edge): nothing to do.
-  if (!hgp_manager_.checkIfPointOccupied2D(goal.pos)) return true;
-
-  // Expanding-radius search for the closest free/unknown 2D cell.
-  Vec3f closest;
-  bool found = hgp_manager_.findClosestNonOccupied2DPoint(goal.pos, closest);
-
-  if (!found || (closest - goal.pos).norm() < 1e-6) {
-    printf("[MIGHTY] sanitizeTerminalGoal2D: goal is occupied (2D map) and no free/unknown "
-           "cell found within search radius; dropping goal.\n");
-    return false;
-  }
-
-  // Direction outward from the occupied goal toward free/unknown space.
-  const Vec3f dir = (closest - goal.pos).normalized();
-
-  // `closest` is the nearest cell that is not occupied in the (inflated) 2D
-  // map, so it already has the inflation_2d_m clearance. goal_relocation_clearance_m
-  // adds standoff beyond that; with 0 the goal lands on `closest`.
-  const double clearance = par_.goal_relocation_clearance_m;
-  Vec3f new_pos = closest + dir * clearance;
-
-  // Safety loop: if pushing by `clearance` still lands somewhere without
-  // `clearance` of real standoff from occupied cells (thin wall, deep
-  // obstacle, concave geometry), keep walking outward by one resolution at a
-  // time until a point that is ACTUALLY clear is found. isClearOfOccupied2D
-  // checks a disk of radius `clearance`, not just the single landing cell --
-  // stopping at the first non-occupied cell (the old behavior) could leave
-  // the goal sitting right on the boundary with zero real margin.
-  const double step = par_.res > 0.0 ? par_.res : 0.1;
-  const int max_iters = std::max(20, static_cast<int>(std::ceil(3.0 * clearance / step)) + 10);
-  int i = 0;
-  for (; i < max_iters && (hgp_manager_.checkIfPointOccupied2D(new_pos) ||
-                          !hgp_manager_.isClearOfOccupied2D(new_pos, clearance));
-       ++i) {
-    new_pos += dir * step;
-  }
-
-  if (hgp_manager_.checkIfPointOccupied2D(new_pos) ||
-      !hgp_manager_.isClearOfOccupied2D(new_pos, clearance)) {
-    printf("[MIGHTY] sanitizeTerminalGoal2D: could not find a point with %.2f m clearance "
-           "(2D map) after %d steps; dropping goal.\n", clearance, max_iters);
-    return false;
-  }
-
-  const Vec3f original = goal.pos;
-  goal.pos = new_pos;
-  printf("[MIGHTY] Goal relocated (2D map) from (%.2f,%.2f,%.2f) to (%.2f,%.2f,%.2f) "
-         "(was in an occupied or inflated cell, extra clearance=%.2f m)\n",
-         original.x(), original.y(), original.z(),
-         new_pos.x(), new_pos.y(), new_pos.z(), clearance);
-  return true;
-}
-
-// ----------------------------------------------------------------------------
-
-/**
  * @brief Sets the terminal goal.
  * @param const state &term_goal: Desired terminal goal state.
  */
@@ -1881,16 +1729,23 @@ void MIGHTY::setTerminalGoal(const state& term_goal) {
   state local_state;
   getState(local_state);
 
-  // Set the terminal goal
-  setGterm(term_goal);
-
-  // Project the terminal goal to the sphere
   {
-    std::lock_guard<std::mutex> lock(mtx_G_);
-    G_.pos = mighty_utils::projectPointToSphere(local_state.pos, term_goal.pos, par_.horizon);
-  }
+    // New goal, new generation, TRAVELING: one step for any status transition
+    // still being computed against the previous goal (changeDroneStatusForGoal).
+    std::lock_guard<std::mutex> lock(mtx_goal_gen_);
 
-  changeDroneStatus(DroneStatus::TRAVELING);
+    // Set the terminal goal
+    setGterm(term_goal);
+    ++goal_gen_;
+
+    // Project the terminal goal to the sphere
+    {
+      std::lock_guard<std::mutex> lock_G(mtx_G_);
+      G_.pos = mighty_utils::projectPointToSphere(local_state.pos, term_goal.pos, par_.horizon);
+    }
+
+    changeDroneStatus(DroneStatus::TRAVELING);
+  }
 
   if (!terminal_goal_initialized_) terminal_goal_initialized_ = true;
 }
@@ -1941,6 +1796,15 @@ void MIGHTY::changeDroneStatus(int new_status) {
   std::cout << std::endl;
 
   drone_status_ = new_status;
+}
+
+// ----------------------------------------------------------------------------
+
+bool MIGHTY::changeDroneStatusForGoal(int new_status, uint64_t goal_gen) {
+  std::lock_guard<std::mutex> lock(mtx_goal_gen_);
+  if (goal_gen != goal_gen_) return false;  // a new goal arrived; drop the stale transition
+  changeDroneStatus(new_status);
+  return true;
 }
 
 // ----------------------------------------------------------------------------

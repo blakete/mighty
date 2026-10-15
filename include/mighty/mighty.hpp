@@ -9,6 +9,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -49,6 +50,10 @@ using AlignedPlaneBlockVec = std::vector<PlaneBlock, Eigen::aligned_allocator<Pl
 using ConstraintBlocks =
     std::vector<AlignedPlaneBlockVec, Eigen::aligned_allocator<AlignedPlaneBlockVec>>;
 
+// Which case a replan() call ended in (global-plan outcome; see goal_selector_msgs/PlannerStatus).
+// FAILED/SKIPPED <=> hgp_result == false. A later local-optimisation failure keeps SUCCESS/PARTIAL.
+enum class ReplanOutcome { SKIPPED, FAILED, SUCCESS, PARTIAL };
+
 enum DroneStatus { YAWING = 0, TRAVELING = 1, GOAL_SEEN = 2, GOAL_REACHED = 3 };
 
 /** @brief Core trajectory planner using Hermite spline-based optimization.
@@ -71,7 +76,7 @@ class MIGHTY {
    *  @return True if replanning is necessary.
    */
   bool needReplan(const state& local_state, const state& local_G_term,
-                  const state& last_plan_state);
+                  const state& last_plan_state, uint64_t goal_gen);
 
   /** @brief Find the planning start state A and its timestamp.
    *  @param A Output start state for the next plan.
@@ -82,20 +87,6 @@ class MIGHTY {
    */
   bool findAandAtime(state& A, double& A_time, double current_time,
                      double last_replaning_computation_time);
-
-  /** @brief Check if a point is in an occupied voxel.
-   *  @param point Query position.
-   *  @return True if occupied.
-   */
-  bool checkIfPointOccupied(const Vec3f& point);
-
-  /** @brief NEW BRANCH of checkIfPointOccupied(): checks the 2D ground-robot
-   *  tri-state map instead of the 3D voxel map -- see
-   *  HGPManager::checkIfPointOccupied2D() for why this exists.
-   *  @param point Query position.
-   *  @return True if the 2D cell is occupied.
-   */
-  bool checkIfPointOccupied2D(const Vec3f& point);
 
   /** @brief Check if a point is in a free voxel.
    *  @param point Query position.
@@ -113,9 +104,12 @@ class MIGHTY {
   /** @brief Execute one full replan cycle (global path + local trajectory).
    *  @param last_replaning_computation_time Computation time of the previous replan.
    *  @param current_time Current wall/sim time.
+   *  @param outcome Optional out-param: which case the replan ended in (SKIPPED, FAILED, SUCCESS
+   *         or PARTIAL). Always written when non-null.
    *  @return Tuple of (replan_success, trajectory_changed).
    */
-  std::tuple<bool, bool> replan(double last_replaning_computation_time, double current_time);
+  std::tuple<bool, bool> replan(double last_replaning_computation_time, double current_time,
+                                ReplanOutcome* outcome = nullptr);
 
   /** @brief Begin adaptive k-value estimation for replanning intervals. */
   void startAdaptKValue();
@@ -212,28 +206,18 @@ class MIGHTY {
    */
   void setTerminalGoal(const state& term_goal);
 
-  /** @brief If the goal lies in an occupied voxel, relocate it to the nearest
-   *         free/unknown cell pushed outward by ||drone_bbox|| along the
-   *         direction from the original (occupied) goal. The z component is
-   *         left to the caller to re-clamp if needed. Goal is mutated in place.
-   *  @param goal Terminal goal state to sanitize (modified in place).
-   *  @return True if goal is safe to use (was already non-occupied or was
-   *          successfully relocated). False if the map is initialized but no
-   *          non-occupied cell could be found within the BFS budget — caller
-   *          should drop the goal in that case.
-   */
-  bool sanitizeTerminalGoal(state& goal);
-
-  /** @brief NEW: 2D-map counterpart of sanitizeTerminalGoal(), used for
-   *  ground-robot 2D deployments -- see the branch at the top of
-   *  sanitizeTerminalGoal() for why. Same contract/return value.
-   */
-  bool sanitizeTerminalGoal2D(state& goal);
-
   /** @brief Change the drone state machine status.
    *  @param new_status One of DroneStatus enum values.
    */
   void changeDroneStatus(int new_status);
+
+  /** @brief changeDroneStatus() for a transition computed against a specific goal
+   *  (needReplan): applied only if that goal is still the current one, i.e. no
+   *  setTerminalGoal() happened since replan() read it.
+   *  @param goal_gen goal_gen_ read together with G_term_ at the start of the tick.
+   *  @return False if the goal changed meanwhile (the transition is dropped).
+   */
+  bool changeDroneStatusForGoal(int new_status, uint64_t goal_gen);
 
   /** @brief Compute the desired yaw for the next goal based on velocity direction.
    *  @param next_goal Goal state whose yaw field is updated.
@@ -566,9 +550,17 @@ class MIGHTY {
   double dyaw_filtered_ = 0.0;                      // Filtered dyaw
   PieceWiseQuinticPol pwp_to_share_;                // Piecewise polynomial to share
 
-  // Drone status
-  int drone_status_ =
-      DroneStatus::GOAL_REACHED;  // status_ can be TRAVELING, GOAL_SEEN, GOAL_REACHED
+  // Drone status. Atomic: written by the goal thread (setTerminalGoal), the replan
+  // thread (needReplan, getDesiredYaw) and read by the goal-reached timer.
+  std::atomic<int> drone_status_{
+      DroneStatus::GOAL_REACHED};  // status_ can be TRAVELING, GOAL_SEEN, GOAL_REACHED
+
+  // Goal generation: bumped by setTerminalGoal() together with G_term_, so a status
+  // transition computed against an older goal can be detected and dropped
+  // (changeDroneStatusForGoal). Guarded by mtx_goal_gen_; lock order is always
+  // mtx_goal_gen_ -> mtx_G_term_.
+  std::mutex mtx_goal_gen_;
+  uint64_t goal_gen_ = 0;
 
   // Corridor-hop turn-in-place override (ground robot only). When true, the
   // YAWING branch in the yaw controller uses G_.yaw (the heading to the next

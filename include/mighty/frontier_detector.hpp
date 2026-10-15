@@ -5,7 +5,9 @@
 //
 //   Pass A — outer BFS over reachable known-free cells from the robot.
 //            Frontier cells are tagged en passant.
-//   Pass B — inner BFS clusters frontier cells via 8-connectivity.
+//   Pass B — inner BFS clusters frontier cells via 8-connectivity. A cluster longer
+//            than max_cluster_extent_m is split into world-anchored square tiles
+//            (one cluster per connected piece of a tile).
 //
 // The two-pass structure visits only the reachable known-free region of the
 // map, so cost is O(reachable cells) per cycle — much cheaper than naive
@@ -17,6 +19,7 @@
 
 #include <Eigen/Core>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "mighty/occ_grid_2d.hpp"
@@ -42,10 +45,23 @@ struct FrontierDetectorParams {
   double bounds_max_x   = 0.0;
   double bounds_min_y   = 0.0;
   double bounds_max_y   = 0.0;
+
+  // Split long clusters. A connected cluster whose axis-aligned extent (cell
+  // centre to cell centre, larger side) exceeds this is cut along world-anchored
+  // square tiles of this side length (tile = floor(x / L), floor(y / L)); each
+  // 8-connected piece of a tile is its own cluster. Pieces smaller than
+  // cluster_min_cells are merged into their largest 8-adjacent piece. Anchoring
+  // the tiles in the world keeps unchanged parts of a growing frontier stable.
+  // <= 0 disables splitting.
+  double max_cluster_extent_m = 0.0;
 };
 
 struct FrontierCluster {
   Eigen::Vector2d centroid;             // world frame
+  // Exploration goal: the member cell nearest the centroid (world frame). Set by
+  // the detector; unset (e.g. hand-made clusters) means "use the centroid".
+  // The centroid of a curved or long cluster can lie far inside known space.
+  std::optional<Eigen::Vector2d> goal;
   std::vector<Eigen::Vector2d> cells;   // world frame, one entry per cell
   int             size_cells = 0;
   double          size_m2    = 0.0;
@@ -64,6 +80,14 @@ class FrontierDetector {
    *                     UNKNOWN neighbors that are already visited do *not*
    *                     count as frontier-generating — they are stale slid-out
    *                     cells, not genuine unexplored area.
+   *  @param passable    Optional row-major mask (same dims as `grid`, 1 = walkable).
+   *                     Flagged cells are traversable by the reachability walk and
+   *                     valid robot-snap targets even when not FREE in `grid` (e.g.
+   *                     known-free cells that a derived grid marks UNKNOWN only
+   *                     because they lie in an unknown-inflation band). They are
+   *                     never frontier cells; frontier cells stay FREE cells with
+   *                     an UNKNOWN 8-neighbor. nullptr: walk FREE cells only. A
+   *                     size mismatch is ignored (treated as nullptr).
    *  @return Vector of frontier clusters in world frame, sorted by descending
    *          size_cells. Empty if the robot pose can't be snapped to a free
    *          cell or no frontiers exist.
@@ -71,7 +95,8 @@ class FrontierDetector {
   std::vector<FrontierCluster> detect(
       const OccGrid2D& grid,
       const Eigen::Vector2d& robot_xy,
-      const VisitedMap* visited_map = nullptr) const;
+      const VisitedMap* visited_map = nullptr,
+      const std::vector<uint8_t>* passable = nullptr) const;
 
   const FrontierDetectorParams& params() const { return params_; }
 

@@ -1,0 +1,203 @@
+# external_nodes.yaml -- the ONLY hand-maintained input of scripts/gen_architecture_diagram.py.
+#
+# Describes everything that talks to the goal_selector / planner but whose code cannot be
+# parsed from this package: the mapper, localization (DLIO), RViz, peer robots, MPC, the
+# base-drive consumer. Nodes that DO live in this package (mighty_node, goal_selector,
+# convert_odom_to_state) are parsed from the C++ sources and are NOT listed here.
+#
+# After editing, regenerate and commit:   python3 scripts/gen_architecture_diagram.py
+#
+# ACCEPTED YAML SUBSET (the script has its own tiny parser; PyYAML is not stdlib):
+#   * 2-space-indented block mappings        key: value
+#   * block lists, items are scalars or mappings
+#         - topic: foo          (the "- " opens a mapping whose further keys are indented by 2)
+#           type: a/B
+#   * inline lists of scalars                [a, b, c]
+#   * scalars: plain, "double quoted" or 'single quoted'; true/false; integers; floats
+#   * full-line comments and trailing "  # comment" (a "#" inside quotes is not a comment)
+#   * a trailing comment containing the word "unverified" marks the enclosing mapping (the
+#     list item or the node) as UNVERIFIED; the generated table/diagram then says so.
+#   * NOT supported: anchors, multi-line scalars, flow mappings {a: b}, tags, documents.
+#
+# Node keys:
+#   name         unique id used in the diagram
+#   label        human readable title
+#   group        external group (a diagram subgraph) the node is drawn in
+#   launch_name  (optional) name= of a Node() in launch/onboard_mighty.launch.py; links the
+#                node to the launch file so its parameter files and remaps are parsed from there
+#   ros_name     (optional) node name used by --runtime ("ros2 node info /<ns>/<ros_name>")
+#   displays_unconsumed_viz  (optional, bool) this node displays the planner's visualization
+#                topics that nothing else subscribes to (RViz)
+#   publishes / subscribes   lists of {topic, type, qos, note}
+#       topic  name as the node uses it: relative (resolves under the robot namespace) or
+#              absolute (/...). Same spelling convention as in the C++ sources.
+#       type   pkg/Type (the "msg" part is optional)
+#       qos    free text; the words reliable/best_effort/volatile/transient_local are used by
+#              the QoS compatibility check
+#
+# QoS or type that could not be seen in this workspace is left out rather than guessed.
+
+nodes:
+
+  # ---------------------------------------------------------------------------------------
+  - name: mapper
+    label: "elevation_mapping_cupy (OX08 Orin)"
+    group: "Mapper host (OX08 Orin)"
+    ros_name: elevation_mapping_cupy   # (name guessed, only used by --runtime)
+    publishes:
+      # Evidence: docker/README.hw.md:32, docker/mighty_hw.sh:40 (occ_2d_topic, esdf_2d_topic);
+      # scripts/hw_bag_record.py:45-48; docker/dev/replay/pass1_rover.sh:32 (planning_occ_2d_topic).
+      - topic: occ_2d_topic
+        type: nav_msgs/OccupancyGrid
+        qos: "best_effort, volatile"      # from the comments at goal_selector_node.cpp:71 and mighty_node.cpp:288
+        note: "raw tri-state 2D grid; consumed by planner and selector since Phase 5"
+      - topic: esdf_2d_topic
+        type: nav_msgs/OccupancyGrid
+        qos: "best_effort, volatile"      # same comments
+        note: "encoded 2D ESDF; consumed by the planner when use_esdf_cost"
+      - topic: planning_occ_2d_topic
+        type: nav_msgs/OccupancyGrid
+        qos: "best_effort, volatile"      # unverified
+        note: "PUBLISHED BUT UNUSED: nothing subscribes since Phase 5 (recorded by pass1_rover.sh only); producer is not in this workspace"
+    subscribes:
+      - topic: livox/lidar
+        type: sensor_msgs/PointCloud2     # unverified (could be livox_ros_driver2/CustomMsg)
+        note: "mapper input; sensors.service publishes it (docker/mighty_hw.sh:37); the mapper's own code is not in this workspace"   # unverified
+      - topic: dlio/odom_node/pose
+        type: geometry_msgs/PoseStamped   # unverified
+        note: "mapper pose input"          # unverified
+
+  # ---------------------------------------------------------------------------------------
+  - name: dlio
+    label: "DLIO odometry (dlio.service)"
+    group: "Rover services (drive / sensors / dlio)"
+    ros_name: dlio/odom_node   # (name guessed, only used by --runtime)
+    publishes:
+      # Evidence: docker/README.hw.md:30; launch/onboard_mighty.launch.py hw_odom_to_state_node remap;
+      # ../mpc/config/mpc.yaml:9 (pose input dlio/odom_node/pose).
+      - topic: dlio/odom_node/odom
+        type: nav_msgs/Odometry
+      - topic: dlio/odom_node/pose
+        type: geometry_msgs/PoseStamped
+      - topic: /tf
+        type: tf2_msgs/TFMessage
+        note: "tf map->odom (docker/README.hw.md:30)"
+      - topic: /tf_static
+        type: tf2_msgs/TFMessage
+        note: "base_link->lidar static TF is published by sensors.service (docker/mighty_hw.sh:37)"   # unverified
+
+  # ---------------------------------------------------------------------------------------
+  - name: mpc
+    label: "MPC controller (../mpc, mpc_node.py)"
+    group: "MPC"
+    launch_name: mpc
+    ros_name: mpc
+    subscribes:
+      # Evidence: ../mpc/mpc/mpc_node.py:229-232, ../mpc/config/mpc.yaml:9-11.
+      - topic: mpc_waypoints
+        type: dynus_interfaces/SpeedyPath
+        qos: "reliable, volatile, keep_last 10"
+        note: "mpc_node.py:231 (path_topic parameter)"
+      - topic: dlio/odom_node/pose
+        type: geometry_msgs/PoseStamped
+        qos: "reliable, volatile, keep_last 10"
+        note: "hardware pose_topic from mpc.yaml:9; the launch file overrides it to 'world' when use_onboard_localization is false; sim uses use_tf_pose (TF) instead"
+    publishes:
+      - topic: cmd_vel_auto
+        type: geometry_msgs/Twist
+        qos: "reliable, volatile, keep_last 10"
+        note: "hardware cmd_vel_topic (mpc.yaml:11); 'cmd_vel' in sim"
+
+  # ---------------------------------------------------------------------------------------
+  - name: drive
+    label: "Rover drive (drive.service)"
+    group: "Rover services (drive / sensors / dlio)"
+    subscribes:
+      - topic: cmd_vel_auto
+        type: geometry_msgs/Twist
+        note: "the drive/mux code is not in this workspace; docker/README.hw.md:77 only says MPC publishes cmd_vel_auto"   # unverified
+
+  # ---------------------------------------------------------------------------------------
+  - name: rviz
+    label: "RViz (operator laptop)"
+    group: "Operator"
+    displays_unconsumed_viz: true   # the planner viz markers/clouds are displayed from rviz/mighty_RR04.rviz (hgp_path_marker, traj_*, point_*, ...)
+    publishes:
+      # Evidence: rviz/mighty_RR04.rviz:913 (SetGoal tool topic), same in RR05/RR06 per spec section 7.
+      - topic: term_goal_rviz
+        type: geometry_msgs/PoseStamped
+        qos: "reliable, volatile, keep_last 5"
+        note: "2D Goal Pose tool, RR04/RR05/RR06 configs (rviz/mighty_RR04.rviz:907-913). UAV (mighty_PX03.rviz) and sim configs publish to term_goal directly (spec section 13)"
+    subscribes:
+      # Subscription QoS is the 'Topic' block of each Display in rviz/mighty_RR04.rviz.
+      - topic: exploration/frontiers
+        type: visualization_msgs/MarkerArray
+        qos: "reliable, volatile, keep_last 5"
+        note: "rviz/mighty_RR04.rviz:763"
+      - topic: exploration/current_goal
+        type: geometry_msgs/PoseStamped
+        qos: "reliable, volatile, keep_last 5"
+        note: "rviz/mighty_RR04.rviz:783 (display disabled in the shipped config)"
+      - topic: exploration/visited_map
+        type: nav_msgs/OccupancyGrid
+        qos: "reliable, transient_local, keep_last 1"
+        note: "rviz/mighty_RR04.rviz:634"
+      - topic: occ_2d_topic
+        type: nav_msgs/OccupancyGrid
+        qos: "reliable, volatile, keep_last 5"
+        note: "rviz/mighty_RR04.rviz:655, Map display 'RR04 2D Occ from ACL Mapper'"
+      - topic: esdf_2d_topic
+        type: nav_msgs/OccupancyGrid
+        qos: "reliable, volatile, keep_last 5"
+        note: "rviz/mighty_RR04.rviz:744, Map display 'RR04 2D ESDF'"
+
+  # ---------------------------------------------------------------------------------------
+  - name: peers
+    label: "Peer robots (other goal_selector instances)"
+    group: "Peers / operator"
+    # The selector subscribes and publishes the same global topics; every other robot runs the
+    # same code, so these mirror goal_selector_node.cpp:112-139 (exploration.use_minpos only).
+    publishes:
+      - topic: /exploration/peer_poses
+        type: geometry_msgs/PoseStamped
+        qos: "reliable, volatile, keep_last 10"
+      - topic: /exploration/visited_maps
+        type: nav_msgs/OccupancyGrid
+        qos: "reliable, volatile, keep_last 1"
+    subscribes:
+      - topic: /exploration/peer_poses
+        type: geometry_msgs/PoseStamped
+        qos: "reliable, volatile, keep_last 10"
+      - topic: /exploration/visited_maps
+        type: nav_msgs/OccupancyGrid
+        qos: "reliable, volatile, keep_last 1"
+
+  # ---------------------------------------------------------------------------------------
+  - name: operator
+    label: "Operator (ros2 topic pub)"
+    group: "Peers / operator"
+    publishes:
+      - topic: /exploration/return_home
+        type: std_msgs/Empty
+        qos: "reliable, volatile, keep_last 1"
+        note: "one-shot trigger; no publisher exists in this repo (grep), so it is published by hand"   # unverified
+
+  # ---------------------------------------------------------------------------------------
+  - name: sensors
+    label: "Lidar driver (sensors.service)"
+    group: "Rover services (drive / sensors / dlio)"
+    publishes:
+      - topic: livox/lidar
+        type: sensor_msgs/PointCloud2
+        note: "driver code not in this workspace; docker/mighty_hw.sh:37 and the launch remap lidar_cloud_in -> livox/lidar name the topic"   # unverified
+
+  # ---------------------------------------------------------------------------------------
+  - name: peer_planners
+    label: "Peer robots (other mighty_node instances)"
+    group: "Peers / operator"
+    # Every robot runs the same planner: it publishes its own trajectory on the global /trajs and
+    # subscribes to everyone else's (mighty_node.cpp:174, :186).
+    publishes:
+      - topic: /trajs
+        type: dynus_interfaces/DynTraj
+        qos: "reliable, volatile, keep_last 10"

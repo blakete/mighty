@@ -1,0 +1,450 @@
+/**
+ * @file goal_selector.hpp
+ * @brief ROS-free core of the goal selector (frontier exploration, manual override, return-home,
+ *        planner-status feedback).
+ *
+ * GoalSelector contains no rclcpp, no clock, no publishers and no threads. Everything it needs is
+ * passed in as arguments and everything it wants done is returned as values:
+ *
+ *   - Time is an explicit `double now` (seconds) on every call. The selector never reads a clock.
+ *   - Robot pose, grids, planner statuses, manual goals and peer data are passed to the on*()
+ *     methods.
+ *   - Each on*() method returns an Output: "publish this goal with this stamp", "publish markers",
+ *     "publish / broadcast the visited map", "broadcast my pose", plus log lines. The caller (the
+ *     GoalSelectorNode, or a test) performs the side effects.
+ *
+ * The class is not thread safe. The ROS node calls it from one mutually exclusive callback group.
+ * (PeerTracker has its own mutex, but VisitedMap and FrontierManager do not.)
+ *
+ * Reused as-is: FrontierDetector, FrontierManager, VisitedMap, PeerTracker, OccGrid2D (these pull in
+ * nav_msgs message headers through OccGrid2D, but no rclcpp), and the map2d library.
+ *
+ * ---------------------------------------------------------------------------------------------
+ * Commitments and stamps (spec 4.3)
+ *   A "commitment" is one frontier, one manual goal or one return-home goal. The selector stamps it
+ *   when it commits: stamp_ns = round(now * 1e9), forced to be strictly greater than the previous
+ *   commitment's stamp (and never 0), even if `now` does not advance. Goals are published exactly as given
+ *   (no relocation): the planner plans through unknown space, and an occupied goal gives FAILED.
+ *
+ * Planner status feedback (spec 3, decision D8)
+ *   Statuses whose goal_stamp is 0 or differs from the current commitment's stamp are ignored.
+ *   FAILED increments the unreachable counter; SKIPPED is neutral; SUCCESS/PARTIAL reset it;
+ *   REACHED completes the commitment.
+ *
+ * Manual override (spec 4.2, N4)
+ *   onManualGoal() commits immediately. While a manual goal is active no frontier is selected,
+ *   preempted or released by the watchdog / pursuit timeout. REACHED for its stamp releases it.
+ *   FAILED statuses reaching the threshold only log a warning and raise manualGoalUnreachable();
+ *   the goal is never released or resent for that. A manual goal has two release checks (both in
+ *   onState(), so they work with exploration off): a start timeout, timed from the commit pose, if
+ *   the robot has not moved more than stuck_move_thresh_m within manual_goal.start_timeout_sec
+ *   (<= 0 disables); and, once it has moved, the frontier stuck watchdog (stuck_timeout_sec /
+ *   stuck_move_thresh_m, unchanged). Either releases the goal; exploration resumes if enabled.
+ *
+ * Frontier map (New Plan N1/N5)
+ *   Detection and every FrontierManager call run on a derived grid built from the detect grid
+ *   (visited-fused grid or raw occ_2d window): cells within inflation_2d_m of an OCCUPIED cell
+ *   become occupied; the remaining non-occupied cells within unknown_inflation_2d_m of an UNKNOWN
+ *   cell that it can see (computed on the detect grid's raw values; walls stop the band, see
+ *   map2d::inflateUnknown) become UNKNOWN. A frontier is therefore a reachable free cell outside
+ *   both bands that is adjacent to the unknown band, and the manager's VISITED verification tests
+ *   the unknown band rather than raw unknown.
+ *
+ * Frontier goals
+ *   The published goal of a frontier is one of its cells (the one nearest the cluster centroid),
+ *   not the centroid itself. Clusters longer than expl_max_cluster_extent_m are split into
+ *   world-anchored tiles, one frontier each. A record is retired (VISITED) once none of its cells
+ *   borders unknown any more.
+ */
+#pragma once
+
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include <Eigen/Core>
+
+#include "goal_selector/goal_fence.hpp"
+#include "map2d/map2d.hpp"
+#include "mighty/frontier_detector.hpp"
+#include "mighty/frontier_manager.hpp"
+#include "mighty/occ_grid_2d.hpp"
+#include "mighty/peer_tracker.hpp"
+#include "mighty/visited_map.hpp"
+
+namespace goal_selector {
+
+// ----------------------------------------------------------------------------
+// Parameters
+// ----------------------------------------------------------------------------
+
+/** @brief Everything the selector reads. Names and defaults follow the planner's parameters
+ *  (`expl_*` = the planner's `exploration.*`; the rest are shared with the planner's YAML). */
+struct SelectorParams {
+  // --- identity / frames ---
+  std::string robot_id;        ///< robot namespace tail (e.g. "RR04"); used on the peer topics
+  std::string map_frame_id{"map"};
+
+  // --- exploration (moved from the planner's expl_* fields; min_obstacle_distance_m dropped, D3) ---
+  bool   expl_enabled{false};
+  double expl_select_rate_hz{1.0};
+  double expl_default_goal_z{0.0};
+  // Detector
+  int    expl_cluster_min_cells{6};
+  int    expl_border_margin_cells{2};
+  int    expl_obstacle_clearance_cells{1};
+  double expl_robot_snap_radius_m{1.0};
+  double expl_max_cluster_extent_m{0.0};  ///< [m] split longer clusters into tiles; <= 0 = no split
+  bool   expl_bounds_enabled{false};
+  double expl_bounds_min_x{-50.0};
+  double expl_bounds_max_x{50.0};
+  double expl_bounds_min_y{-50.0};
+  double expl_bounds_max_y{50.0};
+  // Utility weights
+  double expl_w_size{1.0};
+  double expl_w_dist{2.0};
+  double expl_w_info{1.0};
+  double expl_w_revisit{0.5};
+  double expl_w_heading{0.3};
+  double expl_size_ref_m2{5.0};
+  double expl_dist_ref_m{25.0};
+  double expl_sensor_radius_m{5.0};
+  double expl_goal_select_threshold{-1.0e9};
+  // Manager / lifecycle
+  double expl_merge_radius_m{1.0};
+  double expl_centroid_ema_alpha{0.5};
+  double expl_visit_radius_m{2.0};
+  double expl_visit_dwell_sec{1.0};
+  int    expl_verify_radius_cells{2};
+  int    expl_max_frontiers{1000};
+  int    expl_unreachable_consec_thresh{5};
+  double expl_pursuit_timeout_factor{10.0};
+  double expl_pursuit_timeout_v_ref{0.5};
+  double expl_pursuit_timeout_min_sec{10.0};
+  double expl_invalidation_keep_out_radius_m{1.5};
+  double expl_invalidation_cooldown_sec{30.0};
+  // Geofence goal filter (exploration.geofence.*, onGoalFence): while the latest goal_fence is
+  // active and ready, a frontier that is not a valid goal (goalFenceAllows: inside keep_in, outside
+  // every keep_out, >= offset_m + expl_geofence_margin_m from every edge = the gate's core) is
+  // INVALIDATED; while active and not ready, no new goals are committed (pause). A fresh goal_fence
+  // that is not active (shadow / goal_fence off) -> no filtering.
+  // No goal_fence fresher than expl_geofence_max_age_sec: the drive gate's echo (onGateEcho) says
+  // whether the geofence is expected. Once a goal_fence has been heard, a fresh echo with engaged ->
+  // pause (geofence restarting; the gate holds the robot meanwhile), otherwise no filtering. Before
+  // the first goal_fence, pause for up to expl_geofence_startup_wait_sec from the first select tick
+  // unless a fresh echo says not engaged; then no filtering (geofence off, or an older image without
+  // goal_fence).
+  bool   expl_geofence_enabled{true};
+  double expl_geofence_margin_m{0.0};      ///< [m] extra beyond the fence's offset_m (which has the footprint)
+  double expl_geofence_max_age_sec{2.0};
+  double expl_geofence_gate_max_age_sec{2.0};  ///< [s] gate echo older than this is ignored
+  double expl_geofence_startup_wait_sec{0.0};  ///< [s] 0 = none (unit tests); the node defaults to 10
+  // Preemption
+  bool   expl_preempt_enabled{false};
+  double expl_preempt_margin{2.0};
+  double expl_preempt_min_commit_sec{2.0};
+  // Stuck watchdog
+  double expl_stuck_timeout_sec{5.0};
+  double expl_stuck_move_thresh_m{0.15};
+  // Manual goal: release if the robot has not started moving within this long of the commit
+  double manual_start_timeout_sec{15.0};
+  // Automatic return home when no frontier is left (exploration.return_home.enabled). false: the
+  // selector goes idle where it is instead. The /exploration/return_home trigger still works.
+  bool expl_return_home_enabled{true};
+  // Persistent visited map
+  double expl_visited_map_center_x{0.0};
+  double expl_visited_map_center_y{0.0};
+  double expl_visited_map_width_m{100.0};
+  double expl_visited_map_height_m{100.0};
+  double expl_visited_map_resolution_m{0.15};
+  bool   expl_publish_visited_map{true};
+  bool   expl_fuse_persistent_into_local{true};
+  bool   expl_detect_on_visited_map{true};
+  // Persistent-map detection source (the mapper's growing accumulated grid). When enabled, frontier
+  // detection runs on each persistent grid (onPersistentGrid) instead of on the VisitedMap /
+  // sliding occ_2d, and the VisitedMap is neither fused, absorbed nor published.
+  bool   expl_persistent_map_enabled{false};
+  bool   expl_persistent_detect_whole_map{false};  ///< true: detect over the whole grid; false: radius
+  double expl_persistent_detect_radius_m{30.0};    ///< [m] half-side of the square window around the robot
+  // MinPos
+  bool   expl_use_minpos{false};
+  double expl_peer_timeout_sec{5.0};
+  double expl_peer_publish_rate_hz{5.0};
+  double expl_min_frontier_dist_to_peers_m{0.0};
+  double expl_peer_visit_radius_m{2.0};
+  // Visualization
+  bool   expl_publish_markers{true};
+
+  // --- shared with the planner's YAML ---
+  double goal_radius{0.5};                   ///< return-home re-arm distance
+  double inflation_2d_m{0.0};                ///< occupied inflation of the frontier map
+  double unknown_inflation_2d_m{0.5};        ///< unknown-band width of the frontier map
+};
+
+// ----------------------------------------------------------------------------
+// Inputs
+// ----------------------------------------------------------------------------
+
+/** @brief Robot pose from `state` (D11). */
+struct Pose {
+  double x{0.0}, y{0.0}, z{0.0}, yaw{0.0};
+};
+
+/** @brief Plain copy of a nav_msgs/OccupancyGrid (values -1 unknown, 0 free, >=100 occupied). */
+struct GridInput {
+  int width{0};
+  int height{0};
+  double resolution{0.0};  ///< pass the message's float resolution converted to double
+  double origin_x{0.0};
+  double origin_y{0.0};
+  double origin_z{0.0};
+  std::vector<int8_t> data;  ///< row-major, index = x + width * y
+};
+
+/** @brief 2D rigid transform taking a point in map_frame_id into another frame:
+ *  p_out = R(yaw) * p + (x, y). */
+struct Transform2D {
+  double x{0.0}, y{0.0}, yaw{0.0};
+};
+
+/** @brief Mirrors goal_selector_msgs/PlannerStatus constants. */
+enum class PlannerStatus : uint8_t { kSuccess = 0, kFailed = 1, kPartial = 2, kReached = 3, kSkipped = 4 };
+
+// ----------------------------------------------------------------------------
+// Outputs
+// ----------------------------------------------------------------------------
+
+enum class GoalKind { kNone, kFrontier, kManual, kReturnHome };
+
+/** @brief "Publish this goal on term_goal" (header.stamp = stamp_ns; frame = map_frame_id). */
+struct GoalCommand {
+  Eigen::Vector3d position{Eigen::Vector3d::Zero()};
+  int64_t stamp_ns{0};
+  GoalKind kind{GoalKind::kNone};
+};
+
+struct LogMessage {
+  enum class Level { kInfo, kWarn, kError };
+  Level level{Level::kInfo};
+  std::string text;
+};
+
+/** @brief The selector's inflated map for visualisation (selector_map_2d), in the planner's
+ *  planning_map_2d encoding: 0 free, 100 obstacle, 99 occupied band (inflation_2d_m), 50 unknown
+ *  band (unknown_inflation_2d_m), -1 real unknown. Row-major, index = x + width * y. */
+struct SelectorMap {
+  int width{0};
+  int height{0};
+  double resolution{0.0};
+  double origin_x{0.0};
+  double origin_y{0.0};
+  double origin_z{0.0};
+  std::vector<int8_t> data;
+};
+
+struct Output {
+  std::optional<GoalCommand> term_goal;               ///< publish on term_goal
+  std::optional<Eigen::Vector3d> exploration_current_goal;  ///< publish on exploration/current_goal
+  bool publish_markers{false};          ///< publish exploration/frontiers (see accessors below)
+  bool publish_visited_map{false};      ///< publish exploration/visited_map (visitedMap(), occ2dOriginZ())
+  bool broadcast_visited_map{false};    ///< broadcast visitedMap() on /exploration/visited_maps
+  std::optional<Eigen::Vector3d> peer_pose;  ///< broadcast own position on /exploration/peer_poses
+  std::vector<LogMessage> logs;
+
+};
+
+// ----------------------------------------------------------------------------
+// GoalSelector
+// ----------------------------------------------------------------------------
+
+class GoalSelector {
+ public:
+  explicit GoalSelector(const SelectorParams& params);
+
+  // ---- inputs -----------------------------------------------------------------------------
+
+  /** @brief New robot pose (`state`). Returns the throttled peer-pose broadcast, if due, and runs
+   *  the manual-goal stuck watchdog (which may release the goal and resume exploration).
+   *  The first call marks the state as initialised (selection and detection wait for it). */
+  Output onState(double now, const Pose& pose);
+
+  /** @brief Raw occ_2d_topic grid: visited-map fusion/absorb, frontier detection, manager update,
+   *  throttled visited-map publish / broadcast, markers, 
+   *  (as occ2DCallback did) EXCEPT the selection pass: call onSelectTick() right after, so markers
+   *  are published before selection as in the planner. The grid is taken by value (fusion edits it).
+   *  With exploration off it only stores the grid (for selectorMap()) and returns an empty Output. */
+  Output onOccGrid(double now, GridInput grid);
+
+  /** @brief Persistent (accumulated, growing) grid. Only used with expl_persistent_map_enabled: runs
+   *  frontier detection and the manager update on it (whole grid, or the square window of half-side
+   *  expl_persistent_detect_radius_m around the robot), then the same flags as onOccGrid. Call
+   *  onSelectTick() right after. Ignored if the option is off, exploration is off or no state yet. */
+  Output onPersistentGrid(double now, GridInput grid);
+
+  /** @brief Exploration select tick (exploreSelectCallback), called at expl_select_rate_hz. */
+  Output onSelectTick(double now);
+
+  /** @brief Latest geofence goal geometry (/<R>/geofence/goal_fence, in the robot's odom frame) and
+   *  the transform taking map_frame_id points into its frame (map -> fence, from TF). Applied at the
+   *  next detection pass and select tick; see the expl_geofence_* params and fenceGate(). */
+  void onGoalFence(double now, GoalFence fence, const Transform2D& map_to_fence);
+
+  /** @brief Latest drive gate echo (/<R>/safety_node/geofence_gate, 2 Hz from the drive): engaged =
+   *  the geofence is required for AUTO. Tells a restarting geofence (pause) from an off one. */
+  void onGateEcho(double now, bool engaged);
+
+  /** @brief kOpen: no filtering. kFilter: drop frontiers that are not valid goals. kPause: no new
+   *  commits (fence active but not ready, or expected but silent). See the expl_geofence_* params.
+   *  why (optional) gets a short reason for the log. */
+  enum class FenceGate { kOpen, kFilter, kPause };
+  FenceGate fenceGate(double now, const char** why = nullptr) const;
+
+  /** @brief One planner_status message. goal_stamp_ns is the message's goal_stamp in nanoseconds. */
+  Output onPlannerStatus(double now, PlannerStatus status, int64_t goal_stamp_ns);
+
+  /** @brief Manual goal from term_goal_rviz. Committed immediately (as given); overrides
+   *  exploration until REACHED for its stamp or the stuck watchdog releases it. */
+  Output onManualGoal(double now, double x, double y, double z);
+
+  /** @brief /exploration/return_home trigger. */
+  Output onReturnHome(double now);
+
+  /** @brief Peer pose (`/exploration/peer_poses`). `peer_id` is the message's frame_id, `t` the
+   *  message stamp in seconds. Own messages (peer_id == robot_id) are ignored. */
+  void onPeerPose(const std::string& peer_id, double x, double y, double t);
+
+  /** @brief Peer visited map (`/exploration/visited_maps`). `sender_id` is the message's frame_id.
+   *  Own messages are ignored. Merged into unknown cells of the local visited map only. */
+  void onPeerVisitedMap(const std::string& sender_id, const GridInput& grid);
+
+  // ---- state accessors (for visualisation and tests) --------------------------------------
+
+  bool stateInitialized() const { return state_initialized_; }
+  const SelectorParams& params() const { return params_; }
+
+  bool explorationActive() const { return exploration_active_; }
+  bool manualGoalActive() const { return manual_goal_active_; }
+  bool homeReturnRequested() const { return home_return_requested_; }
+  uint64_t currentExploreId() const { return current_explore_id_; }
+  int unreachableCount() const { return unreachable_consec_count_; }
+  /** @brief True once FAILED statuses for the active manual goal reached the threshold (warning only). */
+  bool manualGoalUnreachable() const { return manual_unreachable_; }
+
+  GoalKind currentKind() const { return current_.kind; }
+  int64_t currentStampNs() const { return current_.stamp_ns; }
+  /** @brief The target published for the current commitment. */
+  const Eigen::Vector3d& currentTarget() const { return current_.target; }
+
+  const FrontierManager& frontierManager() const { return *frontier_manager_; }
+  FrontierManager& frontierManager() { return *frontier_manager_; }
+  const VisitedMap& visitedMap() const { return *visited_map_; }
+  const Eigen::Vector3d& explorationStartPos() const { return exploration_start_pos_; }
+  Pose pose() const { return pose_; }
+  /** @brief origin.z of the latest raw occ_2d grid (visited-map plane), or expl_default_goal_z. */
+  double occ2dOriginZ() const { return occ2d_origin_z_.value_or(params_.expl_default_goal_z); }
+  /** @brief Fill `m` with the derived (inflated) grid the selector uses for frontiers: the latest
+   *  frontier grid when exploring, else the same grid built from the latest raw occ_2d grid.
+   *  Computed on call (the node throttles it). False if no grid has been received. */
+  bool selectorMap(SelectorMap& m) const;
+  /** @brief True if a raw occ_2d grid has been received. */
+  bool hasOccGrid() const { return occ_grid_2d_ != nullptr; }
+
+ private:
+  struct Commitment {
+    GoalKind kind{GoalKind::kNone};
+    int64_t stamp_ns{0};
+    Eigen::Vector3d target{Eigen::Vector3d::Zero()};  // as published
+  };
+
+  int64_t nextStampNs(double now);
+  void log(Output& out, LogMessage::Level level, std::string text) const;
+
+  // commit a goal: new stamp, fill out.term_goal
+  void commit(GoalKind kind, const Eigen::Vector3d& target, double now, Output& out);
+
+  // frontier map (N1/N5): inflate occupied, mark the unknown band UNKNOWN. `passable` is filled
+  // with the unknown-band cells (known free, outside the occupied band, not real unknown): the
+  // detector walks through them for reachability but they are never frontier cells.
+  // `inflated_only` is filled with the occupied-band cells (occupied only through inflation); with
+  // `passable` it carries the band information the collapsed grid loses (selectorMap()).
+  std::shared_ptr<const OccGrid2D> buildFrontierGrid(const OccGrid2D& detect_grid,
+                                                     std::vector<uint8_t>& passable,
+                                                     std::vector<uint8_t>& inflated_only) const;
+
+  // stuck watchdog shared by frontier and manual pursuit: tracks progress, true once when it fires
+  bool stuckWatchdogFired(double now);
+  void armStuckWatchdog(double now);
+  // manual goals only: true once if the robot never started moving within the start timeout
+  bool manualStartTimeoutFired(double now);
+
+  // moved exploration logic
+  void selectAndCommit(double now, Output& out);          // exploreSelectCallback
+  void maybePublishVisitedMap(double now, Output& out);
+  // Shared tail of onOccGrid / onPersistentGrid: frontier grid, detection, manager update, diag log,
+  // marker flag. `diag_src` is the grid whose cell counts are logged.
+  void detectAndUpdate(double now, const std::shared_ptr<const OccGrid2D>& detect_src,
+                       const OccGrid2D& diag_src, Output& out);
+
+  SelectorParams params_;
+
+  std::unique_ptr<FrontierDetector> frontier_detector_;
+  std::unique_ptr<FrontierManager> frontier_manager_;
+  std::unique_ptr<VisitedMap> visited_map_;
+  PeerTracker peer_tracker_;
+
+  std::shared_ptr<const OccGrid2D> occ_grid_2d_;
+  // Latest geofence goal geometry (onGoalFence), its map -> fence transform and arrival time.
+  std::optional<GoalFence> goal_fence_;
+  Transform2D map_to_fence_;
+  double fence_t_{-1.0};
+  bool gate_engaged_{false};        // latest drive gate echo (onGateEcho) and its arrival time
+  double gate_t_{-1.0};
+  double select_start_t_{-1.0};     // first select tick (start of expl_geofence_startup_wait_sec)
+  FenceGate last_fence_gate_{FenceGate::kOpen};
+  std::string last_fence_why_;
+  double last_fence_pause_log_t_{-1.0e18};
+  double fence_pause_tick_t_{-1.0};  // last select tick spent in kPause (-1: not paused)
+  bool fenceAllowsMap(double x, double y) const;   // goalFenceAllows on a map_frame_id point
+  void noteFenceGate(double now, FenceGate gate, const char* why, Output& out);
+  void holdPursuitClocks(double now);  // kPause: stuck / pursuit-timeout clocks do not run
+  void invalidateNogoFrontiers(double now, Output& out);
+  std::shared_ptr<const OccGrid2D> frontier_grid_;  // derived from the detect grid (N1/N5)
+  std::vector<uint8_t> frontier_passable_;          // walkable-but-UNKNOWN mask for frontier_grid_
+  std::vector<uint8_t> frontier_inflated_only_;     // occupied-band mask for frontier_grid_
+  std::optional<double> occ2d_origin_z_;
+
+  Pose pose_;
+  bool state_initialized_{false};
+
+  Commitment current_;
+  int64_t last_stamp_ns_{0};
+
+  bool exploration_active_{false};
+  // Set when a frontier pursuit ended in REACHED: lets the next select tick return home if no
+  // frontier remains (exploration_active_ is cleared by REACHED).
+  bool frontier_reached_pending_{false};
+  bool manual_goal_active_{false};
+  bool home_return_requested_{false};
+  bool manual_unreachable_{false};
+  uint64_t current_explore_id_{0};
+  int unreachable_consec_count_{0};
+  double explore_committed_at_t_{-1.0};
+  // Stuck watchdog state (frontier or manual pursuit; the two are mutually exclusive). For a manual
+  // goal, explore_has_moved_ == false means the start-timeout check is still pending.
+  Eigen::Vector2d explore_last_progress_xy_{Eigen::Vector2d::Zero()};
+  double explore_last_progress_t_{-1.0};
+  bool explore_has_moved_{false};
+  Eigen::Vector3d exploration_start_pos_{0.0, 0.0, 0.0};
+  bool exploration_start_captured_{false};
+
+  double last_peer_pose_publish_t_{0.0};
+  double last_visited_publish_t_{0.0};
+  double last_peer_visited_publish_t_{0.0};
+  double last_diag_log_t_{-1.0e18};
+  double last_defer_log_t_{-1.0e18};
+
+};
+
+}  // namespace goal_selector

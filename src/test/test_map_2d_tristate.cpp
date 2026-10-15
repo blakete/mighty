@@ -182,7 +182,7 @@ TEST(Map2DInflation, GoalBoxKeepsInflation) {
   EXPECT_FALSE(mu->is2DOccupied(47, 45)) << "default free2DCell still clears everything";
 }
 
-// Goal queries at WORLD points (sanitizeTerminalGoal2D). The planner window is
+// Goal queries at WORLD points (VoxelMapUtil goal checks). The planner window is
 // robot-centred, not the world: a goal beyond it is unobserved and must not read
 // as occupied, or a far goal gets "relocated" to the window edge or dropped.
 namespace {

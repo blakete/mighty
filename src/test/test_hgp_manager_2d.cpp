@@ -1,8 +1,6 @@
-// HGPManager's 2D goal helpers (used by sanitizeTerminalGoal2D) and the
-// mapper-grid handoff. The goal helpers run on the goal-callback and replan
-// threads while the map thread rebuilds the 2D map, and setOccGrid2D() /
-// setEsdfGrid() are called from both the map and the replan thread, so the
-// concurrency test below is the harness to run under ThreadSanitizer.
+// HGPManager's mapper-grid handoff: setOccGrid2D() / setEsdfGrid() are called
+// from both the map and the replan thread while updateMap() rebuilds the 2D map,
+// so the concurrency test below is the harness to run under ThreadSanitizer.
 //
 // The window is 100 x 100 cells at 0.1 m (as in test_map_2d_tristate.cpp) and
 // mapper grids are built on lattices tied to its origin.
@@ -82,18 +80,6 @@ struct Ground2D {
 
 }  // namespace
 
-TEST(HGPManager2D, OutOfWindowGoalIsNotOccupied) {
-  Ground2D g;
-  g.Build({{45, 45}});
-  ASSERT_TRUE(g.mgr.isMapInitialized());
-  EXPECT_TRUE(g.mgr.checkIfPointOccupied2D(g.At(45.5, 45.5)));
-  EXPECT_FALSE(g.mgr.checkIfPointOccupied2D(g.At(50.5, 50.5)));
-  // 10 m and 0.05 m beyond the window edge: unobserved, trusted
-  EXPECT_FALSE(g.mgr.checkIfPointOccupied2D(g.At(-100.5, 50.5)));
-  EXPECT_FALSE(g.mgr.checkIfPointOccupied2D(g.At(50.5, 100.5)));
-  // a clearance disk that reaches past the window edge is still clear
-  EXPECT_TRUE(g.mgr.isClearOfOccupied2D(g.At(1.5, 50.5), 0.5));
-}
 
 TEST(HGPManager2D, GridSettersConcurrentWithMapUpdates) {
   Ground2D g;
@@ -118,15 +104,9 @@ TEST(HGPManager2D, GridSettersConcurrentWithMapUpdates) {
                             0.0);
     }
   });
-  // goal thread: sanitizeTerminalGoal2D's helpers
+  // another thread polling the map-ready flag (atomic)
   std::thread goal_thread([&] {
-    Vec3f closest;
-    while (!stop.load()) {
-      (void)g.mgr.isMapInitialized();
-      (void)g.mgr.checkIfPointOccupied2D(g.At(45.5, 45.5));
-      (void)g.mgr.isClearOfOccupied2D(g.At(50.5, 50.5), 0.3);
-      (void)g.mgr.findClosestNonOccupied2DPoint(g.At(45.5, 45.5), closest);
-    }
+    while (!stop.load()) (void)g.mgr.isMapInitialized();
   });
 
   map_thread.join();
@@ -135,27 +115,6 @@ TEST(HGPManager2D, GridSettersConcurrentWithMapUpdates) {
   goal_thread.join();
 
   EXPECT_TRUE(g.mgr.isMapInitialized());
-  EXPECT_TRUE(g.mgr.checkIfPointOccupied2D(g.At(45.5, 45.5)));
+  EXPECT_TRUE(g.mgr.getMapUtilSharedPtr()->is2DOccupiedInWindow(g.At(45.5, 45.5)));
 }
 
-// sanitizeTerminalGoal2D must see the latest map. The planning copy has the
-// goal box freed by solveHGP() and is a cycle old, so a goal that becomes a
-// real obstacle after it was set read free there and was never relocated.
-TEST(HGPManager2D, GoalHelpersReadLatestMapNotPlanningCopy) {
-  Ground2D g;
-  g.Build({{45, 45}});
-  // Stand in for setupHGPPlanner() + solveHGP()'s goal box (keep_inflation as there).
-  g.mgr.map_util_for_planning_ = std::make_shared<mighty::VoxelMapUtil>(*g.mgr.map_util_);
-  g.mgr.map_util_for_planning_->free2DCell(45, 45, 0.2f, /*keep_inflation=*/true);
-  ASSERT_FALSE(g.mgr.map_util_for_planning_->is2DOccupied(45, 45));
-  EXPECT_TRUE(g.mgr.checkIfPointOccupied2D(g.At(45.5, 45.5)))
-      << "real obstacle hidden only by the planning copy's goal box";
-
-  // A new obstacle appears; the planning copy is not refreshed.
-  g.Build({{45, 45}, {60, 60}});
-  EXPECT_TRUE(g.mgr.checkIfPointOccupied2D(g.At(60.5, 60.5)));
-  EXPECT_FALSE(g.mgr.isClearOfOccupied2D(g.At(62.5, 60.5), 0.3));
-  Vec3f closest;
-  ASSERT_TRUE(g.mgr.findClosestNonOccupied2DPoint(g.At(60.5, 60.5), closest));
-  EXPECT_GT((closest - g.At(60.5, 60.5)).norm(), 0.05) << "relocation moves the goal off it";
-}

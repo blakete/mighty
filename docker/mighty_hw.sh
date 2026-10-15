@@ -20,8 +20,8 @@
 # rebuild. Code, launch files and mpc.yaml are baked and need one.
 #
 # FOUR panes, always:
-#   MIGHTY planner | convert_odom_to_state | MPC | RViz 2D goal
-# The first three are onboard_mighty.launch.py's three nodes, one pane each via
+#   MIGHTY planner | convert_odom_to_state | MPC | goal_selector
+# All four are onboard_mighty.launch.py's nodes, one pane each via
 # its only_nodes:= filter, so Ctrl-C -> Up -> Enter restarts ONE node instead of
 # all three. The launch file still computes every parameter (mighty_node's are a
 # YAML merge plus overrides — never hand-roll them as ros2 run).
@@ -160,6 +160,15 @@ start() {
              "cmd_vel_auto). Rebuild or pull a newer image first." >&2
         exit 1
     fi
+    # Same drift for the goal_selector pane: an image whose launch file predates the
+    # goal_selector node would fail that one pane only (unknown only_nodes key).
+    if ! docker exec "${CONTAINER}" bash -c \
+            "${SETUP} && ros2 launch mighty onboard_mighty.launch.py --show-args \
+             2>/dev/null | grep -c goal_selector_config" >/dev/null 2>&1; then
+        echo "[mighty_hw] this image has no goal_selector (onboard_mighty.launch.py lacks" \
+             "goal_selector_config:=). Rebuild or pull a newer image first." >&2
+        exit 1
+    fi
 
     # ---- pane commands (mind the single-quote rule above) --------------------
     # mighty_node and mpc both resolve <ns>/map -> <ns>/odom, so they gate on
@@ -171,18 +180,21 @@ start() {
     local tf_gate='ros2 run mighty wait_for_tf.py $ROBOT_NAME/map $ROBOT_NAME/odom && '
     local launch_base='ros2 launch mighty onboard_mighty.launch.py x:=0.0 y:=0.0 z:=0.0 yaw:=0.0 namespace:=$ROBOT_NAME use_hardware:=true use_onboard_localization:=true robot_type:=red_rover depth_camera_name:=d455'
 
+    # goal_selector (exploration, goal relocation, RViz/manual goals -> term_goal) does
+    # no TF lookups -- it works on state + the 2D grids -- so, like the state converter,
+    # it is not gated on wait_for_tf.py.
     # titles[i] LABELS cmds[i] — the arrays are positional, so dropping an entry
     # from one and not the other silently mislabels every pane after it. The
     # length check turns any future mismatch into a startup error.
     # NOTE: restarting the MPC pane is not instant — MPCNode builds an
     # IPOPT/collocation NLP before its first control tick.
     local -a titles cmds
-    titles=('MIGHTY planner' 'convert_odom_to_state' 'MPC' 'RViz 2D goal')
+    titles=('MIGHTY planner' 'convert_odom_to_state' 'MPC' 'goal_selector')
     cmds=(
         "$(dx "${tf_gate}${launch_base} only_nodes:=mighty_node")"
         "$(dx "${launch_base} only_nodes:=convert_odom_to_state")"
         "$(dx "${tf_gate}${launch_base} only_nodes:=mpc")"
-        "$(dx 'ros2 run mighty repub_rviz_2Dgoal.py')"
+        "$(dx "${launch_base} only_nodes:=goal_selector")"
     )
     if (( ${#titles[@]} != ${#cmds[@]} )); then
         echo "[mighty_hw] BUG: ${#titles[@]} pane titles but ${#cmds[@]} commands —" \

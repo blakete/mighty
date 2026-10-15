@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <queue>
+#include <unordered_map>
 
 #include "mighty/visited_map.hpp"
 
@@ -16,12 +18,18 @@ inline size_t flatIdx(int ix, int iy, int width) {
   return static_cast<size_t>(iy) * width + ix;
 }
 
-// Spiral search outward from (cx, cy) for the nearest FREE cell within
-// `max_radius_cells`. Returns true on success and writes the result into
-// (*ox, *oy). Naive O(R²) scan — fine for the small radii we use here.
-bool snapToFree(const OccGrid2D& grid, int cx, int cy, int max_radius_cells,
-                int* ox, int* oy) {
-  if (grid.isFree(cx, cy)) {
+// Spiral search outward from (cx, cy) for the nearest walkable cell within
+// `max_radius_cells` (FREE, or flagged in `passable` when given). Returns true
+// on success and writes the result into (*ox, *oy). Naive O(R²) scan — fine
+// for the small radii we use here.
+bool snapToFree(const OccGrid2D& grid, const std::vector<uint8_t>* passable,
+                int cx, int cy, int max_radius_cells, int* ox, int* oy) {
+  auto walkable = [&](int x, int y) {
+    if (grid.isFree(x, y)) return true;
+    return passable != nullptr && grid.inBounds(x, y) &&
+           (*passable)[flatIdx(x, y, grid.width())] != 0;
+  };
+  if (walkable(cx, cy)) {
     *ox = cx;
     *oy = cy;
     return true;
@@ -33,7 +41,7 @@ bool snapToFree(const OccGrid2D& grid, int cx, int cy, int max_radius_cells,
         if (std::max(std::abs(dx), std::abs(dy)) != r) continue;
         int nx = cx + dx;
         int ny = cy + dy;
-        if (grid.isFree(nx, ny)) {
+        if (walkable(nx, ny)) {
           *ox = nx;
           *oy = ny;
           return true;
@@ -44,31 +52,164 @@ bool snapToFree(const OccGrid2D& grid, int cx, int cy, int max_radius_cells,
   return false;
 }
 
+
+// Cluster from grid cell indices (in BFS order): world cells, centroid, AABB and the goal (the member
+// cell nearest the centroid; first such cell on ties).
+FrontierCluster makeCluster(const OccGrid2D& grid, const std::vector<size_t>& members) {
+  FrontierCluster cluster;
+  const int W = grid.width();
+  double sum_wx = 0.0, sum_wy = 0.0;
+  double min_wx = std::numeric_limits<double>::infinity();
+  double min_wy = std::numeric_limits<double>::infinity();
+  double max_wx = -std::numeric_limits<double>::infinity();
+  double max_wy = -std::numeric_limits<double>::infinity();
+  cluster.cells.reserve(members.size());
+  for (const size_t idx : members) {
+    double wx, wy;
+    grid.gridToWorld(static_cast<int>(idx % static_cast<size_t>(W)),
+                     static_cast<int>(idx / static_cast<size_t>(W)), wx, wy);
+    cluster.cells.emplace_back(wx, wy);
+    sum_wx += wx;
+    sum_wy += wy;
+    min_wx = std::min(min_wx, wx);
+    min_wy = std::min(min_wy, wy);
+    max_wx = std::max(max_wx, wx);
+    max_wy = std::max(max_wy, wy);
+  }
+  cluster.size_cells = static_cast<int>(cluster.cells.size());
+  cluster.size_m2 = cluster.size_cells * grid.resolution() * grid.resolution();
+  cluster.centroid = Eigen::Vector2d(sum_wx / cluster.size_cells, sum_wy / cluster.size_cells);
+  cluster.aabb_min = Eigen::Vector2d(min_wx, min_wy);
+  cluster.aabb_max = Eigen::Vector2d(max_wx, max_wy);
+  double best = std::numeric_limits<double>::infinity();
+  for (const auto& c : cluster.cells) {
+    const double d2 = (c - cluster.centroid).squaredNorm();
+    if (d2 < best) {
+      best = d2;
+      cluster.goal = c;
+    }
+  }
+  return cluster;
+}
+
+// Emit one connected cluster (grid indices in BFS order), split along world-anchored tiles of side
+// tile_m when its extent exceeds tile_m (see FrontierDetectorParams::max_cluster_extent_m).
+void emitCluster(const OccGrid2D& grid, const std::vector<size_t>& members, double tile_m,
+                 int min_cells, std::vector<FrontierCluster>& out) {
+  FrontierCluster whole = makeCluster(grid, members);
+  const Eigen::Vector2d ext = whole.aabb_max - whole.aabb_min;
+  if (tile_m <= 0.0 || std::max(ext.x(), ext.y()) <= tile_m + 1e-9) {
+    out.push_back(std::move(whole));
+    return;
+  }
+
+  const int W = grid.width();
+  const size_t M = members.size();
+  std::unordered_map<size_t, size_t> pos;  // grid index -> position in `members`
+  pos.reserve(M * 2);
+  for (size_t i = 0; i < M; ++i) pos.emplace(members[i], i);
+  std::vector<std::pair<long, long>> tile(M);
+  for (size_t i = 0; i < M; ++i) {
+    tile[i] = {static_cast<long>(std::floor(whole.cells[i].x() / tile_m)),
+               static_cast<long>(std::floor(whole.cells[i].y() / tile_m))};
+  }
+  auto neighbours = [&](size_t i, auto&& fn) {
+    const int cx = static_cast<int>(members[i] % static_cast<size_t>(W));
+    const int cy = static_cast<int>(members[i] / static_cast<size_t>(W));
+    for (int k = 0; k < 8; ++k) {
+      const int nx = cx + kDx8[k];
+      const int ny = cy + kDy8[k];
+      if (!grid.inBounds(nx, ny)) continue;
+      const auto it = pos.find(flatIdx(nx, ny, W));
+      if (it != pos.end()) fn(it->second);
+    }
+  };
+
+  // Pieces: 8-connected components inside one tile.
+  constexpr size_t kNone = std::numeric_limits<size_t>::max();
+  std::vector<size_t> label(M, kNone);
+  std::vector<std::vector<size_t>> pieces;
+  for (size_t s = 0; s < M; ++s) {
+    if (label[s] != kNone) continue;
+    const size_t id = pieces.size();
+    pieces.emplace_back();
+    std::queue<size_t> q;
+    q.push(s);
+    label[s] = id;
+    while (!q.empty()) {
+      const size_t i = q.front();
+      q.pop();
+      pieces[id].push_back(i);
+      neighbours(i, [&](size_t j) {
+        if (label[j] != kNone || tile[j] != tile[i]) return;
+        label[j] = id;
+        q.push(j);
+      });
+    }
+  }
+
+  // Merge pieces below min_cells (tile-edge slivers) into their largest 8-adjacent piece, smallest
+  // first. The cluster is connected, so every piece has a neighbour while more than one is left.
+  while (true) {
+    size_t small = kNone;
+    for (size_t p = 0; p < pieces.size(); ++p) {
+      if (pieces[p].empty() || static_cast<int>(pieces[p].size()) >= min_cells) continue;
+      if (small == kNone || pieces[p].size() < pieces[small].size()) small = p;
+    }
+    if (small == kNone) break;
+    size_t into = kNone;
+    for (const size_t i : pieces[small]) {
+      neighbours(i, [&](size_t j) {
+        const size_t q = label[j];
+        if (q == small) return;
+        if (into == kNone || pieces[q].size() > pieces[into].size() ||
+            (pieces[q].size() == pieces[into].size() && q < into))
+          into = q;
+      });
+    }
+    if (into == kNone) break;  // single piece left
+    for (const size_t i : pieces[small]) label[i] = into;
+    pieces[into].insert(pieces[into].end(), pieces[small].begin(), pieces[small].end());
+    pieces[small].clear();
+  }
+
+  for (auto& piece : pieces) {
+    if (piece.empty()) continue;
+    std::sort(piece.begin(), piece.end());  // BFS order of the whole cluster
+    std::vector<size_t> idx;
+    idx.reserve(piece.size());
+    for (const size_t i : piece) idx.push_back(members[i]);
+    out.push_back(makeCluster(grid, idx));
+  }
+}
+
 }  // namespace
 
 std::vector<FrontierCluster> FrontierDetector::detect(
     const OccGrid2D& grid, const Eigen::Vector2d& robot_xy,
-    const VisitedMap* visited_map) const {
+    const VisitedMap* visited_map,
+    const std::vector<uint8_t>* passable) const {
   std::vector<FrontierCluster> out;
 
   const int W = grid.width();
   const int H = grid.height();
   if (W <= 0 || H <= 0) return out;
+  const size_t N = static_cast<size_t>(W) * H;
+  if (passable != nullptr && passable->size() != N) passable = nullptr;  // dim mismatch: ignore
 
-  // ---- Snap robot pose to nearest FREE cell ----
+  // ---- Snap robot pose to nearest walkable cell (FREE, or passable) ----
   int rx, ry;
   grid.worldToGrid(robot_xy.x(), robot_xy.y(), rx, ry);
   const int snap_cells = std::max(
       0, static_cast<int>(std::ceil(params_.robot_snap_radius_m
                                     / grid.resolution())));
   int seed_x = -1, seed_y = -1;
-  if (!snapToFree(grid, rx, ry, snap_cells, &seed_x, &seed_y)) {
+  if (!snapToFree(grid, passable, rx, ry, snap_cells, &seed_x, &seed_y)) {
     // Robot not in or near any free cell — bail out silently. Caller may log.
     return out;
   }
 
-  // ---- Pass A: BFS over known-free cells, tag frontier seeds ----
-  const size_t N = static_cast<size_t>(W) * H;
+  // ---- Pass A: BFS over walkable cells, tag frontier seeds ----
   std::vector<uint8_t> visited(N, 0);
   std::vector<uint8_t> is_frontier(N, 0);
 
@@ -111,7 +252,9 @@ std::vector<FrontierCluster> FrontierDetector::detect(
       has_unknown_nbr = true;
       break;
     }
-    bool is_seed = has_unknown_nbr && !onBorder(cx, cy);
+    // Only FREE cells can be frontier seeds; passable (non-FREE) cells are walked through but
+    // never tagged.
+    bool is_seed = has_unknown_nbr && !onBorder(cx, cy) && grid.isFree(cx, cy);
 
     // Reject frontier cells that have any OCCUPIED neighbor within
     // obstacle_clearance_cells. Frontiers hugging walls are usually noise
@@ -149,14 +292,14 @@ std::vector<FrontierCluster> FrontierDetector::detect(
 
     if (is_seed) is_frontier[flatIdx(cx, cy, W)] = 1;
 
-    // Expand BFS through known-free cells only.
+    // Expand BFS through FREE cells, plus cells flagged in `passable` when given.
     for (int i = 0; i < 8; ++i) {
       const int nx = cx + kDx8[i];
       const int ny = cy + kDy8[i];
       if (!grid.inBounds(nx, ny)) continue;
       const size_t nidx = flatIdx(nx, ny, W);
       if (visited[nidx]) continue;
-      if (!grid.isFree(nx, ny)) continue;
+      if (!grid.isFree(nx, ny) && !(passable != nullptr && (*passable)[nidx])) continue;
       visited[nidx] = 1;
       q.push({nx, ny});
     }
@@ -169,13 +312,7 @@ std::vector<FrontierCluster> FrontierDetector::detect(
       const size_t sidx = flatIdx(sx, sy, W);
       if (!is_frontier[sidx] || assigned[sidx]) continue;
 
-      FrontierCluster cluster;
-      double sum_wx = 0.0, sum_wy = 0.0;
-      double min_wx = std::numeric_limits<double>::infinity();
-      double min_wy = std::numeric_limits<double>::infinity();
-      double max_wx = -std::numeric_limits<double>::infinity();
-      double max_wy = -std::numeric_limits<double>::infinity();
-
+      std::vector<size_t> members;
       std::queue<std::pair<int, int>> cq;
       cq.push({sx, sy});
       assigned[sidx] = 1;
@@ -183,16 +320,7 @@ std::vector<FrontierCluster> FrontierDetector::detect(
       while (!cq.empty()) {
         auto [cx, cy] = cq.front();
         cq.pop();
-
-        double wx, wy;
-        grid.gridToWorld(cx, cy, wx, wy);
-        cluster.cells.emplace_back(wx, wy);
-        sum_wx += wx;
-        sum_wy += wy;
-        min_wx = std::min(min_wx, wx);
-        min_wy = std::min(min_wy, wy);
-        max_wx = std::max(max_wx, wx);
-        max_wy = std::max(max_wy, wy);
+        members.push_back(flatIdx(cx, cy, W));
 
         for (int i = 0; i < 8; ++i) {
           const int nx = cx + kDx8[i];
@@ -206,16 +334,8 @@ std::vector<FrontierCluster> FrontierDetector::detect(
         }
       }
 
-      cluster.size_cells = static_cast<int>(cluster.cells.size());
-      if (cluster.size_cells < params_.cluster_min_cells) continue;
-
-      cluster.size_m2 = cluster.size_cells
-                        * grid.resolution() * grid.resolution();
-      cluster.centroid = Eigen::Vector2d(sum_wx / cluster.size_cells,
-                                         sum_wy / cluster.size_cells);
-      cluster.aabb_min = Eigen::Vector2d(min_wx, min_wy);
-      cluster.aabb_max = Eigen::Vector2d(max_wx, max_wy);
-      out.push_back(std::move(cluster));
+      if (static_cast<int>(members.size()) < params_.cluster_min_cells) continue;
+      emitCluster(grid, members, params_.max_cluster_extent_m, params_.cluster_min_cells, out);
     }
   }
 

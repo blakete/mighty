@@ -35,7 +35,7 @@
 ARG WS=/home/swarm/code/mighty_ws
 # Dependency repos from mighty.repos that the HARDWARE stack needs. Keys must
 # match mighty.repos entries; the filter below fails loudly on a typo.
-ARG HW_DEPS="dynus_interfaces mpc DecompROS2"
+ARG HW_DEPS="dynus_interfaces goal_selector_msgs mpc DecompROS2"
 
 # ---------- deps-src: pinned dependency sources ----------------------------------
 FROM ros:humble-ros-base AS deps-src
@@ -157,7 +157,13 @@ COPY --from=mighty-build /manifests /tmp/manifests
 # build per version, so this exact pin stops resolving once ROS rebuilds 0.1.9 --
 # the dpkg-query tripwire below fails the build loudly when that happens; move
 # every fleet image together (or re-pin to a snapshot once one carries 20260907).
-ARG ROS_SNAPSHOT=2026-08-07
+#
+# 2026-10-12: that happened. packages.ros.org moved on to 0.1.11 (20261011) and dropped the
+# 20260907 build, so the build failed at the apt install. The 2026-09-14 snapshot carries both
+# pins exactly (rmw_zenoh 0.1.9-1jammy.20260907.200640, zenoh_cpp_vendor
+# 0.1.9-1jammy.20260723.020902), so ROS_SNAPSHOT below now serves both and nothing depends on
+# packages.ros.org. Snapshots are immutable, so this no longer rots.
+ARG ROS_SNAPSHOT=2026-09-14
 ARG RMW_ZENOH_CPP_VER=0.1.9-1jammy.20260907.200640
 ARG ZENOH_CPP_VENDOR_VER=0.1.9-1jammy.20260723.020902
 # snapshots.ros.org is signed by "ROS Snapshot builder" (AD19BAB3CBF125EA), NOT by the

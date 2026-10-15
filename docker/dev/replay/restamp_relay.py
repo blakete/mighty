@@ -49,14 +49,19 @@ class RestampRelay(Node):
         qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
                          history=HistoryPolicy.KEEP_LAST, depth=50,
                          durability=DurabilityPolicy.VOLATILE)
-        # /tf_static is latched: tf2 listeners subscribe transient-local, and a
-        # volatile publisher never reaches them. Match the bag player's QoS.
+        # /tf_static and the persistent map are latched (transient-local): their consumers
+        # subscribe transient-local, and a volatile publisher never reaches them. Match the bag
+        # player's QoS. The persistent grid is large, so a shallow queue.
         latched = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
                              history=HistoryPolicy.KEEP_LAST, depth=100,
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        latched_map = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                                 history=HistoryPolicy.KEEP_LAST, depth=1,
+                                 durability=DurabilityPolicy.TRANSIENT_LOCAL)
         for topic, type_name in topics:
             msg_type = get_message(type_name)
-            q = latched if topic.endswith('tf_static') else qos
+            q = (latched if topic.endswith('tf_static')
+                 else latched_map if topic.endswith('persistent_map/grid') else qos)
             self.pubs[topic] = self.create_publisher(msg_type, topic, q)
             self.create_subscription(msg_type, in_prefix + topic,
                                      lambda m, t=topic: self.relay(t, m), q)

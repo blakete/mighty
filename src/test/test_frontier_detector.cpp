@@ -5,6 +5,8 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cmath>
 #include <vector>
 
 #include "mighty/frontier_detector.hpp"
@@ -277,4 +279,116 @@ TEST(FrontierDetectorTest, FreeIslandDisconnectedFromUnknownYieldsNothing) {
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
+}
+
+// ---------------------------------------------------------------------------
+// Goal cell and long-cluster splitting (max_cluster_extent_m)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 20x20 @0.1: free x < 1.2, y < 1.2, unknown to the east and north -> one L-shaped frontier
+// (column ix = 11 and row iy = 11) whose centroid lies inside the free area.
+std::shared_ptr<const OccGrid2D> MakeLGrid() {
+  std::vector<int8_t> data(400);
+  for (int iy = 0; iy < 20; ++iy)
+    for (int ix = 0; ix < 20; ++ix) data[iy * 20 + ix] = (ix < 12 && iy < 12) ? F : U;
+  return MakeGrid(20, 20, data);
+}
+
+// W x 4 @0.1 at origin (ox, 0): rows 0-1 free, rows 2-3 unknown -> one straight frontier along
+// row 1, W cells long.
+std::shared_ptr<const OccGrid2D> MakeLineGrid(int W, double ox) {
+  std::vector<int8_t> data(static_cast<size_t>(W) * 4);
+  for (int iy = 0; iy < 4; ++iy)
+    for (int ix = 0; ix < W; ++ix) data[iy * W + ix] = (iy < 2) ? F : U;
+  return OccGrid2D::fromTristate(W, 4, 0.1, ox, 0.0, data);
+}
+
+FrontierDetector MakeSplitDetector(double max_extent_m, int min_cells = 6) {
+  FrontierDetectorParams p;
+  p.cluster_min_cells = min_cells;
+  p.border_margin_cells = 0;
+  p.robot_snap_radius_m = 5.0;
+  p.max_cluster_extent_m = max_extent_m;
+  return FrontierDetector(p);
+}
+
+bool IsMember(const FrontierCluster& c, const Eigen::Vector2d& p) {
+  for (const auto& q : c.cells)
+    if ((q - p).norm() < 1e-9) return true;
+  return false;
+}
+
+// The goal is a member cell and no member cell is closer to the centroid.
+void ExpectGoalIsNearestMember(const FrontierCluster& c) {
+  ASSERT_TRUE(c.goal.has_value());
+  EXPECT_TRUE(IsMember(c, *c.goal));
+  const double d = (*c.goal - c.centroid).norm();
+  for (const auto& q : c.cells) EXPECT_GE((q - c.centroid).norm(), d - 1e-12);
+}
+
+}  // namespace
+
+// Scenario: L-shaped frontier. Expected: the centroid is inside known free space (not a frontier cell),
+// the goal is the member cell nearest it.
+TEST(FrontierDetectorGoal, LShapedClusterGoalIsTheMemberCellNearestTheCentroid) {
+  auto grid = MakeLGrid();
+  auto out = MakeDetector().detect(*grid, Eigen::Vector2d(0.25, 0.25));
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_EQ(out[0].size_cells, 23);
+  EXPECT_FALSE(IsMember(out[0], out[0].centroid)) << "an L's centroid is off the frontier";
+  ExpectGoalIsNearestMember(out[0]);
+}
+
+// Scenario: 6.4 m straight frontier, splitting off (0). Expected: one cluster, as before.
+TEST(FrontierDetectorGoal, SplitOffKeepsOneCluster) {
+  auto out = MakeSplitDetector(0.0).detect(*MakeLineGrid(64, 0.0), Eigen::Vector2d(0.5, 0.05));
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_EQ(out[0].size_cells, 64);
+  ExpectGoalIsNearestMember(out[0]);
+}
+
+// Scenario: the same 64-cell line (x 0.05 .. 6.35) with 3 m tiles. Tiles [0,3) and [3,6) hold 30 cells
+// each, [6,9) only 4 (< cluster_min_cells 6), which merge into the adjacent [3,6) piece.
+// Expected: pieces of 30 and 34 cells that partition the line, each with its own goal.
+TEST(FrontierDetectorGoal, LongClusterSplitsIntoWorldTilesAndSliversMerge) {
+  auto out = MakeSplitDetector(3.0).detect(*MakeLineGrid(64, 0.0), Eigen::Vector2d(0.5, 0.05));
+  ASSERT_EQ(out.size(), 2u);
+  EXPECT_EQ(out[0].size_cells, 34);
+  EXPECT_EQ(out[1].size_cells, 30);
+  std::vector<Eigen::Vector2d> all;
+  for (const auto& c : out) {
+    ExpectGoalIsNearestMember(c);
+    EXPECT_EQ(static_cast<int>(c.cells.size()), c.size_cells);
+    all.insert(all.end(), c.cells.begin(), c.cells.end());
+  }
+  ASSERT_EQ(all.size(), 64u);
+  for (size_t i = 0; i < all.size(); ++i)
+    for (size_t j = i + 1; j < all.size(); ++j) EXPECT_GT((all[i] - all[j]).norm(), 1e-9);
+  for (const auto& p : out[1].cells) EXPECT_LT(p.x(), 3.0) << "the 30-cell piece is tile [0, 3)";
+}
+
+// Scenario: the line starts at world x = 1.0 instead (origin shifted). Tiles are anchored in the world, so
+// the cut points stay at x = 3 and 6: pieces of 20 (x 1..3), 30 (3..6) and 14 (6..7.4) cells, each inside
+// one tile.
+TEST(FrontierDetectorGoal, TileBoundariesAreWorldAnchored) {
+  auto out = MakeSplitDetector(3.0).detect(*MakeLineGrid(64, 1.0), Eigen::Vector2d(1.5, 0.05));
+  ASSERT_EQ(out.size(), 3u);
+  std::vector<int> sizes;
+  for (const auto& c : out) {
+    sizes.push_back(c.size_cells);
+    const double t = std::floor(c.cells.front().x() / 3.0);
+    for (const auto& p : c.cells) EXPECT_EQ(std::floor(p.x() / 3.0), t);
+  }
+  std::sort(sizes.begin(), sizes.end());
+  EXPECT_EQ(sizes, (std::vector<int>{14, 20, 30}));
+}
+
+// Scenario: a 2 m frontier that straddles the tile boundary x = 3. Expected: not split (only clusters
+// longer than max_cluster_extent_m are cut).
+TEST(FrontierDetectorGoal, ShortClusterAcrossATileBoundaryIsNotSplit) {
+  auto out = MakeSplitDetector(3.0).detect(*MakeLineGrid(20, 2.0), Eigen::Vector2d(2.5, 0.05));
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_EQ(out[0].size_cells, 20);
 }

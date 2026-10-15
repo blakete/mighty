@@ -136,35 +136,6 @@ class HGPManager {
    */
   void freeGoal(Vec3f& goal_sent, double factor);
 
-  /** @brief Check whether a point lies in an occupied voxel.
-   *  @param point Query position in world coordinates.
-   *  @return True if the point is occupied.
-   */
-  bool checkIfPointOccupied(const Vec3f& point);
-
-  /** @brief NEW BRANCH of checkIfPointOccupied(): checks the 2D ground-robot
-   *  tri-state map (map_2d_) instead of the 3D voxel map. Use this for
-   *  ground-robot 2D deployments, where the 3D map is never populated (see
-   *  findClosestNonOccupied2DPoint() in map_util.hpp for why) and
-   *  checkIfPointOccupied() cannot see real occupancy there.
-   *  @param point Query position in world coordinates.
-   *  @return True if the 2D cell is occupied. False if no 2D map exists yet, or
-   *  if the point is outside the 2D window (unobserved, so trusted -- see
-   *  VoxelMapUtil::is2DOccupiedInWindow()).
-   */
-  bool checkIfPointOccupied2D(const Vec3f& point);
-
-  /** @brief True if no OCCUPIED 2D cell lies within `clearance_m` of `point`.
-   *  Unlike checkIfPointOccupied2D(), this checks a disk around the point, not
-   *  just the cell it falls in -- used by goal relocation (sanitizeTerminalGoal2D)
-   *  to guarantee real standoff instead of merely "not inside an obstacle".
-   *  Unknown and out-of-window cells count as clear.
-   *  @param point Query position in world coordinates.
-   *  @param clearance_m Required clearance in meters.
-   *  @return True if clear (or no 2D map yet / clearance_m <= 0).
-   */
-  bool isClearOfOccupied2D(const Vec3f& point, double clearance_m);
-
   /** @brief Copy of the 2D planning map (the base map A* copies each cycle, before
    *  the per-plan start/goal boxes are cleared), taken under the map lock.
    *  @param values Cell values, row-major x + dimX * y: 0 free, 100 occupied, -1 unknown.
@@ -282,22 +253,6 @@ class HGPManager {
    *  @param closest_free_point Output position of the nearest free voxel.
    */
   void findClosestFreePoint(const Vec3f& point, Vec3f& closest_free_point);
-
-  /** @brief Find the closest non-occupied voxel (free OR unknown) to a given point.
-   *  @param point Query position in world coordinates.
-   *  @param closest_non_occupied_point Output position of the nearest free or unknown voxel.
-   */
-  void findClosestNonOccupiedPoint(const Vec3f& point, Vec3f& closest_non_occupied_point);
-
-  /** @brief NEW BRANCH of findClosestNonOccupiedPoint(): searches the 2D
-   *  ground-robot tri-state map instead of the 3D voxel map. See
-   *  checkIfPointOccupied2D() for why this is needed. Like the other 2D goal
-   *  helpers, it reads the latest 2D map, not the planner's per-cycle copy.
-   *  @param point Query position in world coordinates.
-   *  @param closest_non_occupied_point Output position of the nearest non-occupied 2D cell.
-   *  @return True if a non-occupied cell was found within the search radius.
-   */
-  bool findClosestNonOccupied2DPoint(const Vec3f& point, Vec3f& closest_non_occupied_point);
 
   /** @brief Count the number of unknown cells in the current map.
    *  @return Number of unknown cells.
@@ -432,6 +387,9 @@ class HGPManager {
   }
 
  public:
+  /** @brief True if the last solveHGP A* search reached the exact goal (false: partial path). */
+  bool reachedGoal() const { return planner_ptr_ && planner_ptr_->reachedGoal(); }
+
   /** @brief Check if 2D ground robot planning mode is active. */
   bool isGroundRobot() const { return is_ground_robot_; }
 
