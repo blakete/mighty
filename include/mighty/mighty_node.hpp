@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <fstream>
 #include <optional>
 #include <unordered_map>
@@ -30,6 +31,7 @@
 #include <nav_msgs/msg/path.hpp>
 #include <dynus_interfaces/msg/speedy_path.hpp>
 #include <goal_selector_msgs/msg/planner_status.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/float64.hpp>
 #include <std_msgs/msg/string.hpp>
@@ -40,6 +42,7 @@
 
 #include "goal_selector/goal_fence.hpp"
 #include "hgp/utils.hpp"
+#include "map2d/map_age.hpp"
 #include "mighty/mighty.hpp"
 #include "mighty/mighty_type.hpp"
 
@@ -183,6 +186,7 @@ class MIGHTY_NODE : public rclcpp::Node {
   rclcpp::TimerBase::SharedPtr timer_trajs_update_for_tmap_;
   rclcpp::TimerBase::SharedPtr timer_check_plan_safety_;
   rclcpp::TimerBase::SharedPtr timer_initial_pose_;
+  rclcpp::TimerBase::SharedPtr timer_map_guard_;
 
   // Callback groups
   std::vector<rclcpp::CallbackGroup::SharedPtr> cb_groups_mu_;  // mutually-exclusive groups
@@ -284,6 +288,30 @@ class MIGHTY_NODE : public rclcpp::Node {
   /** @brief Hand the planner the keep-out for the next 2D build: the latest goal_fence if fresh,
    *  enforcing, ready and in grid_frame (the occ_2d frame the window is built in), else none. */
   void updateKeepOut2D(const std::string& grid_frame);
+
+  // map_max_age_sec : map-age hold. Header-stamp age of the newest occ_2d / esdf_2d (DLIO cloud
+  // time, copied by the elevation mapper and map_fusion). Beyond it the robot is held: one
+  // two-point hold path to the MPC (it stops at goal_tolerance), no replans and no planner_status,
+  // map_hold true; it resumes on its own once the maps are fresh again (map2d::MapAgeGuard). A
+  // stamp age, not a receive gap: a dead lidar / DLIO leaves the mapper republishing on its timer
+  // with a frozen stamp. The stamps are written on cb_group_map_ after each grid is in place, and
+  // read on cb_group_replan_ (atomics); map_guard_ and the rest live on cb_group_replan_ only.
+  bool map_guard_on_{false};
+  double map_max_age_sec_{1.5};
+  std::atomic<int64_t> occ_2d_stamp_ns_{0};
+  std::atomic<int64_t> esdf_2d_stamp_ns_{0};
+  map2d::MapAgeGuard map_guard_;
+  double map_hold_pub_t_{-1.0e18};  // last map_hold publish (1 Hz republish)
+  double map_hold_log_t_{-1.0e18};  // last throttled "still holding" log
+  bool hold_path_pending_{false};   // held before the first state: send the hold path once it arrives
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pub_map_hold_;
+  /** @brief Run the map-age guard (guard timer at 10 Hz, and first thing in replanCallback): log
+   *  and act on hold transitions, republish map_hold at 1 Hz. Returns true while holding. */
+  bool evaluateMapGuard();
+  /** @brief Two-point SpeedyPath at the robot's position on mpc_waypoints: the MPC takes it as an
+   *  already-reached goal and ramps to zero (the MPC ignores paths with fewer than two poses). */
+  void publishHoldPath();
+  void publishMapHold(bool hold);
 
   // Wall-clock seconds of the last visualization publish in replanCallback.
   // The replan loop runs at 100 Hz which is fine for control but floods RViz

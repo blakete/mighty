@@ -296,6 +296,13 @@ mighty_node:
         keepout_2d.topic_name: "geofence/goal_fence"    # [-] relative to the robot namespace
         keepout_2d.max_age_sec: 2.0                     # [s] older goal_fence -> no keep-out
         keepout_2d.slack_m: 0.05                        # [m] band = offset_m - slack_m (half a cell, so goals the selector accepts at offset_m stay plannable)
+        # Map-age hold: header-stamp age of occ_2d / esdf_2d (the DLIO cloud time, copied by the elevation mapper
+        # and map_fusion). Beyond it the planner holds the robot (one stop path to the MPC, no replans, no
+        # planner_status, <ns>/map_hold true) and the goal selector (same key, layered) pauses without dropping
+        # its goal; both resume once the maps are fresh again (age < max - 0.5 s, held >= 1 s). A stamp age, not a
+        # receive gap: a dead Orin / mapper goes silent, but a dead lidar / DLIO leaves the mapper republishing on
+        # its timer with a frozen stamp. JR02 2026-10-14: 0.43-0.45 s at 5 Hz. Slower mappers need more headroom.
+        map_max_age_sec: 1.5                            # [s] 0 = off
         esdf_weight: 5.0e+4                             # [-] ESDF cost weight in objective
         esdf_d_safe: 0.7                                # [m] Safety distance threshold
         esdf_truncation_distance: 15                    # [voxels] Must match mapper's distance_grid_2d.truncation_distance

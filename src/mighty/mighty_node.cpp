@@ -317,6 +317,27 @@ MIGHTY_NODE::MIGHTY_NODE() : Node("mighty_node") {
                   keepout_enabled_ ? "true, but not 2D planning" : "false");
     }
   }
+
+  // Map-age hold (map_max_age_sec, see mighty_node.hpp): only where occ2DCallback builds the
+  // planning map, i.e. hardware 2D ground robots with the occ_2d / ESDF subscriptions above.
+  map_guard_on_ = map_max_age_sec_ > 0.0 && par_.use_hardware && par_.use_2d_planning &&
+                  par_.vehicle_type == "ground_robot" && par_.use_esdf_cost;
+  if (map_guard_on_) {
+    rclcpp::QoS map_hold_qos(rclcpp::KeepLast(1));
+    map_hold_qos.reliable().transient_local();
+    pub_map_hold_ = this->create_publisher<std_msgs::msg::Bool>("map_hold", map_hold_qos);
+    // Its own timer: the replan timer only runs once a goal has arrived, but an idle robot must
+    // report map_hold too, and a planner restarted during an outage must still hold the MPC.
+    timer_map_guard_ = this->create_wall_timer(
+        100ms, [this]() { evaluateMapGuard(); }, this->cb_group_replan_);
+    RCLCPP_INFO(this->get_logger(),
+                "Map hold: on (occ_2d / esdf_2d header stamp older than %.1f s -> hold, map_hold)",
+                map_max_age_sec_);
+  } else {
+    RCLCPP_INFO(this->get_logger(),
+                "Map hold: off (map_max_age_sec %.1f; only for hardware 2D ground robots with "
+                "use_esdf_cost)", map_max_age_sec_);
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -581,6 +602,7 @@ void MIGHTY_NODE::declareParameters() {
   this->declare_parameter("keepout_2d.topic_name", std::string("geofence/goal_fence"));
   this->declare_parameter("keepout_2d.max_age_sec", 2.0);
   this->declare_parameter("keepout_2d.slack_m", 0.05);
+  this->declare_parameter("map_max_age_sec", 1.5);
   this->declare_parameter("esdf_weight", 1e+3);
   this->declare_parameter("esdf_d_safe", 1.0);
   this->declare_parameter("esdf_truncation_distance", 10);
@@ -896,6 +918,7 @@ void MIGHTY_NODE::setParameters() {
   keepout_topic_ = this->get_parameter("keepout_2d.topic_name").as_string();
   keepout_max_age_sec_ = this->get_parameter("keepout_2d.max_age_sec").as_double();
   keepout_slack_m_ = std::max(0.0, this->get_parameter("keepout_2d.slack_m").as_double());
+  map_max_age_sec_ = this->get_parameter("map_max_age_sec").as_double();
   par_.esdf_weight = this->get_parameter("esdf_weight").as_double();
   par_.esdf_d_safe = this->get_parameter("esdf_d_safe").as_double();
   par_.esdf_truncation_distance = this->get_parameter("esdf_truncation_distance").as_int();
@@ -1281,6 +1304,12 @@ void MIGHTY_NODE::stateCallback(const dynus_interfaces::msg::State::SharedPtr ms
  * @brief Callback function for replanning
  */
 void MIGHTY_NODE::replanCallback() {
+  // Map-age hold: stale maps -> no plan, no mpc_waypoints and no planner_status (the goal selector
+  // takes a missing status as neutral; FAILED would count the goal as unreachable). The tick that
+  // leaves the hold replans normally. Resuming relies on goal_seen_radius < goal_radius (hw yaml
+  // 0.4 < 0.5): a ground robot that reaches GOAL_SEEN never replans again for that goal.
+  if (evaluateMapGuard()) return;
+
   // Get the current time as double
   double current_time = this->now().seconds();
 
@@ -2557,6 +2586,93 @@ void MIGHTY_NODE::publishMpcPath() {
 
 // ----------------------------------------------------------------------------
 
+bool MIGHTY_NODE::evaluateMapGuard() {
+  if (!map_guard_on_) return false;
+  const double now = this->now().seconds();
+  const double occ_stamp = occ_2d_stamp_ns_.load() * 1e-9;
+  const double esdf_stamp = esdf_2d_stamp_ns_.load() * 1e-9;
+  const auto age = [now](double stamp) { return stamp > 0.0 ? std::abs(now - stamp) : 0.0; };
+
+  // RCLCPP_ERROR, not WARN: the hardware launch runs mighty_node at --log-level error.
+  using Transition = map2d::MapAgeGuard::Transition;
+  switch (map_guard_.update(now, map_max_age_sec_, occ_stamp, esdf_stamp)) {
+    case Transition::kEnterHold:
+      RCLCPP_ERROR(this->get_logger(),
+                   "Map hold: maps stale (occ_2d %.1f s, esdf_2d %.1f s old > %.1f s) -> holding "
+                   "the robot, no replans (check local_mapper, mapping, dlio, lidar)",
+                   age(occ_stamp), age(esdf_stamp), map_max_age_sec_);
+      map_hold_log_t_ = now;
+      hold_path_pending_ = true;
+      publishMapHold(true);
+      break;
+    case Transition::kExitHold:
+      RCLCPP_ERROR(this->get_logger(), "Map hold: maps fresh again after %.1f s held -> resuming",
+                   map_guard_.lastHoldSec());
+      hold_path_pending_ = false;
+      publishMapHold(false);
+      break;
+    case Transition::kNone:
+      break;
+  }
+  if (!map_guard_.held()) {
+    if (now - map_hold_pub_t_ >= 1.0) publishMapHold(false);
+    return false;
+  }
+
+  // Held: stop the MPC once. Without a state yet there is no safe position to send (a path at
+  // the origin would drive the robot there), so it waits for the first state.
+  if (hold_path_pending_ && state_initialized_) {
+    publishHoldPath();
+    hold_path_pending_ = false;
+  }
+  if (now - map_hold_pub_t_ >= 1.0) publishMapHold(true);
+  if (now - map_hold_log_t_ >= 5.0) {
+    map_hold_log_t_ = now;
+    RCLCPP_ERROR(this->get_logger(), "Map hold: still holding (maps %.1f s old, held %.1f s)",
+                 map_guard_.age(), map_guard_.heldFor(now));
+  }
+  return true;
+}
+
+void MIGHTY_NODE::publishHoldPath() {
+  state s;
+  mighty_ptr_->getState(s);
+
+  dynus_interfaces::msg::SpeedyPath path_msg;
+  path_msg.header.stamp = this->now();
+  path_msg.header.frame_id = par_.map_frame_id;  // same frame and state source as publishMpcPath
+
+  // Two poses 1 cm apart along the heading: the MPC drops paths with fewer than two poses, and a
+  // zero-length segment would hand it the heading atan2(0, 0) = 0. Both are within its
+  // goal_tolerance, so it latches goal_reached and ramps v, w to zero.
+  const Eigen::Vector3d ahead =
+      s.pos + 0.01 * Eigen::Vector3d(std::cos(s.yaw), std::sin(s.yaw), 0.0);
+  for (const Eigen::Vector3d& p : {s.pos, ahead}) {
+    geometry_msgs::msg::PoseStamped pose;
+    pose.header = path_msg.header;
+    pose.pose.position.x = p.x();
+    pose.pose.position.y = p.y();
+    pose.pose.position.z = p.z();
+    pose.pose.orientation.z = std::sin(s.yaw / 2.0);
+    pose.pose.orientation.w = std::cos(s.yaw / 2.0);
+    path_msg.poses.push_back(pose);
+  }
+  path_msg.speeds = {0.0, 0.0};
+  pub_mpc_path_->publish(path_msg);
+  RCLCPP_ERROR(this->get_logger(), "Map hold: hold path sent to the MPC at (%.2f, %.2f)", s.pos.x(),
+               s.pos.y());
+}
+
+void MIGHTY_NODE::publishMapHold(bool hold) {
+  if (!pub_map_hold_) return;
+  std_msgs::msg::Bool msg;
+  msg.data = hold;
+  pub_map_hold_->publish(msg);
+  map_hold_pub_t_ = this->now().seconds();
+}
+
+// ----------------------------------------------------------------------------
+
 /**
  * @brief Publish Sefe Corridor Polyhedra
  */
@@ -2953,8 +3069,13 @@ void MIGHTY_NODE::unknownMapCallback(const sensor_msgs::msg::PointCloud2::ConstP
 
 void MIGHTY_NODE::esdfCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
   auto grid = EsdfGrid2D::fromOccupancyGrid(*msg, par_.esdf_truncation_distance);
-  std::lock_guard<std::mutex> lock(mtx_esdf_grid_);
-  esdf_grid_ = grid;
+  {
+    std::lock_guard<std::mutex> lock(mtx_esdf_grid_);
+    esdf_grid_ = grid;
+  }
+  // Stamp last, once the grid is in place, so the map guard never releases on a grid the planner
+  // cannot see yet.
+  esdf_2d_stamp_ns_.store(rclcpp::Time(msg->header.stamp).nanoseconds());
 }
 
 void MIGHTY_NODE::occ2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
@@ -2995,6 +3116,8 @@ void MIGHTY_NODE::occ2DCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr ms
     mighty_ptr_->updateMap2DOnly();
     publishPlanningMap2D(msg->header, msg->info.origin.position.z);
   }
+  // Stamp last, after the planning map is rebuilt (see esdfCallback).
+  occ_2d_stamp_ns_.store(rclcpp::Time(msg->header.stamp).nanoseconds());
 }
 
 void MIGHTY_NODE::goalFenceCallback(const std_msgs::msg::String::SharedPtr msg) {

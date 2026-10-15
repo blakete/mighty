@@ -84,6 +84,19 @@ parameters (`mighty_node`'s are a computed merge of `mighty.yaml` ←
 `hw_mighty_ground_robot.yaml` plus overrides; `goal_selector`'s are that same merge with
 `hw_goal_selector.yaml` layered on top — never hand-roll them as `ros2 run`).
 
+### Map-age hold (`map_max_age_sec`, `<ns>/map_hold`)
+
+When the `occ_2d_topic` / `esdf_2d_topic` header stamps get older than `map_max_age_sec`
+(1.5 s on hardware) the planner stops the robot: one two-point path to the MPC (it treats it
+as a reached goal and ramps to 0), no replans and no `planner_status`. `<ns>/map_hold`
+(`std_msgs/Bool`, latched, 1 Hz) is `true` meanwhile, and the goal selector pauses without
+dropping its frontier or a manual goal. Both resume on their own once the maps are fresh
+again. The stamp is the DLIO cloud time: a dead Orin / `local_mapper` / `mapping` makes the
+grids stop, while a dead lidar or DLIO leaves the elevation mapper republishing with a
+frozen stamp, so check them in that order when `map_hold` is `true`. The planner's own log
+lines are invisible on a rover (`--log-level error`) except these, which log at ERROR:
+`ros2 topic echo <ns>/map_hold` is the check.
+
 Only the planner and MPC panes gate on `wait_for_tf.py <ns>/map <ns>/odom` (the
 `/tf_static` startup-race fix); the state converter and goal selector never touch TF. `wait_for_tf.py`
 warns and continues on timeout, so the stack never deadlocks. Restarting the MPC pane is
