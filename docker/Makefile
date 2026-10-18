@@ -170,12 +170,12 @@ shell:
 # private mpc repo needs SSH — `make hw-build` forwards your ssh-agent, or with
 # no agent point SSH_KEY at a passphrase-free key:
 #     SSH_KEY=$HOME/.ssh/id_ed25519 make hw-build
+# hw-build is `mighty_hw.sh build`, which also labels the image with this
+# checkout's commit (org.opencontainers.image.revision, org.acl.git.dirty).
 # The SIM targets above are untouched.
 # ---------------------------------------------------------------------------
-HW_COMPOSE = docker compose -f compose.hw.yaml
-
 .PHONY: hw-build hw-up hw-down hw-attach hw-status hw-pull
-hw-build:  ; $(HW_COMPOSE) build --ssh default$(if $(SSH_KEY),=$(SSH_KEY))
+hw-build:  ; ./mighty_hw.sh build
 hw-up:     ; ./mighty_hw.sh start
 hw-down:   ; ./mighty_hw.sh stop
 hw-attach: ; tmux attach -t hw_mighty

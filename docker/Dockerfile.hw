@@ -200,4 +200,13 @@ COPY --from=mighty-build ${WS}/install ${WS}/install
 # not rely on this — mighty_hw.sh sends an explicit setup line — but a human
 # poking around inside should get the same environment.
 RUN printf 'source /opt/ros/humble/setup.bash\nsource %s/install/setup.bash\n' "${WS}" >> /root/.bashrc
+# Image provenance: the mighty commit this image was built from (which also fixes every dependency,
+# through mighty.repos) and whether that checkout had uncommitted or untracked changes. The build
+# context has no .git (Dockerfile.hw.dockerignore), so `mighty_hw.sh build` (make hw-build,
+# mighty_hw.sh rebuild) passes both in through compose.hw.yaml's build args; a bare `docker
+# compose build` gets "unknown". Last, so a new commit changes only this metadata, no cached layer.
+# Read back: docker inspect -f '{{json .Config.Labels}}' mighty-hw:local
+ARG GIT_SHA=unknown
+ARG GIT_DIRTY=unknown
+LABEL org.opencontainers.image.revision="${GIT_SHA}" org.acl.git.dirty="${GIT_DIRTY}"
 # Command comes from compose: the container only idles (`sleep infinity`).
