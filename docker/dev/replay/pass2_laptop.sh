@@ -37,8 +37,8 @@ docker run -d --name replay2 --network host --init --shm-size=256m --env-file "$
   -e ZENOH_SESSION_CONFIG_URI=/home/swarm/config/zenoh_session_config.json5 \
   -v "$D/dev:/home/swarm/config:ro" -v "$BAG:/bag:ro" -v "$HERE/restamp_relay.py:/relay.py:ro" \
   mighty-hw:local sleep infinity >/dev/null
-X() { docker exec replay2 bash -c "source /opt/ros/humble/setup.bash && source /home/swarm/code/mighty_ws/install/setup.bash && $1"; }
-docker exec -d replay2 bash -c "source /opt/ros/humble/setup.bash && source /home/swarm/code/mighty_ws/install/setup.bash && R=$R W=$W python3 - > /tmp/count.log 2>&1 <<'PY'
+X() { docker exec replay2 bash -c "source /opt/ros/jazzy/setup.bash && source /home/swarm/code/mighty_ws/install/setup.bash && $1"; }
+docker exec -d replay2 bash -c "source /opt/ros/jazzy/setup.bash && source /home/swarm/code/mighty_ws/install/setup.bash && R=$R W=$W python3 - > /tmp/count.log 2>&1 <<'PY'
 import rclpy, time, math, os
 from rclpy.node import Node
 from geometry_msgs.msg import Twist, PoseStamped
@@ -60,7 +60,7 @@ PY"
 T="/tf /tf_static /$R/dlio/odom_node/odom /$R/dlio/odom_node/pose /$R/occ_2d_topic /$R/esdf_2d_topic /$R/planning_occ_2d_topic /$R/persistent_map/grid"
 PAIRS="/tf=tf2_msgs/msg/TFMessage /tf_static=tf2_msgs/msg/TFMessage /$R/dlio/odom_node/odom=nav_msgs/msg/Odometry /$R/dlio/odom_node/pose=geometry_msgs/msg/PoseStamped /$R/occ_2d_topic=nav_msgs/msg/OccupancyGrid /$R/esdf_2d_topic=nav_msgs/msg/OccupancyGrid /$R/planning_occ_2d_topic=nav_msgs/msg/OccupancyGrid /$R/persistent_map/grid=nav_msgs/msg/OccupancyGrid"
 REMAP=""; for t in $T; do REMAP="$REMAP $t:=/replay$t"; done
-docker exec -d replay2 bash -c "source /opt/ros/humble/setup.bash && exec python3 /relay.py $PAIRS > /tmp/relay.log 2>&1"
+docker exec -d replay2 bash -c "source /opt/ros/jazzy/setup.bash && exec python3 /relay.py $PAIRS > /tmp/relay.log 2>&1"
 sleep 3
 X "ros2 bag play /bag --topics $T --remap $REMAP 2>&1 | grep -v '^$' | grep -v zenoh_transport | tail -1"
 sleep 20

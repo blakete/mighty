@@ -38,7 +38,7 @@ ARG WS=/home/swarm/code/mighty_ws
 ARG HW_DEPS="dynus_interfaces goal_selector_msgs mpc DecompROS2"
 
 # ---------- deps-src: pinned dependency sources ----------------------------------
-FROM ros:humble-ros-base AS deps-src
+FROM ros:jazzy-ros-base AS deps-src
 ARG WS
 ARG HW_DEPS
 SHELL ["/bin/bash", "-c"]
@@ -65,7 +65,7 @@ yaml.safe_dump({'repositories': {k: repos[k] for k in keep}}, sys.stdout)
 PY
 
 # ---------- deps-build: rosdep + colcon the dependency workspace ----------------
-FROM ros:humble-ros-base AS deps-build
+FROM ros:jazzy-ros-base AS deps-build
 ARG WS
 SHELL ["/bin/bash", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
@@ -82,11 +82,12 @@ RUN apt-get update && rosdep update \
  && rm -rf /var/lib/apt/lists/*
 # decomp_util first, on its own: decomp_rviz_plugins find_package()s it
 # without declaring the dependency in package.xml, so colcon cannot order
-# them in one invocation.
-RUN source /opt/ros/humble/setup.bash \
+# them in one invocation. decomp_test_node is DecompROS2's demo node: nothing
+# in mighty uses it, and it includes tf2_geometry_msgs.h, which Jazzy removed.
+RUN source /opt/ros/jazzy/setup.bash \
  && colcon build --packages-select decomp_util --cmake-args -DCMAKE_BUILD_TYPE=Release \
  && source install/setup.bash \
- && colcon build --packages-skip decomp_util --cmake-args -DCMAKE_BUILD_TYPE=Release \
+ && colcon build --packages-skip decomp_util decomp_test_node --cmake-args -DCMAKE_BUILD_TYPE=Release \
  && rm -rf build log
 
 # ---------- mighty-build: this checkout on top of the deps -----------------------
@@ -97,18 +98,19 @@ ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR ${WS}
 # The manifest alone first, so the apt layer below is keyed on package.xml and
 # a source edit re-runs only the colcon layer.
-# gazebo_ros/gazebo_plugins are declared <depend>s but only the BUILD_SIMULATION
-# targets use them; gazebo_msgs stays (fake_sim links it unconditionally, and it
-# is messages only). nlohmann-json3-dev: find_package()ed, not declared.
+# gazebo_msgs is the only Gazebo dependency left in package.xml (fake_sim links
+# it unconditionally; messages only, still released for Jazzy). gazebo_ros /
+# gazebo_plugins are not declared on Jazzy. nlohmann-json3-dev: find_package()ed,
+# not declared.
 COPY package.xml ${WS}/src/mighty/package.xml
 RUN apt-get update && rosdep update \
- && rosdep install -y --ignore-src --from-paths src --skip-keys "catkin ament_python gazebo_ros gazebo_plugins" \
+ && rosdep install -y --ignore-src --from-paths src --skip-keys "catkin ament_python" \
  && apt-get install -y --no-install-recommends nlohmann-json3-dev \
  && rm -rf /var/lib/apt/lists/*
 # Build context = the mighty repo root (compose: context ..). What ships is
 # filtered by Dockerfile.hw.dockerignore next to this file.
 COPY . ${WS}/src/mighty
-RUN source /opt/ros/humble/setup.bash && source install/setup.bash \
+RUN source /opt/ros/jazzy/setup.bash && source install/setup.bash \
  && colcon build --packages-select mighty \
         --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_SIMULATION=OFF -DBUILD_TESTING=OFF \
  && rm -rf build log
@@ -119,7 +121,7 @@ RUN mkdir -p /manifests && cd src \
  && find /manifests -exec touch -d @0 {} +
 
 # ---------- runtime: exec deps + the baked workspace -----------------------------
-FROM ros:humble-ros-base
+FROM ros:jazzy-ros-base
 ARG WS
 SHELL ["/bin/bash", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
@@ -163,41 +165,54 @@ COPY --from=mighty-build /manifests /tmp/manifests
 # pins exactly (rmw_zenoh 0.1.9-1jammy.20260907.200640, zenoh_cpp_vendor
 # 0.1.9-1jammy.20260723.020902), so ROS_SNAPSHOT below now serves both and nothing depends on
 # packages.ros.org. Snapshots are immutable, so this no longer rots.
-ARG ROS_SNAPSHOT=2026-09-14
-ARG RMW_ZENOH_CPP_VER=0.1.9-1jammy.20260907.200640
-ARG ZENOH_CPP_VENDOR_VER=0.1.9-1jammy.20260723.020902
+#
+# JAZZY (this branch; the Humble pins above are history and still apply to main's
+# image). rmw_zenoh does not bridge distros, so this image only talks to Jazzy peers
+# (e.g. the scout, pascal, whose host stack is Jazzy; its host build
+# 0.2.8-1noble.20251007 is no longer served by any repo).
+# Pinned to the 2026-09-11 snapshot (0.2.10, == stock packages.ros.org on that
+# date) for a reproducible image. Cross-build interop with a Jazzy host must be
+# checked with a TRANSIENT_LOCAL /tf_static round trip whenever either side moves.
+ARG ROS_SNAPSHOT=2026-09-11
+ARG RMW_ZENOH_CPP_VER=0.2.10-1noble.20260902.013525
+ARG ZENOH_CPP_VENDOR_VER=0.2.10-1noble.20260722.215006
 # snapshots.ros.org is signed by "ROS Snapshot builder" (AD19BAB3CBF125EA), NOT by the
 # Open Robotics key in ros2-archive-keyring.gpg that packages.ros.org uses. Vendored
 # here rather than pulled from a keyserver so the build needs no keyserver and cannot
 # silently pick up a different key; the fingerprint assert below is the tripwire.
 ARG ROS_SNAPSHOT_KEY_FPR=4B63CF8FDE49746E98FA01DDAD19BAB3CBF125EA
 COPY docker/keys/ros-snapshot-archive-keyring.asc /tmp/ros-snapshot.asc
-RUN gpg --dearmor < /tmp/ros-snapshot.asc > /usr/share/keyrings/ros-snapshot-archive-keyring.gpg \
+RUN . /etc/os-release \
+ && gpg --dearmor < /tmp/ros-snapshot.asc > /usr/share/keyrings/ros-snapshot-archive-keyring.gpg \
  && gpg --show-keys --with-colons /tmp/ros-snapshot.asc | awk -F: '/^fpr/{print $10; exit}' \
       | grep -qx "${ROS_SNAPSHOT_KEY_FPR}" \
  && rm -f /tmp/ros-snapshot.asc \
- && echo "deb [signed-by=/usr/share/keyrings/ros-snapshot-archive-keyring.gpg] http://snapshots.ros.org/humble/${ROS_SNAPSHOT}/ubuntu jammy main" \
+ && echo "deb [signed-by=/usr/share/keyrings/ros-snapshot-archive-keyring.gpg] http://snapshots.ros.org/jazzy/${ROS_SNAPSHOT}/ubuntu ${VERSION_CODENAME} main" \
         > /etc/apt/sources.list.d/ros2-snapshot.list \
- && printf 'Package: ros-humble-rmw-zenoh-cpp ros-humble-zenoh-cpp-vendor\nPin: origin snapshots.ros.org\nPin-Priority: 1001\n' \
+ && printf 'Package: ros-jazzy-rmw-zenoh-cpp ros-jazzy-zenoh-cpp-vendor\nPin: origin snapshots.ros.org\nPin-Priority: 1001\n' \
         > /etc/apt/preferences.d/99-rmw-zenoh-pin \
  && apt-get update && rosdep update \
  && rosdep install -y --ignore-src --dependency-types exec --from-paths /tmp/manifests \
-        --skip-keys "catkin ament_python gazebo_ros gazebo_plugins" \
+        --skip-keys "catkin ament_python" \
  && apt-get install -y --no-install-recommends \
-        ros-humble-rmw-zenoh-cpp=${RMW_ZENOH_CPP_VER} \
-        ros-humble-zenoh-cpp-vendor=${ZENOH_CPP_VENDOR_VER} \
+        ros-jazzy-rmw-zenoh-cpp=${RMW_ZENOH_CPP_VER} \
+        ros-jazzy-zenoh-cpp-vendor=${ZENOH_CPP_VENDOR_VER} \
         tmux python3-pip \
- && apt-mark hold ros-humble-rmw-zenoh-cpp ros-humble-zenoh-cpp-vendor \
- && test "$(dpkg-query -W -f='${Version}' ros-humble-rmw-zenoh-cpp)" = "${RMW_ZENOH_CPP_VER}" \
- && test "$(dpkg-query -W -f='${Version}' ros-humble-zenoh-cpp-vendor)" = "${ZENOH_CPP_VENDOR_VER}" \
+ && apt-mark hold ros-jazzy-rmw-zenoh-cpp ros-jazzy-zenoh-cpp-vendor \
+ && test "$(dpkg-query -W -f='${Version}' ros-jazzy-rmw-zenoh-cpp)" = "${RMW_ZENOH_CPP_VER}" \
+ && test "$(dpkg-query -W -f='${Version}' ros-jazzy-zenoh-cpp-vendor)" = "${ZENOH_CPP_VENDOR_VER}" \
  && rm -rf /var/lib/apt/lists/* /tmp/manifests
-# mpc_node imports casadi/do_mpc. Pinned to what the rovers ran natively;
-# numpy/scipy second so their pins win over do-mpc's resolver.
-RUN pip3 install --no-cache-dir casadi==3.6.7 do-mpc==5.1.1 \
- && pip3 install --no-cache-dir numpy==2.2.6 scipy==1.15.3
+# mpc_node imports casadi/do_mpc. casadi/do-mpc/scipy pinned to what the rovers
+# ran natively. Noble's pip refuses system-wide installs without
+# PIP_BREAK_SYSTEM_PACKAGES (PEP 668). numpy stays noble's apt 1.26: Jazzy's
+# rosidl Python extensions are built against numpy 1.x, and pip cannot replace a
+# Debian-installed numpy anyway ("RECORD file not found"); 'numpy<2' makes pip
+# keep it instead of upgrading (the Humble image on main pins pip numpy 2.2.6).
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+RUN pip3 install --no-cache-dir casadi==3.6.7 do-mpc==5.1.1 scipy==1.15.3 'numpy<2'
 COPY --from=mighty-build ${WS}/install ${WS}/install
 # Interactive shells (docker exec -it ... bash) see the workspace. The panes do
 # not rely on this — mighty_hw.sh sends an explicit setup line — but a human
 # poking around inside should get the same environment.
-RUN printf 'source /opt/ros/humble/setup.bash\nsource %s/install/setup.bash\n' "${WS}" >> /root/.bashrc
+RUN printf 'source /opt/ros/jazzy/setup.bash\nsource %s/install/setup.bash\n' "${WS}" >> /root/.bashrc
 # Command comes from compose: the container only idles (`sleep infinity`).

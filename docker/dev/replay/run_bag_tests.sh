@@ -69,7 +69,7 @@ docker run -d --name gs-tests --network host --init --env-file "$ENVF" \
   -e ZENOH_SESSION_CONFIG_URI=/home/swarm/config/zenoh_session_config.json5 \
   -v "$D/dev:/home/swarm/config:ro" -v "$REPO/scripts/tests:/tests:ro" -v "$REPO/config:/cfg:ro" \
   -v "$OUT:/out" mighty-hw:local sleep infinity >/dev/null || { echo "cannot start helper container" >&2; exit 2; }
-SRC='source /opt/ros/humble/setup.bash && source /home/swarm/code/mighty_ws/install/setup.bash'
+SRC='source /opt/ros/jazzy/setup.bash && source /home/swarm/code/mighty_ws/install/setup.bash'
 for m in monitor_trajectory_vs_map:trajectory_vs_map monitor_selector_contract:selector_contract; do
   script="${m%%:*}"; name="${m##*:}"
   docker exec -d gs-tests bash -c "$SRC && cd /tests && python3 $script.py --ns $NS --config /cfg/hw_mighty_ground_robot.yaml --out /out/$name.json ${EXTRA_MONITOR_ARGS:-} > /out/monitors/$script.stdout 2>&1"

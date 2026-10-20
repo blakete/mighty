@@ -18,7 +18,7 @@ the mighty repo root; every dependency is cloned *inside* the build at its
 | `mpc` | `git@gitlab.com:mit-acl/ugv/ugv_control/mpc.git` @ pin (**private** — needs SSH at build) |
 | `dynus_interfaces` | github @ pin |
 | `goal_selector_msgs` | github (public, https) @ pin |
-| `DecompROS2` (`decomp_util`, `decomp_ros_msgs`, `decomp_rviz_plugins`, `decomp_test_node`) | github @ pin |
+| `DecompROS2` (`decomp_util`, `decomp_ros_msgs`, `decomp_rviz_plugins`; `decomp_test_node` is skipped on Jazzy) | github @ pin |
 
 Nothing else on the host is an input: no sibling workspaces, no prebuilt tarballs.
 Change a dependency by bumping its pin in `mighty.repos` and rebuilding.
@@ -175,17 +175,17 @@ a `config/*.yaml` edit needs no rebuild at all (see *Parameters* below).
 
 ```bash
 docker run --rm mighty-hw:local bash -c '
-  source /opt/ros/humble/setup.bash &&
+  source /opt/ros/jazzy/setup.bash &&
   source /home/swarm/code/mighty_ws/install/setup.bash &&
   ros2 pkg list | grep -E "^(mighty|mpc|dynus_interfaces|goal_selector|decomp)" &&
-  dpkg-query -W ros-humble-rmw-zenoh-cpp ros-humble-zenoh-cpp-vendor &&
+  dpkg-query -W ros-jazzy-rmw-zenoh-cpp ros-jazzy-zenoh-cpp-vendor &&
   ros2 launch mighty onboard_mighty.launch.py --show-args 2>/dev/null | grep -c only_nodes'
 ```
 
 Expect, in order:
 
-1. seven packages — `mighty`, `mpc`, `dynus_interfaces`, `goal_selector_msgs`, `decomp_ros_msgs`,
-   `decomp_rviz_plugins`, `decomp_test_node`. `decomp_util` is a plain CMake package and
+1. six packages — `mighty`, `mpc`, `dynus_interfaces`, `goal_selector_msgs`, `decomp_ros_msgs`,
+   `decomp_rviz_plugins` (`decomp_test_node` is not built on Jazzy: it does not compile). `decomp_util` is a plain CMake package and
    never appears in `ros2 pkg list` — run
    `ls /home/swarm/code/mighty_ws/install/decomp_util` inside the image instead.
 2. both zenoh packages at exactly the pinned versions (see *The RMW pin* below). The
@@ -239,19 +239,25 @@ credentials of their own by default; `docker login registry.gitlab.com` first, o
 
 ### The RMW pin is fleet-wide state
 
-`Dockerfile.hw` pins `ros-humble-rmw-zenoh-cpp` and `ros-humble-zenoh-cpp-vendor` to one
+`Dockerfile.hw` pins `ros-jazzy-rmw-zenoh-cpp` and `ros-jazzy-zenoh-cpp-vendor` to one
 exact apt build from a dated `snapshots.ros.org` repo, `apt-mark hold`s them and asserts
 the installed versions at the end of the layer. This is not tidiness: two builds that both
 call themselves `0.1.9` are not wire-compatible for TRANSIENT_LOCAL topics, and `/tf_static`
 is one — a mismatched image plans normally and commands exactly zero (RR08, 2026-09-17).
+
+On this Jazzy branch the pins are the `2026-09-11` snapshot, `ros-jazzy-rmw-zenoh-cpp`
+`0.2.10-1noble.20260902.013525` and `ros-jazzy-zenoh-cpp-vendor`
+`0.2.10-1noble.20260722.215006`. rmw_zenoh does not bridge distros: this Jazzy image only
+talks to Jazzy peers. The Humble fleet image (rovers on `0.1.9` builds) is built from `main`.
+The `0.1.9` incident described above happened on Humble; the mechanism is the same here.
 
 Every container on a rover (drive, sensors, dlio, this one) must carry the same build. To
 move the fleet forward, bump all three ARGs together and rebuild **every** rover image in
 the same rollout. Candidate versions in a given snapshot:
 
 ```bash
-curl -s http://snapshots.ros.org/humble/<date>/ubuntu/dists/jammy/main/binary-amd64/Packages.gz \
-  | gunzip | awk '/^Package: ros-humble-(rmw-zenoh-cpp|zenoh-cpp-vendor)$/{p=1;print} p&&/^Version:/{print;p=0}'
+curl -s http://snapshots.ros.org/jazzy/<date>/ubuntu/dists/noble/main/binary-amd64/Packages.gz \
+  | gunzip | awk '/^Package: ros-jazzy-(rmw-zenoh-cpp|zenoh-cpp-vendor)$/{p=1;print} p&&/^Version:/{print;p=0}'
 ```
 
 `packages.ros.org` keeps only the newest build per version, which is why the pin cannot
