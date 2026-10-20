@@ -1,9 +1,11 @@
-FROM ros:humble
+FROM ros:jazzy
 
 LABEL Maintainer="Kota Kondo <kkondo@mit.edu>" \
-      Description="Ubuntu 22.04, ROS2 humble for MIGHTY"
+      Description="Ubuntu 24.04, ROS 2 Jazzy for MIGHTY"
 
-ENV ROS_DISTRO=humble
+ENV ROS_DISTRO=jazzy
+# Noble enforces PEP 668: allow system-wide pip installs
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
 ENV DEBIAN_FRONTEND=noninteractive
 
 # System packages
@@ -12,9 +14,11 @@ RUN apt-get update && apt-get upgrade -y && \
         git tmux vim wget tmuxp make gdb && \
     rm -rf /var/lib/apt/lists/*
 
-# ROS 2 dependencies
+# ROS 2 dependencies (gazebo_msgs is message-only; Gazebo Classic itself is not
+# released for Jazzy and is not installed; the Gazebo Harmonic port is not done, so only fake_sim-based
+# simulation is supported in this image)
 RUN apt-get update && apt-get install -y \
-        ros-${ROS_DISTRO}-gazebo-* \
+        ros-${ROS_DISTRO}-gazebo-msgs \
         ros-${ROS_DISTRO}-pcl-conversions \
         ros-${ROS_DISTRO}-example-interfaces \
         ros-${ROS_DISTRO}-pcl-ros \
@@ -50,7 +54,15 @@ RUN DUMMY=${DUMMY} git clone --depth 1 --branch ${MIGHTY_VERSION} https://github
 
 # Import every dependency (pinned in mighty.repos)
 WORKDIR ${MIGHTY_WS}
-RUN vcs import src < src/mighty/mighty.repos
+# Gazebo Classic simulation forks are skipped: they do not build on Jazzy.
+RUN python3 - <<'PY'
+import yaml
+skip = {"gazebo_ros_pkgs", "livox_laser_simulation_ros2", "realsense_gazebo_plugin", "uav_simulator"}
+d = yaml.safe_load(open("src/mighty/mighty.repos"))
+d["repositories"] = {k: v for k, v in d["repositories"].items() if k not in skip}
+yaml.safe_dump(d, open("/tmp/mighty_jazzy.repos", "w"))
+PY
+RUN vcs import src < /tmp/mighty_jazzy.repos
 
 # Move special-build deps out of mighty_ws into their own trees
 RUN mkdir -p ${DECOMP_WS}/src ${LIVOX_WS}/src && \
@@ -63,37 +75,37 @@ SHELL ["/bin/bash", "-c"]
 # Build parallelism — for amd64 emulation on Mac, limit with: --build-arg JOBS=4
 ARG JOBS=""
 
-# Build DecompROS2 (decomp_util first, then the rest)
+# Build DecompROS2 (decomp_util first, then the rest; decomp_test_node does not
+# compile on Jazzy)
 WORKDIR ${DECOMP_WS}
-RUN source /opt/ros/humble/setup.bash && \
+RUN source /opt/ros/jazzy/setup.bash && \
     colcon build --packages-select decomp_util \
                  ${JOBS:+--parallel-workers $JOBS} \
                  --cmake-args -DCMAKE_BUILD_TYPE=Release
-RUN source /opt/ros/humble/setup.bash && \
+RUN source /opt/ros/jazzy/setup.bash && \
     source ${DECOMP_WS}/install/setup.bash && \
-    colcon build ${JOBS:+--parallel-workers $JOBS} \
+    colcon build --packages-skip decomp_util decomp_test_node \
+                 ${JOBS:+--parallel-workers $JOBS} \
                  --cmake-args -DCMAKE_BUILD_TYPE=Release
 
-# Build Livox-SDK2 (cmake install to /usr/local)
+# Build Livox-SDK2 (cmake install to /usr/local). The pinned SDK lacks <cstdint>
+# includes, which GCC 13 (noble) no longer provides transitively: force-include it.
 WORKDIR ${LIVOX_SDK_DIR}
 RUN mkdir -p build && cd build && \
-    cmake .. && make -j${JOBS:-$(nproc)} && make install
+    cmake .. -DCMAKE_CXX_FLAGS="-include cstdint" && make -j${JOBS:-$(nproc)} && make install
 
 # Build livox_ros_driver2 (uses its own build.sh for package file setup)
 WORKDIR ${LIVOX_WS}/src/livox_ros_driver2
-RUN source /opt/ros/humble/setup.bash && ./build.sh humble
+RUN source /opt/ros/jazzy/setup.bash && ./build.sh jazzy
 
 # Build the MIGHTY workspace
 WORKDIR ${MIGHTY_WS}
-RUN source /opt/ros/humble/setup.bash && \
+RUN source /opt/ros/jazzy/setup.bash && \
     source ${DECOMP_WS}/install/setup.bash && \
     export CMAKE_PREFIX_PATH=${LIVOX_WS}/install/livox_ros_driver2:${DECOMP_WS}/install/decomp_util:${CMAKE_PREFIX_PATH} && \
     export MAKEFLAGS="-j${JOBS:-$(nproc)}" && \
     colcon build ${JOBS:+--parallel-workers $JOBS} \
                  --cmake-args -DCMAKE_BUILD_TYPE=Release -DUSE_SYSTEM_EIGEN3=ON
-
-# Gazebo audio fix
-RUN echo 'pcm.!default { type plug; slave.pcm "null" }' >> /usr/share/alsa/alsa.conf
 
 # Livox library path
 ENV LD_LIBRARY_PATH=${LIVOX_WS}/install/livox_ros_driver2/lib:/usr/local/lib:/usr/local/include
@@ -115,7 +127,7 @@ RUN echo 'alias tks="tmux kill-server"'                              >> ~/.bashr
 # Xpra: forwards individual windows efficiently (recommended for Mac)
 # Foxglove: web-based topic viewer
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        xpra xvfb libgl1-mesa-glx libgl1-mesa-dri \
+        xpra xvfb libgl1 libgl1-mesa-dri \
         ros-${ROS_DISTRO}-foxglove-bridge \
         psmisc && \
     rm -rf /var/lib/apt/lists/*
