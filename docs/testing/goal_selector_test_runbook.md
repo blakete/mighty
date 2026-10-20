@@ -9,9 +9,9 @@ Every monitor prints a text report and writes JSON with `--out`. Exit code 1 mea
 
 ## 0. Common setup
 
-- Image `mighty-hw:local` (ROS 2 Humble, `dynus_interfaces`, `goal_selector_msgs`, numpy, scipy, PyYAML).
+- Image `mighty-hw:local` (ROS 2 Jazzy, `dynus_interfaces`, `goal_selector_msgs`, numpy, scipy, PyYAML).
   Monitors need the same zenoh session as the stack: on a robot, run them with `docker exec -it hw-mighty bash`
-  and `source /opt/ros/humble/setup.bash && source /home/swarm/code/mighty_ws/install/setup.bash`, then
+  and `source /opt/ros/jazzy/setup.bash && source /home/swarm/code/mighty_ws/install/setup.bash`, then
   `cd <repo>/scripts/tests` (mount or copy the directory into the container; the wrapper mounts it at `/tests`).
 - Namespace: `--ns RR08` (default `$ROBOT_NAME`). Parameters are read from `config/hw_mighty_ground_robot.yaml`
   and `config/hw_goal_selector.yaml` (`/cfg/...` inside the wrapper's container); override on the command line.

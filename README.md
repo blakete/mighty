@@ -50,6 +50,8 @@ The full video is available at [https://youtu.be/Pvb-VPUdLvg](https://youtu.be/P
 
 MIGHTY has been tested on Ubuntu 22.04 with ROS 2 Humble. Four installation methods are available:
 
+> **Note:** The `feature/jazzy-mighty` branch targets Ubuntu 24.04 with ROS 2 Jazzy. Gazebo (Classic) simulation is not ported to Jazzy (it needs Gazebo Harmonic / ros_gz). `main` remains on Humble.
+
 | Method | Platform | Notes |
 |--------|----------|-------|
 | [Docker (Linux)](#docker-installation-linux) | Linux | Uses Docker Engine (apt install, **not** Docker Desktop) |
@@ -243,7 +245,7 @@ cd mighty_ws/src/mighty
 ```
 
 This automated script will:
-- Install ROS 2 Humble (if not already installed)
+- Install ROS 2 Jazzy on `feature/jazzy-mighty` (ROS 2 Humble on `main`) (if not already installed)
 - Install all system dependencies
 - Import all repositories from `mighty.repos` at tested commits
 - Build DecompROS2, Livox-SDK2, and livox_ros_driver2
@@ -300,7 +302,7 @@ python3 src/mighty/scripts/run_sim.py --mode gazebo -s ~/code/mighty_ws/install/
 
 ### Jetson Setup
 
-For NVIDIA Jetson boards (Orin Nano, Orin NX, AGX Orin, etc.) running JetPack with Ubuntu 22.04.
+For NVIDIA Jetson boards (Orin Nano, Orin NX, AGX Orin, etc.) running JetPack with Ubuntu 22.04 (Humble; see `main`, not Jazzy).
 
 Gazebo Classic is not available on ARM64, so the setup script automatically detects the Jetson platform and skips simulation-only packages. The planner and all hardware nodes build normally.
 

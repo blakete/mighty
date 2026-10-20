@@ -32,7 +32,7 @@
         "/home/kkondo/code/ros2_ws/install/turtlebot3_gazebo/include/**",
         "/home/kkondo/code/ros2_ws/install/turtlebot3_fake_node/include/**",
         "/home/kkondo/code/ros2_ws/install/my_robot_interfaces/include/**",
-        "/opt/ros/humble/include/**",
+        "/opt/ros/jazzy/include/**",
         "/home/kkondo/code/mighty_ws/src/DecompROS2/DecompUtil/include/**",
         "/home/kkondo/code/mighty_ws/src/DecompROS2/decomp_rviz_plugins/include/**",
         "/home/kkondo/code/mighty_ws/src/DecompROS2/decomp_test_node/include/**",

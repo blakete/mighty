@@ -1,5 +1,5 @@
 // Partial session config for rmw_zenoh_cpp tuned for MIGHTY multi-agent loads.
-// Merged over /opt/ros/humble/share/rmw_zenoh_cpp/config/DEFAULT_RMW_ZENOH_SESSION_CONFIG.json5.
+// Merged over /opt/ros/jazzy/share/rmw_zenoh_cpp/config/DEFAULT_RMW_ZENOH_SESSION_CONFIG.json5.
 //
 // Use:
 //   export ZENOH_SESSION_CONFIG_URI=/home/swarm/code/mighty_ws/install/mighty/share/mighty/config/zenoh_session.json5
@@ -13,7 +13,7 @@
 // transport dead (wait_before_close).
 //
 // Schema reference: rmw_zenoh ships its DEFAULT config at
-// /opt/ros/humble/share/rmw_zenoh_cpp/config/DEFAULT_RMW_ZENOH_SESSION_CONFIG.json5
+// /opt/ros/jazzy/share/rmw_zenoh_cpp/config/DEFAULT_RMW_ZENOH_SESSION_CONFIG.json5
 {
   transport: {
     link: {

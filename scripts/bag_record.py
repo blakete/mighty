@@ -52,7 +52,7 @@ PER_AGENT_TOPICS = [
     # NOTE: /poly_whole uses decomp_ros_msgs/PolyhedronArray, whose
     # libdecomp_ros_msgs__rosidl_typesupport_fastrtps_cpp.so isn't installed.
     # Excluded so the recorder doesn't bail. Re-enable after installing
-    # ros-humble-decomp-ros-msgs (or building decomp_ros_msgs from source).
+    # ros-jazzy-decomp-ros-msgs (or building decomp_ros_msgs from source).
     # ---- Sensors actually shown in RViz ----
     "/mid360_PointCloud2",
     "/d435/depth/color/points",

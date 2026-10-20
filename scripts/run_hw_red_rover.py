@@ -282,7 +282,7 @@ def generate_yaml(odom_type: str, rover_name: str, goal_type: int,
                 'pane-border-format': ' #{pane_index}: #{pane_title} ',
             },
             'shell_command_before': [] if docker_exec else [
-                f'source /opt/ros/humble/setup.bash',
+                f'source /opt/ros/jazzy/setup.bash',
             ],
             'panes': panes,
         }]

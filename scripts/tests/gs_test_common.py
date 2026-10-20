@@ -2,7 +2,7 @@
 """Shared helpers for the goal-selector / planner bag and hardware monitors.
 
 Not run directly. Imported by monitor_*.py, hw_check_*.py and summarize_run.py (all in this
-directory, so `python3 /tests/monitor_x.py` finds it). Needs ROS 2 Humble (rclpy,
+directory, so `python3 /tests/monitor_x.py` finds it). Needs ROS 2 Jazzy (rclpy,
 dynus_interfaces, goal_selector_msgs) only for the monitor scripts; `Report`, `Grid` and the
 parsing helpers are pure Python (numpy) and are also used by summarize_run.py on the host.
 

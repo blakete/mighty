@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-MIGHTY (Hermite Spline-based Efficient Trajectory Planning) is a ROS 2 (Humble) C++ package for real-time UAV trajectory planning with obstacle avoidance. It supports multi-agent simulations, Gazebo-based single-agent simulations, and hardware deployment.
+MIGHTY (Hermite Spline-based Efficient Trajectory Planning) is a ROS 2 (Jazzy on Ubuntu 24.04 on this branch; `main` stays Humble) C++ package for real-time UAV trajectory planning with obstacle avoidance. It supports multi-agent simulations, Gazebo-based single-agent simulations, and hardware deployment.
 
 ## Build Commands
 
@@ -13,7 +13,7 @@ The project uses `ament_cmake` (colcon) as its build system. The workspace root 
 ```bash
 # Build the entire workspace (from mighty_ws root)
 cd ~/code/mighty_ws
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 source ~/code/decomp_ws/install/setup.bash
 colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
 
@@ -23,6 +23,8 @@ colcon build --packages-select mighty --cmake-args -DCMAKE_BUILD_TYPE=Release
 # Source after building
 source install/setup.bash
 ```
+
+On this branch, `BUILD_SIMULATION` defaults to OFF because Gazebo Classic is not available on Jazzy. DecompROS2's `decomp_test_node` is skipped: build `decomp_util` first, then `colcon build --packages-skip decomp_util decomp_test_node`.
 
 Initial setup (installs all dependencies, clones repos, builds everything):
 ```bash
