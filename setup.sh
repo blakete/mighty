@@ -7,7 +7,14 @@ set -e
 #
 # Usage: ./setup.sh [-j N] [--jetson]
 #   -j N      Number of parallel jobs for building (default: all CPUs)
-#   --jetson  Skip packages unavailable on Jetson (ARM64), e.g. Gazebo
+#   --jetson  Low-memory mode for Jetson (ARM64): sequential build, 1 compiler job
+#
+# Targets Ubuntu 24.04 (noble) + ROS 2 Jazzy. Gazebo Classic simulation is not
+# available on Jazzy and is NOT set up here (Gazebo Harmonic port not done); use
+# the fake_sim-based multiagent simulation instead.
+
+# Ubuntu 24.04 (noble) enforces PEP 668: allow system-wide pip installs
+export PIP_BREAK_SYSTEM_PACKAGES=1
 
 # Parse arguments
 NUM_JOBS=$(nproc)
@@ -41,7 +48,7 @@ echo "MIGHTY Complete Setup Script"
 echo "============================================="
 echo "Using $NUM_JOBS parallel jobs for building"
 if $JETSON; then
-    echo "Jetson mode: skipping Gazebo and other x86-only packages"
+    echo "Jetson mode: sequential build with limited compiler parallelism"
 fi
 echo ""
 
@@ -77,13 +84,17 @@ echo "============================================="
 echo "STEP 1: Fixing Repository Issues"
 echo "============================================="
 
+if [ "$(. /etc/os-release && echo "$VERSION_CODENAME")" != "noble" ]; then
+    echo "WARNING: ROS 2 Jazzy targets Ubuntu 24.04 (noble); detected $(. /etc/os-release && echo "$PRETTY_NAME")."
+fi
+
 # Only add ROS 2 repository if none exists — never overwrite existing setup
 if ls /etc/apt/sources.list.d/ros2* > /dev/null 2>&1; then
     echo "ROS 2 repository already configured, keeping existing setup."
 else
     echo "No ROS 2 repository found, adding..."
     sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) main" | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
 fi
 
 # ============================================
@@ -98,20 +109,21 @@ sudo apt upgrade -y
 sudo apt-get install -q -y --no-install-recommends \
     git tmux vim wget tmuxp make openssh-server net-tools g++ xterm python3-pip
 
-pip install pymavlink
+# numpy stays <2: Jazzy's rosidl Python extensions are built against numpy 1.x
+pip install pymavlink 'numpy<2'
 sudo apt install -y libomp-dev libpcl-dev libeigen3-dev
 
 # ============================================
-# STEP 3: ROS 2 Humble Installation
+# STEP 3: ROS 2 Jazzy Installation
 # ============================================
 echo ""
 echo "============================================="
-echo "STEP 3: Installing ROS 2 Humble"
+echo "STEP 3: Installing ROS 2 Jazzy"
 echo "============================================="
 
 # Check if ROS 2 is already installed
-if [ ! -d "/opt/ros/humble" ]; then
-    echo "Installing ROS 2 Humble..."
+if [ ! -d "/opt/ros/jazzy" ]; then
+    echo "Installing ROS 2 Jazzy..."
     sudo apt update && sudo apt install -y locales
     sudo locale-gen en_US en_US.UTF-8
     sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
@@ -122,14 +134,14 @@ if [ ! -d "/opt/ros/humble" ]; then
 
     # ROS 2 repo already set up in Step 1 — just update
     sudo apt update
-    sudo apt install -y ros-humble-desktop
+    sudo apt install -y ros-jazzy-desktop
     sudo apt install -y ros-dev-tools
 else
-    echo "ROS 2 Humble already installed, skipping..."
+    echo "ROS 2 Jazzy already installed, skipping..."
 fi
 
-export ROS_DISTRO=humble
-source /opt/ros/humble/setup.bash
+export ROS_DISTRO=jazzy
+source /opt/ros/jazzy/setup.bash
 
 # ============================================
 # STEP 4: ROS Dependencies
@@ -139,6 +151,7 @@ echo "============================================="
 echo "STEP 4: Installing ROS Dependencies"
 echo "============================================="
 ROS_DEPS=(
+    ros-${ROS_DISTRO}-gazebo-msgs
     ros-${ROS_DISTRO}-pcl-conversions
     ros-${ROS_DISTRO}-example-interfaces
     ros-${ROS_DISTRO}-pcl-ros
@@ -155,11 +168,8 @@ ROS_DEPS=(
     build-essential
 )
 
-if ! $JETSON; then
-    ROS_DEPS+=( ros-${ROS_DISTRO}-gazebo-* )
-else
-    echo "Jetson mode: skipping Gazebo packages (not available on ARM64)"
-fi
+# Gazebo Classic (ros-*-gazebo-*) is not released for Jazzy: not installed
+# (only the message package gazebo_msgs, which mighty's package.xml still uses).
 
 sudo apt-get install -y "${ROS_DEPS[@]}"
 
@@ -187,10 +197,21 @@ else
     git fetch
 fi
 
-# Import all dependencies using mighty.repos
+# Import all dependencies using mighty.repos, minus the Gazebo Classic simulation
+# forks (gazebo_ros_pkgs, livox_laser_simulation_ros2, realsense_gazebo_plugin,
+# uav_simulator): they do not build on Jazzy (Gazebo Harmonic port not done).
 echo "Importing dependencies from mighty.repos..."
 cd "$MIGHTY_WS"
-vcs import src < src/mighty/mighty.repos || true
+JAZZY_REPOS="$(mktemp --suffix=.repos)"
+python3 - src/mighty/mighty.repos "$JAZZY_REPOS" <<'PY'
+import sys, yaml
+skip = {"gazebo_ros_pkgs", "livox_laser_simulation_ros2", "realsense_gazebo_plugin", "uav_simulator"}
+d = yaml.safe_load(open(sys.argv[1]))
+d["repositories"] = {k: v for k, v in d["repositories"].items() if k not in skip}
+yaml.safe_dump(d, open(sys.argv[2], "w"))
+PY
+vcs import src < "$JAZZY_REPOS" || true
+rm -f "$JAZZY_REPOS"
 
 # Move special dependencies to their workspaces
 if [ -d "$MIGHTY_WS/src/DecompROS2" ]; then
@@ -231,14 +252,15 @@ echo "============================================="
 echo "STEP 6: Building DecompROS2"
 echo "============================================="
 cd "$DECOMP_WS"
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 
 echo "Building decomp_util first (required)..."
 colcon build --packages-select decomp_util --parallel-workers "$NUM_JOBS" --cmake-args -DCMAKE_BUILD_TYPE=Release
 
+# decomp_test_node (DecompROS2 demo) does not compile on Jazzy, so skip it.
 echo "Building remaining decomp packages..."
 source "$DECOMP_WS/install/setup.bash"
-colcon build --parallel-workers "$NUM_JOBS" --cmake-args -DCMAKE_BUILD_TYPE=Release
+colcon build --packages-skip decomp_util decomp_test_node --parallel-workers "$NUM_JOBS" --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 # ============================================
 # STEP 6: Build Livox-SDK2
@@ -250,7 +272,8 @@ echo "============================================="
 cd "$LIVOX_SDK_DIR"
 mkdir -p build
 cd build
-cmake .. && make -j"$NUM_JOBS"
+# Pinned SDK lacks <cstdint> includes (GCC 13 on noble): force-include it
+cmake .. -DCMAKE_CXX_FLAGS="-include cstdint" && make -j"$NUM_JOBS"
 echo "Installing Livox-SDK2..."
 sudo make install
 
@@ -262,8 +285,8 @@ echo "============================================="
 echo "STEP 8: Building livox_ros_driver2"
 echo "============================================="
 cd "$LIVOX_WS/src/livox_ros_driver2"
-source /opt/ros/humble/setup.bash
-./build.sh humble
+source /opt/ros/jazzy/setup.bash
+./build.sh jazzy
 
 # ============================================
 # STEP 8: Build MIGHTY Workspace
@@ -273,7 +296,7 @@ echo "============================================="
 echo "STEP 9: Building MIGHTY Workspace"
 echo "============================================="
 cd "$MIGHTY_WS"
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 source "$DECOMP_WS/install/setup.bash"
 export CMAKE_PREFIX_PATH="$LIVOX_WS/install/livox_ros_driver2:$DECOMP_WS/install/decomp_util:$CMAKE_PREFIX_PATH"
 export LD_LIBRARY_PATH="$LIVOX_WS/install/livox_ros_driver2/lib:$LD_LIBRARY_PATH"
@@ -282,21 +305,11 @@ CMAKE_ARGS=(-DCMAKE_BUILD_TYPE=Release)
 COLCON_BUILD_ARGS=(--parallel-workers "$NUM_JOBS")
 
 if $JETSON; then
-    COLCON_BUILD_ARGS+=(
-        --packages-ignore
-            gazebo_dev
-            gazebo_ros
-            gazebo_plugins
-            gazebo_ros_pkgs
-            realsense_gazebo_plugin
-            ros2_livox_simulation
-        --executor sequential
-    )
-    CMAKE_ARGS+=(-DBUILD_SIMULATION=OFF)
+    COLCON_BUILD_ARGS+=(--executor sequential)
     # Limit compiler parallelism to avoid OOM on memory-constrained Jetson boards
     export CMAKE_BUILD_PARALLEL_LEVEL=1
     export MAKEFLAGS="-j1"
-    echo "Jetson mode: skipping Gazebo simulation packages, building sequentially to save RAM"
+    echo "Jetson mode: building sequentially to save RAM"
 fi
 
 colcon build "${COLCON_BUILD_ARGS[@]}" --cmake-args "${CMAKE_ARGS[@]}"
@@ -316,17 +329,17 @@ if ! grep -q "MIGHTY Setup" ~/.bashrc; then
     echo "# MIGHTY Setup" >> ~/.bashrc
     echo "# ============================================" >> ~/.bashrc
     echo "" >> ~/.bashrc
-    echo "# Source ROS 2 Humble" >> ~/.bashrc
-    echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
+    echo "# Source ROS 2 Jazzy" >> ~/.bashrc
+    echo "source /opt/ros/jazzy/setup.bash" >> ~/.bashrc
     echo "" >> ~/.bashrc
     echo "# ROS 2 RTPS network" >> ~/.bashrc
     echo "export ROS_DOMAIN_ID=20" >> ~/.bashrc
     echo "" >> ~/.bashrc
     echo "# Livox library path" >> ~/.bashrc
     echo "export LD_LIBRARY_PATH=$LIVOX_WS/install/livox_ros_driver2/lib:\$LD_LIBRARY_PATH:/usr/local/lib:/usr/local/include" >> ~/.bashrc
-    echo "export LD_LIBRARY_PATH=/opt/ros/humble/lib:\$LD_LIBRARY_PATH" >> ~/.bashrc
+    echo "export LD_LIBRARY_PATH=/opt/ros/jazzy/lib:\$LD_LIBRARY_PATH" >> ~/.bashrc
     echo "export LD_LIBRARY_PATH=$DECOMP_WS/install/decomp_ros_msgs/lib:\$LD_LIBRARY_PATH" >> ~/.bashrc
-    echo "export LD_LIBRARY_PATH=/opt/ros/humble/lib/$(dpkg --print-architecture | sed 's/amd64/x86_64-linux-gnu/' | sed 's/arm64/aarch64-linux-gnu/'):\$LD_LIBRARY_PATH" >> ~/.bashrc
+    echo "export LD_LIBRARY_PATH=/opt/ros/jazzy/lib/$(dpkg --print-architecture | sed 's/amd64/x86_64-linux-gnu/' | sed 's/arm64/aarch64-linux-gnu/'):\$LD_LIBRARY_PATH" >> ~/.bashrc
     echo "" >> ~/.bashrc
     echo "# Source MIGHTY workspaces" >> ~/.bashrc
     echo "source $DECOMP_WS/install/setup.bash" >> ~/.bashrc
