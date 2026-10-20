@@ -13,7 +13,8 @@
 #   mighty_hw.sh status            # container + pane status
 #   mighty_hw.sh logs [...]        # container PID-1 output (idle loop; panes hold the real logs)
 #   mighty_hw.sh pull [<tag>]      # fleet registry <tag> (default latest) -> mighty-hw:local
-#   mighty_hw.sh rebuild [...]     # stop + compose build + start (start flags forwarded)
+#   mighty_hw.sh build             # compose build, image labelled with this checkout's commit
+#   mighty_hw.sh rebuild [...]     # stop + build + start (start flags forwarded)
 #
 # PARAMETERS come from this checkout's config/ (bind-mounted over the image's
 # copy, see compose.hw.yaml): edit the YAML, Ctrl-C / Up / Enter the pane. No
@@ -76,8 +77,25 @@ dx() { echo "docker exec -it ${CONTAINER} bash -c '${SETUP} && $(wait_router) &&
 attach() { exec tmux attach -t "${SESSION}"; }
 
 usage() {
-    echo "usage: $0 {start [--dev|--monitor] | attach | stop | status | logs | pull [<tag>] | rebuild [start flags]}" >&2
+    echo "usage: $0 {start [--dev|--monitor] | attach | stop | status | logs | pull [<tag>] | build | rebuild [start flags]}" >&2
     exit 2
+}
+
+# Image provenance for `build`: Dockerfile.hw LABELs the image with this checkout's commit and
+# whether it has uncommitted or untracked changes, from compose.hw.yaml's MIGHTY_GIT_SHA /
+# MIGHTY_GIT_DIRTY build args. Not a git checkout: both are "unknown".
+export_image_revision() {
+    local repo="${SCRIPT_DIR}/.." status
+    MIGHTY_GIT_DIRTY=unknown
+    if MIGHTY_GIT_SHA="$(git -C "${repo}" rev-parse HEAD 2>/dev/null)"; then
+        if status="$(git -C "${repo}" status --porcelain 2>/dev/null)"; then
+            if [[ -n "${status}" ]]; then MIGHTY_GIT_DIRTY=true; else MIGHTY_GIT_DIRTY=false; fi
+        fi
+    else
+        MIGHTY_GIT_SHA=unknown
+    fi
+    export MIGHTY_GIT_SHA MIGHTY_GIT_DIRTY
+    echo "[mighty_hw] image revision ${MIGHTY_GIT_SHA} (uncommitted changes: ${MIGHTY_GIT_DIRTY})"
 }
 
 start() {
@@ -272,11 +290,15 @@ case "${cmd}" in
         docker tag "${REGISTRY}:${tag}" "${IMAGE}"
         echo "[mighty_hw] ${IMAGE} is now ${REGISTRY}:${tag}"
         ;;
-    rebuild)
+    build)
         # The build clones the private mpc repo over SSH: uses your agent, or
         # SSH_KEY=~/.ssh/<key> for a passphrase-free key when there is none.
+        export_image_revision
+        exec "${COMPOSE[@]}" build --ssh "default${SSH_KEY:+=${SSH_KEY}}"
+        ;;
+    rebuild)
         "$0" stop || true
-        "${COMPOSE[@]}" build --ssh "default${SSH_KEY:+=${SSH_KEY}}"
+        "$0" build
         exec "$0" start "$@"
         ;;
     *)

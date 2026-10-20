@@ -44,6 +44,7 @@ Nothing in mighty, mpc or dynus_interfaces links the Livox SDK or driver; the on
 ./mighty_hw.sh status
 ./mighty_hw.sh stop
 ./mighty_hw.sh pull [<tag>]    # fleet registry -> mighty-hw:local (default: latest)
+./mighty_hw.sh build           # build mighty-hw:local, labelled with this checkout's commit
 ./mighty_hw.sh rebuild         # stop + build + start
 ```
 
@@ -162,9 +163,14 @@ make hw-build                                   # with an ssh-agent
 SSH_KEY=$HOME/.ssh/id_ed25519 make hw-build     # without one
 ```
 
-Either is `docker compose -f compose.hw.yaml build --ssh default[=$SSH_KEY]`, producing
-`mighty-hw:local`. Build context is ~80 MB (the repo minus `.git`, `docker/`, benchmark
-results — see `Dockerfile.hw.dockerignore`).
+Either is `./mighty_hw.sh build`, which runs `docker compose -f compose.hw.yaml build --ssh
+default[=$SSH_KEY]`, producing `mighty-hw:local`. Build context is ~80 MB (the repo minus `.git`,
+`docker/`, benchmark results — see `Dockerfile.hw.dockerignore`).
+
+The image is labelled with the commit it was built from, `org.opencontainers.image.revision`,
+and `org.acl.git.dirty` (`true` if the checkout had uncommitted or untracked changes);
+`mighty_hw.sh build` passes both in, a bare `docker compose build` labels `unknown`. Read them
+back on any host: `docker inspect -f '{{json .Config.Labels}}' mighty-hw:local`.
 
 Cold, the two colcon stages dominate the wall clock. Layer order keeps repeat builds
 cheap: `deps-src`/`deps-build` are keyed on `mighty.repos` alone and re-run only when a

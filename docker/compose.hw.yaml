@@ -2,7 +2,7 @@
 # the RViz goal republisher are docker-exec'd into it from a HOST tmux session
 # 'hw_mighty' built by mighty_hw.sh (the single entrypoint).
 #
-#   build:   make hw-build            (docker compose build --ssh ...; see Makefile)
+#   build:   make hw-build            (mighty_hw.sh build: docker compose build --ssh ...)
 #   pull:    ./mighty_hw.sh pull [tag] (fleet registry -> mighty-hw:local)
 #   up:      ./mighty_hw.sh start [--dev]   (params: this checkout's config/, see volumes)
 #   attach:  tmux attach -t hw_mighty  (HOST session; Ctrl-C / Up / Enter restarts one node)
@@ -22,6 +22,11 @@ services:
     build:
       context: ..                      # the mighty repo root; deps are cloned in-image
       dockerfile: docker/Dockerfile.hw
+      args:
+        # Image provenance labels (Dockerfile.hw): `mighty_hw.sh build` exports these from
+        # this checkout; a bare `docker compose build` labels the image "unknown".
+        GIT_SHA: ${MIGHTY_GIT_SHA:-unknown}
+        GIT_DIRTY: ${MIGHTY_GIT_DIRTY:-unknown}
     image: mighty-hw:local
     container_name: hw-mighty
     network_mode: host                 # reach the host rmw_zenohd on :7447
