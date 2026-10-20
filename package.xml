@@ -11,6 +11,7 @@
   <buildtool_depend>ament_cmake_python</buildtool_depend>
 
   <depend>rclcpp</depend>
+  <depend>ament_index_cpp</depend>
   <depend>rclpy</depend>
   <depend>rclcpp_components</depend>
   <depend>example_interfaces</depend>
@@ -19,14 +20,13 @@
   <depend>visualization_msgs</depend>
   <depend>decomp_ros_msgs</depend>
   <depend>gazebo_msgs</depend>
-  <depend>gazebo_ros</depend>
-  <depend>gazebo_plugins</depend>
+  <!-- gazebo_ros / gazebo_plugins (Gazebo Classic) are not released for Jazzy; only the
+       BUILD_SIMULATION targets used them, and those are not ported to Gazebo Harmonic yet. -->
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>decomp_rviz_plugins</depend>
-  <depend>decomp_test_node</depend>
   <depend>std_srvs</depend>
   <depend>pcl_ros</depend>
   <depend>tf2_ros</depend>

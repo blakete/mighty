@@ -13,8 +13,11 @@ endif()
 # avoid Found-related error (ref: https://stackoverflow.com/questions/18327197/opencv-is-considered-to-be-not-found)
 set(decomp_rviz_plugins_FOUND 1)
 
-# Option to disable Gazebo-dependent targets (e.g. on Jetson/ARM64)
-option(BUILD_SIMULATION "Build Gazebo simulation targets" ON)
+# Option to enable Gazebo-dependent targets. OFF by default on the Jazzy branch:
+# these targets need Gazebo Classic (gazebo, gazebo_ros), which Jazzy does not ship,
+# and they are not yet ported to Gazebo Harmonic / ros_gz. fake_sim is not one of
+# them (it needs only gazebo_msgs, which Jazzy still ships).
+option(BUILD_SIMULATION "Build Gazebo simulation targets" OFF)
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
@@ -30,6 +33,7 @@ if(BUILD_SIMULATION)
 endif()
 
 find_package(rclcpp REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(rclpy REQUIRED)
 find_package(rclcpp_components REQUIRED)
 find_package(example_interfaces REQUIRED)
@@ -38,7 +42,6 @@ find_package(Eigen3 REQUIRED)
 find_package(decomp_util REQUIRED)
 find_package(decomp_ros_msgs REQUIRED)
 find_package(decomp_rviz_plugins REQUIRED)
-find_package(decomp_test_node REQUIRED)
 find_package(PCL REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
@@ -91,7 +94,7 @@ set_target_properties(goal_fence PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # add executables
 add_executable(mighty src/mighty/mighty_node.cpp src/mighty/mighty.cpp src/hgp/hgp_manager.cpp src/hgp/utils.cpp src/hgp/hgp_planner.cpp src/hgp/graph_search.cpp src/mighty/utils.cpp src/mighty/lbfgs_solver.cpp src/mighty/lbfgs_solver_utils.cpp)
 target_link_libraries(mighty ${PCL_LIBRARIES} map2d goal_fence)
-ament_target_dependencies(mighty rclcpp example_interfaces dynus_interfaces goal_selector_msgs visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
+ament_target_dependencies(mighty rclcpp ament_index_cpp example_interfaces dynus_interfaces goal_selector_msgs visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
 # Goal selector: ROS-free core (linkable by tests) + thin ROS node.
 # The core pulls in nav_msgs headers via OccGrid2D but no rclcpp.
@@ -111,21 +114,21 @@ ament_target_dependencies(goal_selector rclcpp dynus_interfaces goal_selector_ms
 # Add odom to state converter
 add_executable(convert_odom_to_state src/mighty/convert_odom_to_state.cpp)
 target_link_libraries(convert_odom_to_state)
-ament_target_dependencies(convert_odom_to_state rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 sensor_msgs std_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen)
+ament_target_dependencies(convert_odom_to_state rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 sensor_msgs std_msgs decomp_rviz_plugins tf2_geometry_msgs tf2 tf2_ros tf2_eigen)
 
 # Add vicon to state converter
 add_executable(convert_vicon_to_state src/mighty/convert_vicon_to_state.cpp)
 target_link_libraries(convert_vicon_to_state)
-ament_target_dependencies(convert_vicon_to_state rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen)
+ament_target_dependencies(convert_vicon_to_state rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs decomp_rviz_plugins tf2_geometry_msgs tf2 tf2_ros tf2_eigen)
 
 # Add the executable for the lbfgs solver test file
 add_executable(test_lbfgs_solver src/test/test_lbfgs_solver.cpp src/mighty/lbfgs_solver.cpp src/mighty/lbfgs_solver_utils.cpp)
-ament_target_dependencies(test_lbfgs_solver rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs)
+ament_target_dependencies(test_lbfgs_solver rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs decomp_rviz_plugins tf2_geometry_msgs)
 
 # Add the fake_sim executable (uses gazebo_msgs only, no Gazebo library needed)
 add_executable(fake_sim src/mighty/fake_sim.cpp)
 target_link_libraries(fake_sim)
-ament_target_dependencies(fake_sim rclcpp rclcpp_components visualization_msgs dynus_interfaces sensor_msgs gazebo_msgs sensor_msgs tf2 tf2_ros nav_msgs)
+ament_target_dependencies(fake_sim rclcpp ament_index_cpp rclcpp_components visualization_msgs dynus_interfaces sensor_msgs gazebo_msgs sensor_msgs tf2 tf2_ros nav_msgs)
 
 # Simulation-only targets (require Gazebo, not available on ARM64/Jetson)
 if(BUILD_SIMULATION)
@@ -223,14 +226,14 @@ if(BUILD_TESTING)
     src/test/test_map_2d_tristate.cpp)
   target_link_libraries(test_map_2d_tristate ${PCL_LIBRARIES} map2d goal_fence)
   ament_target_dependencies(test_map_2d_tristate
-    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
+    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
   ament_add_gtest(test_graph_search_unknown_cost
     src/test/test_graph_search_unknown_cost.cpp
     src/hgp/graph_search.cpp)
   target_link_libraries(test_graph_search_unknown_cost ${PCL_LIBRARIES} map2d goal_fence)
   ament_target_dependencies(test_graph_search_unknown_cost
-    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
+    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
   # planner New Plan tests
   # 2D global path / goal handling / PARTIAL, and the executable-prefix trim, driven through
@@ -241,7 +244,7 @@ if(BUILD_TESTING)
     src/mighty/utils.cpp)
   target_link_libraries(test_planner_unknown_paths ${PCL_LIBRARIES} map2d goal_fence)
   ament_target_dependencies(test_planner_unknown_paths
-    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
+    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
   ament_add_gtest(test_planner_prefix_trim
     src/test/test_planner_prefix_trim.cpp
@@ -249,7 +252,7 @@ if(BUILD_TESTING)
     src/mighty/utils.cpp)
   target_link_libraries(test_planner_prefix_trim ${PCL_LIBRARIES} map2d goal_fence)
   ament_target_dependencies(test_planner_prefix_trim
-    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
+    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
   # Geofence keep-out in the planner's 2D map (goal_fence polygons -> A*), through solveHGP.
   ament_add_gtest(test_planner_keepout
@@ -258,7 +261,7 @@ if(BUILD_TESTING)
     src/mighty/utils.cpp)
   target_link_libraries(test_planner_keepout ${PCL_LIBRARIES} map2d goal_fence)
   ament_target_dependencies(test_planner_keepout
-    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
+    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
   # goal_fence rasterizer == goalFenceAllows at every cell centre (ROS-free).
   ament_add_gtest(test_goal_fence_raster src/test/test_goal_fence_raster.cpp)
@@ -277,7 +280,7 @@ if(BUILD_TESTING)
     src/mighty/utils.cpp)
   target_link_libraries(test_planner_terminal_goal ${PCL_LIBRARIES} map2d goal_fence)
   ament_target_dependencies(test_planner_terminal_goal
-    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
+    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
   # HGPManager mapper-grid handoff locking (no rclcpp::init).
   ament_add_gtest(test_hgp_manager_2d
@@ -289,7 +292,7 @@ if(BUILD_TESTING)
     src/mighty/utils.cpp)
   target_link_libraries(test_hgp_manager_2d ${PCL_LIBRARIES} map2d goal_fence)
   ament_target_dependencies(test_hgp_manager_2d
-    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins decomp_test_node tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
+    rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3 decomp_ros_msgs sensor_msgs std_msgs nav_msgs decomp_rviz_plugins tf2_geometry_msgs tf2 tf2_ros tf2_eigen std_srvs pcl_ros)
 
   ament_add_gtest(test_frontier_detector
     src/test/test_frontier_detector.cpp
@@ -328,7 +331,7 @@ if(BUILD_TESTING)
     src/mighty/lbfgs_solver_utils.cpp)
   ament_target_dependencies(test_gradient_check
     rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3
-    decomp_ros_msgs sensor_msgs std_msgs decomp_rviz_plugins decomp_test_node
+    decomp_ros_msgs sensor_msgs std_msgs decomp_rviz_plugins
     tf2_geometry_msgs)
 
   ament_add_gtest(test_formation_cost
@@ -337,7 +340,7 @@ if(BUILD_TESTING)
     src/mighty/lbfgs_solver_utils.cpp)
   ament_target_dependencies(test_formation_cost
     rclcpp example_interfaces dynus_interfaces visualization_msgs Eigen3
-    decomp_ros_msgs sensor_msgs std_msgs decomp_rviz_plugins decomp_test_node
+    decomp_ros_msgs sensor_msgs std_msgs decomp_rviz_plugins
     tf2_geometry_msgs)
 
   # goal_selector tests (lifecycle/contract)

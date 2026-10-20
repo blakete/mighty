@@ -17,13 +17,13 @@
 
 #include <Eigen/Dense>
 
-#include <message_filters/subscriber.h>
-#include <message_filters/sync_policies/approximate_time.h>
-#include <message_filters/time_synchronizer.h>
+#include <message_filters/subscriber.hpp>
+#include <message_filters/sync_policies/approximate_time.hpp>
+#include <message_filters/time_synchronizer.hpp>
 #include <pcl_conversions/pcl_conversions.h>
-#include <tf2_eigen/tf2_eigen.h>
-#include <tf2_ros/buffer.h>
-#include <tf2_ros/transform_listener.h>
+#include <tf2_eigen/tf2_eigen.hpp>
+#include <tf2_ros/buffer.hpp>
+#include <tf2_ros/transform_listener.hpp>
 
 #include <dynus_interfaces/msg/dyn_traj.hpp>
 #include <dynus_interfaces/msg/dyn_traj_array.hpp>
@@ -78,8 +78,8 @@
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "std_msgs/msg/color_rgba.hpp"
 #include "std_srvs/srv/empty.hpp"
-#include "tf2_ros/create_timer_ros.h"
-#include "tf2_ros/message_filter.h"
+#include "tf2_ros/create_timer_ros.hpp"
+#include "tf2_ros/message_filter.hpp"
 
 typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::PointCloud2,
                                                         sensor_msgs::msg::PointCloud2>
