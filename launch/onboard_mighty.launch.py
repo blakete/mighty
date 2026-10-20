@@ -71,7 +71,8 @@ def generate_launch_description():
     use_onboard_localization_arg = DeclareLaunchArgument('use_onboard_localization', default_value='false', description='Use onboard localization (DLIO) vs Vicon')
     depth_camera_name_arg = DeclareLaunchArgument('depth_camera_name', default_value='d435', description='Depth camera name for topic remapping')
     robot_type_arg = DeclareLaunchArgument('robot_type', default_value='quadrotor', description='Robot type: quadrotor, red_rover, star_robot')
-    num_agents_arg = DeclareLaunchArgument('num_agents', default_value='10', description='Number of agents (for frame alignment subscriptions)')
+    num_agents_arg = DeclareLaunchArgument('num_agents', default_value='',
+        description='Override num_agents, the number of agents for frame alignment subscriptions (empty = use config default)')
     map_frame_id_arg = DeclareLaunchArgument('map_frame_id', default_value='',
         description='Override map frame ID (empty = auto from use_hardware)')
     use_frame_alignment_arg = DeclareLaunchArgument('use_frame_alignment', default_value='',
@@ -134,7 +135,7 @@ def generate_launch_description():
         use_onboard_localization = convert_str_to_bool(LaunchConfiguration('use_onboard_localization').perform(context))
         depth_camera_name = LaunchConfiguration('depth_camera_name').perform(context)
         robot_type = LaunchConfiguration('robot_type').perform(context)
-        num_agents = int(LaunchConfiguration('num_agents').perform(context))
+        num_agents_str = LaunchConfiguration('num_agents').perform(context)
         map_frame_id_override = LaunchConfiguration('map_frame_id').perform(context)
         use_frame_alignment_str = LaunchConfiguration('use_frame_alignment').perform(context)
         sim_frame_offset_qz_str = LaunchConfiguration('sim_frame_offset_qz').perform(context)
@@ -197,7 +198,8 @@ def generate_launch_description():
         # Map frame id: hardware uses per-agent map frame, simulation uses global "map"
         map_frame_id = map_frame_id_override if map_frame_id_override else (f'{namespace}/map' if use_hardware else 'map')
         parameters['map_frame_id'] = map_frame_id
-        parameters['num_agents'] = num_agents
+        if num_agents_str:
+            parameters['num_agents'] = int(num_agents_str)
         if use_frame_alignment_str:
             parameters['use_frame_alignment'] = convert_str_to_bool(use_frame_alignment_str)
         if sim_frame_offset_qz_str:

@@ -13,6 +13,11 @@ files unchanged. An overlay holds only the keys that should differ on (or stay p
 vehicle; spell them like the fleet files (`exploration.enabled: true`). Any other top-level section
 is an error.
 
+The launch file always sets `map_frame_id`, `file_path` and `use_benchmark` itself, so an overlay
+cannot change those. Override arguments that default to empty (`num_agents`, `use_frame_alignment`,
+`sim_frame_offset_*`, `use_formation`, `formation_*`) win only when they are passed, so an
+overlay can set those keys.
+
 ```yaml
 # config/vehicles/JK02.yaml
 mighty_node:
