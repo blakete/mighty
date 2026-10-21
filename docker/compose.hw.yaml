@@ -76,4 +76,4 @@ services:
       - "${ROVER_CONFIG_DIR:-/home/swarm/config}:/home/swarm/config:ro"
     init: true
     restart: "no"
-    command: ["bash", "-c", "source /opt/ros/humble/setup.bash && exec ros2 run rmw_zenoh_cpp rmw_zenohd"]
+    command: ["bash", "-c", "source /opt/ros/$${ROS_DISTRO}/setup.bash && exec ros2 run rmw_zenoh_cpp rmw_zenohd"]
