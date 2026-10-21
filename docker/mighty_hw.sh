@@ -69,7 +69,7 @@ COMPOSE=(docker compose -f "${SCRIPT_DIR}/compose.hw.yaml")
 # Ctrl-C -> Up -> Enter re-runs it too. wait_router is a function, not a
 # constant, because --dev moves the port after the flags are parsed.
 # $ROS_DISTRO is literal here and expands INSIDE the container, to the image's
-# distro (humble or jazzy, see Dockerfile.hw) — never the host's.
+# distro (jazzy, or humble for an image built from humble-final) — never the host's.
 SETUP='source /opt/ros/$ROS_DISTRO/setup.bash && source /home/swarm/code/mighty_ws/install/setup.bash'
 wait_router() {
     echo "until (echo >/dev/tcp/127.0.0.1/${ZENOH_ROUTER_PORT}) 2>/dev/null; do echo \"waiting for zenoh router on :${ZENOH_ROUTER_PORT}...\"; sleep 2; done"
