@@ -6,7 +6,7 @@ repositories:
     version: 9bed2cfbc4bf96769b879a6999d9ce32533ef06a
   direct_lidar_inertial_odometry:
     type: git
-    url: git@github.com:blakete/direct_lidar_inertial_odometry.git
+    url: git@gitlab.com:mit-acl/ugv/third_party/direct_lidar_inertial_odometry.git
     version: 73c24893eb3d2eb6baa9f75fdc905483b201255c
   dynus_interfaces:
     type: git
@@ -47,7 +47,7 @@ repositories:
   # livox_ros_driver2 built in livox_ws via its own build.sh)
   livox_ros_driver2:
     type: git
-    url: git@github.com:blakete/livox_ros_driver2.git
+    url: git@gitlab.com:mit-acl/ugv/third_party/livox_ros_driver2.git
     # fix/build-vs-sdk-1.2.5 — f103b4e + numeric-compare patch so it compiles vs SDK v1.2.5
     version: 37a62915b4e3f82ce4fbf5bbf7bc16b3ce498aaa
   Livox-SDK2:
